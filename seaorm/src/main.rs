@@ -1,14 +1,13 @@
 // 第一版,将xlsx文件内容导入sqlite数据库
 
-
 // --- 依赖项导入 ---
-use anyhow::{anyhow, Result};
-use calamine::{open_workbook, Data, Reader, Xlsx};
+use anyhow::{Result, anyhow};
+use calamine::{Data, Reader, Xlsx, open_workbook};
 use chrono::NaiveDateTime;
 use sea_orm::entity::prelude::{DateTime, Decimal};
 use sea_orm::{
-    sea_query::OnConflict, ActiveValue, ConnectionTrait, Database, DatabaseConnection,
-    EntityTrait, Schema,
+    ActiveValue, ConnectionTrait, Database, DatabaseConnection, EntityTrait, Schema,
+    sea_query::OnConflict,
 };
 use std::str::FromStr;
 
@@ -58,8 +57,7 @@ async fn import_data(db: &DatabaseConnection, file_path: &str) -> Result<()> {
         .clone();
 
     // 修复了之前版本中奇怪的 range 获取逻辑，恢复到标准的处理方式
-    let range = workbook
-        .worksheet_range(&sheet_name)?;
+    let range = workbook.worksheet_range(&sheet_name)?;
 
     let active_models: Vec<ActiveModel> = range
         .rows()
@@ -78,7 +76,10 @@ async fn import_data(db: &DatabaseConnection, file_path: &str) -> Result<()> {
         return Ok(());
     }
 
-    println!("共读取 {} 条有效数据，准备写入数据库...", active_models.len());
+    println!(
+        "共读取 {} 条有效数据，准备写入数据库...",
+        active_models.len()
+    );
 
     // 在 payment_order_id 冲突时，什么都不做
     let on_conflict = OnConflict::column(transaction::Column::PaymentOrderId)
@@ -90,7 +91,7 @@ async fn import_data(db: &DatabaseConnection, file_path: &str) -> Result<()> {
         .exec(db)
         .await;
 
-  match result {
+    match result {
         Ok(res) => {
             println!("数据导入成功,最后插入的ID: {:?}", res.last_insert_id);
         }
@@ -123,14 +124,13 @@ fn row_to_active_model(row: &[Data]) -> Result<ActiveModel> {
         .ok_or_else(|| anyhow!("第0列 '序号' 不能为空"))?
         .parse()?;
 
-    let payment_order_id = get_string(1)
-        .ok_or_else(|| anyhow!("第1列 '支付订单号' 不能为空"))?;
+    let payment_order_id = get_string(1).ok_or_else(|| anyhow!("第1列 '支付订单号' 不能为空"))?;
 
-    let transaction_time: Option<DateTime> = get_string(5)
-        .and_then(|s| NaiveDateTime::parse_from_str(&s, "%Y%m%d%H%M%S").ok());
+    let transaction_time: Option<DateTime> =
+        get_string(5).and_then(|s| NaiveDateTime::parse_from_str(&s, "%Y%m%d%H%M%S").ok());
 
-    let transaction_amount: Option<Decimal> = get_string(7)
-        .and_then(|s| Decimal::from_str(&s).ok());
+    let transaction_amount: Option<Decimal> =
+        get_string(7).and_then(|s| Decimal::from_str(&s).ok());
 
     let model = ActiveModel {
         serial_number: ActiveValue::Set(serial_number),

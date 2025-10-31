@@ -1,0 +1,44 @@
+好的，既然核心的语言支持和调试已经配置完毕，接下来是一些能进一步提升您 Rust 开发体验的“生活质量 (Quality of Life)”类插件。
+
+  Cargo.toml 依赖管理
+
+  这两个插件能让您在 Cargo.toml 文件中的工作更轻松。
+
+   1. crates (`serayuzgur.crates`)
+       * 功能：当您在 Cargo.toml 中查看依赖项时，它会自动提示每个 crate 的最新版本，并能快速帮您更新版本号。这对于保持依赖最新和避免手动去
+         crates.io 网站查询非常有用。
+
+   2. Even Better TOML (`tamasfe.even-better-toml`)
+       * 功能：为 .toml 文件（包括 Cargo.toml）提供更好的语法高亮、格式验证和代码提示。它让 Cargo.toml 文件看起来更清晰，也更容易编辑。
+
+  改善代码审查和错误提示
+
+   3. Error Lens (`usernamehw.errorlens`)
+       * 功能：这个插件极大地改善了错误和警告的显示方式。它会将 Rust
+         编译器产生的错误信息直接显示在问题代码行的旁边，而不是需要您将鼠标悬停在波浪线上才显示。这对于快速定位和理解编译错误非常有帮助。
+
+   4. GitLens — Git supercharged (`eamodio.gitlens`)
+       * 功能：虽然不是 Rust 专用插件，但它对任何使用 Git 的项目都是神器。它能将 Git 的功能深度集成到您的编辑器中，例如：
+           * 在每一行代码旁边显示该行的最后一次提交信息（Git Blame）。
+           * 轻松查看文件的修改历史。
+           * 比较不同分支或提交之间的代码差异。
+
+  AI 代码辅助 (可选)
+
+  我知道您之前希望移除 Copilot，如果您对 AI 辅助编码完全不感兴趣，可以跳过这一条。但如果您只是不喜欢 Copilot，可以考虑其他的选择。
+
+   5. Tabnine AI Autocomplete (`TabNine.tabnine-vscode`)
+       * 功能：这是另一个流行的 AI 代码补全工具，也是 Copilot
+         的一个主要替代品。它同样能提供智能的代码建议和补全，并且它有一个免费版本，可以在本地运行，为您的代码提供上下文感知的补全建议。
+
+  总结
+
+  强烈推荐安装：
+
+   * `serayuzgur.crates`
+   * `tamasfe.even-better-toml`
+   * `usernamehw.errorlens`
+   * `eamodio.gitlens`
+
+  这些插件与您已经安装的 rust-analyzer 和 CodeLLDB 配合，将构成一个非常现代化且高效的 Rust 开发环境。您可以直接在 VSCode 扩展市场搜索它们的
+  ID 进行安装。
