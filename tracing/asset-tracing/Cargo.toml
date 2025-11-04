@@ -1,0 +1,8 @@
+[package]
+name = "asset-tracing"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+calamine = "0.31.0"
+sysinfo = "0.37.2"

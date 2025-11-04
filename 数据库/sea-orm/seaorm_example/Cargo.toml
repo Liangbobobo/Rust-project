@@ -1,0 +1,12 @@
+[package]
+name = "seaorm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+calamine = "0.31.0"
+sea-orm = { version = "1.1.17", features = [ "sqlx-sqlite", "runtime-tokio-rustls", "macros" ] }
+tokio = { version = "1", features = ["full"] }
+chrono = "0.4"
+rust_decimal = "1.35"
