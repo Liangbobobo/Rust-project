@@ -1,6 +1,6 @@
 不能有仓库密钥
+不能上传单个大于50M的文件
 
-本地上传大文件时 要谨慎
 
 关于换行符:
 git config --global core.autocrlf true
@@ -19,7 +19,6 @@ error: please commit or stash them.
 git reset --hard HEAD
 
 2. 储藏 (Stash) 您的修改 (推荐)
-
 
 git stash
 git pull --rebase origin main
