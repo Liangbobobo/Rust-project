@@ -1,4 +1,6 @@
+不能有仓库密钥
 
+本地上传大文件时 要谨慎
 
 关于换行符:
 git config --global core.autocrlf true
