@@ -1,0 +1,78 @@
+// --release 的配置
+[profile.release]
+strip = true
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+//确认eframe 的依赖启用了 wgpu 特性
+
+
+
+
+ 如何使用：
+  配置好后，始终使用 --release 标志来构建和运行您的应用：
+
+   1 cargo run --release
+
+  2. 渲染后端选择与配置
+
+  如前所述，egui-wgpu 通常是性能最佳的选择。
+
+  a. 确认依赖：
+  在 Cargo.toml 中，确保您 eframe 的依赖启用了 wgpu 特性。eframe 是 egui 的官方应用框架。
+
+   1 [dependencies]
+   2 # 确保 features 列表中包含 "wgpu"
+   3 # 如果您看到了 "glow"，可以考虑替换为 "wgpu" 以获取更佳性能
+   4 eframe = "0.27.0" # 请使用您项目对应的版本
+  注意：`eframe` 默认可能不启用任何渲染后端，您需要显式选择一个。如果您同时启用了 `glow` 和 `wgpu`，`eframe`
+  会优先使用 `wgpu`。
+
+  b. 配置 `wgpu` 运行时选项：
+  在您的 main.rs 中，当您初始化 eframe 时，可以传递 NativeOptions 来进一步配置 wgpu，例如请求高性能 GPU。
+
+    1 // 在您的 main 函数中
+    2 fn main() -> eframe::Result<()> {
+    3     let native_options = eframe::NativeOptions {
+    4         // 请求使用高性能 GPU
+    5         wgpu_options: egui_wgpu::WgpuOptions {
+    6             power_preference: wgpu::PowerPreference::HighPerformance,
+    7             ..Default::default()
+    8         },
+    9         ..Default::default()
+   10     };
+   11
+   12     eframe::run_native(
+   13         "My egui App", // 您的应用名称
+   14         native_options,
+   15         Box::new(|cc| Box::new(MyApp::new(cc))), // 您的应用状态
+   16     )
+   17 }
+  这里的 `MyApp` 是您实现了 `eframe::App` trait 的主应用结构体。
+
+  3. 运行时优化（代码层面）
+
+  这部分虽然不是静态配置文件，但属于优化配置的一部分。
+
+  a. 视口（Viewport）设置
+  在 eframe::NativeOptions 中，您可以设置 vsync 为 false
+  来解除垂直同步，这会让应用以尽可能高的帧率运行。但这会导致更高的 CPU/GPU
+  使用率，并且可能出现画面撕裂，通常不推荐在发布的应用中关闭它，但在进行性能基准测试时可能有用。默认 vsync =
+  true 是最流畅且最节能的选择。
+
+   1 let native_options = eframe::NativeOptions {
+   2     vsync: true, // 保持 true 以获得流畅体验并节省资源
+   3     ..Default::default()
+   4 };
+
+  总结优化步骤：
+
+   1. 首要任务：将上述 [profile.release] 配置添加到您的 Cargo.toml。
+   2. 构建与运行：始终使用 cargo run --release 来体验最终性能。
+   3. 检查依赖：确保您的项目依赖于 wgpu 渲染后端。
+   4. 配置 `wgpu`：在代码中初始化 eframe 时，明确请求 HighPerformance GPU。
+
+
+cargo run -p multiple_viewports --release --features wgpu
