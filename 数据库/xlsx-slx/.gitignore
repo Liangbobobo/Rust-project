@@ -1,0 +1,13 @@
+/target/
+
+*.log
+
+*.exe
+
+*.dll
+
+.DS_Store
+
+*.so
+
+*.dylib

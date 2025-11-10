@@ -17,7 +17,7 @@ use transaction::{ActiveModel, Entity};
 
 // --- 全局配置常量 ---
 const DATABASE_URL: &str = "sqlite://./transactions.db?mode=rwc";
-const XLSX_FILE_PATH: &str = "./1.xlsx";
+const XLSX_FILE_PATH: &str = "./sun032-wechat.xlsx";
 
 #[tokio::main]
 async fn main() -> Result<()> {
