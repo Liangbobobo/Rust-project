@@ -8,3 +8,4 @@ calamine = "0.31.0"
 sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "sqlite"] }
 tokio = { version = "1.37.0", features = ["full"] }
 anyhow = "1.0.82"
+walkdir = "2.5.0"
