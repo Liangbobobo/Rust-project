@@ -31,6 +31,10 @@ pub enum ImportError {
     #[error("Excel处理错误: {0}")]
     Excel(#[from] calamine::Error),
 
+    // XlsxError
+    #[error("Excel打开错误: {0}")]
+    OpenError(#[from] calamine::XlsxError),
+
     #[error("JSON序列化错误: {0}")]
     Json(#[from] serde_json::Error),
 
@@ -91,6 +95,12 @@ async fn run() -> Result<(), ImportError> {
     // 打印提示信息，要求用户输入路径。
     print!("请输入xlsx文件所在的路径: ");
     // `flush()` 确保提示信息能立即显示在控制台，而不是等待缓冲区填满。
+    
+    // ?操作符作为语法糖解包result<T,E>,当表达式返回Err(error)时,会立即从当前函数返回.但它不会直接返回Err(error),而是先尝试将这个error转换为当前函数声明返回的错误类型E,然后再包装成Err返回.  
+    // flush() 的返回类型是 io::Result<()>，它是 Result<(), std::io::Error>
+    //的类型别名。所以，它失败时产生的错误类型是 std::io::Error
+    //?操作符(底层是编译器)依赖std::convert::From trait实现了自动的类型转换
+    //同时还能获得into()函数
     io::stdout().flush()?; // `?` 操作符用于错误传播，如果 `flush` 失败，会立即返回 `ImportError::Io`。
 
     // 创建一个可变的空字符串来存储用户输入。
@@ -155,7 +165,11 @@ fn find_all_xlsx_files(root_path: &str) -> Result<Vec<PathBuf>, ImportError> {
         // `filter_map` 会过滤掉迭代中产生的错误（如权限问题），只保留 `Ok` 的结果。
         .filter_map(|e| e.ok())
         // 过滤条目，只保留是文件且扩展名为 "xlsx" 的条目。
-        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("xlsx"))
+        //filter是筛选,可以看看源码的定义就明白了,其参数就是一个返回bool的闭包
+        .filter(|e| 
+            e.path().extension()
+            //and_then从上一步产生的Option中unwrap值,对每个值执行f
+            .and_then(|s| s.to_str()) == Some("xlsx"))
         // 将 `DirEntry` 对象转换为 `PathBuf`（一个拥有所有权的路径）。
         .map(|e| e.into_path())
         // 将所有符合条件的路径收集到一个 `Vec` 中。
@@ -220,7 +234,7 @@ async fn process_xlsx_file(
     // 根据工作表名称获取其数据范围。`??` 是一个双重 `?`，第一个处理 `Option`，第二个处理 `Result`。
     let sheet = workbook
         .worksheet_range(&sheet_name)
-        .ok_or_else(|| ImportError::SheetNotFound(file_name.clone()))??;
+        .map_err(|e| ImportError::SheetNotFound(file_name.clone()))?;
 
     // 获取工作表的所有行，并创建一个迭代器。
     let mut rows = sheet.rows();

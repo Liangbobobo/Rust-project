@@ -1,0 +1,10 @@
+目前为了和学习渗透的目标共振  
+
+1.对于网页及app应用选择
+tauri的js原生作为前端
+rust作为后端
+
+2. 数据库
+sqlite
+sqlx(rust)
+seaorm(rust)
