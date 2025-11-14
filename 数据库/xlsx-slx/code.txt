@@ -179,20 +179,7 @@ async fn setup_database() -> Result<SqlitePool, ImportError> {
         .await?;
     // 执行 SQL 语句来创建 `transactions` 表，`IF NOT EXISTS` 确保不会重复创建。
     sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            account TEXT,
-            transaction_type TEXT,
-            transaction_time TEXT,
-            amount REAL,
-            balance REAL,
-            counterparty_account TEXT,
-            counterparty_name TEXT,
-            details TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-        "#,
+        r#"#
     )
     .execute(&pool) // 在连接池上执行查询。
     .await?;
@@ -211,29 +198,18 @@ async fn process_xlsx_file(
     let file_name = file_path.to_string_lossy().to_string();
 
     // 获取工作簿中的第一个工作表的名称。
-    let sheet_name = workbook
-        .sheet_names()
-        .get(0)
-        .cloned()
-        .ok_or_else(|| ImportError::SheetNotFound(file_name.clone()))?;
-
+    let sheet_name = workbook.sheet_names().get(0).cloned().ok_or_else(|| ImportError::SheetNotFound(file_name.clone()))?;
+    
     // 根据工作表名称获取其数据范围。`??` 是一个双重 `?`，第一个处理 `Option`，第二个处理 `Result`。
-    let sheet = workbook
-        .worksheet_range(&sheet_name)
+    let sheet = workbook.worksheet_range(&sheet_name)
         .ok_or_else(|| ImportError::SheetNotFound(file_name.clone()))??;
 
     // 获取工作表的所有行，并创建一个迭代器。
     let mut rows = sheet.rows();
     // 读取第一行作为表头。
-    let headers: Vec<String> = rows
-        .next()
-        .ok_or_else(|| ImportError::HeaderNotFound {
-            file: file_name.clone(),
-            sheet: sheet_name.clone(),
-        })?
-        .iter()
-        .map(|cell| cell.to_string().trim().to_string())
-        .collect();
+    let headers: Vec<String> = rows.next() 
+        .ok_or_else(|| ImportError::HeaderNotFound { file: file_name.clone(), sheet: sheet_name.clone() })?
+        .iter().map(|cell| cell.to_string().trim().to_string()).collect();
 
     // 验证表头是否包含所有必需列，并获取它们的索引。
     let col_indices = map_required_columns(&headers, &file_name)?;
@@ -263,35 +239,24 @@ async fn process_xlsx_file(
 }
 
 /// 验证并映射Excel表头到列索引。如果任何必需列缺失，则返回错误。
-fn map_required_columns<'a>(
-    headers: &'a [String],
-    file_name: &str,
-) -> Result<HashMap<&'static str, usize>, ImportError> {
+fn map_required_columns<'a>(headers: &'a [String], file_name: &str) -> Result<HashMap<&'static str, usize>, ImportError> {
     // 定义所有必需的列名。
     const REQUIRED_COLS: &[&str] = &[
-        "支付帐号",
-        "交易主体的出入账标识",
-        "交易时间",
-        "交易金额",
-        "交易余额",
-        "收款方的支付帐号",
-        "收款方的商户名称",
+        "支付帐号", "交易主体的出入账标识", "交易时间", "交易金额",
+        "交易余额", "收款方的支付帐号", "收款方的商户名称",
     ];
     // 创建一个 HashMap 来存储列名到其索引的映射。
     let mut indices = HashMap::new();
     // 遍历所有必需的列名。
     for &col_name in REQUIRED_COLS {
         // 在 `headers` Vec 中查找列名的位置（索引）。
-        let index = headers
-            .iter()
-            .position(|h| h == col_name)
-            .ok_or_else(|| {
-                // 如果找不到，`position` 返回 `None`，`ok_or_else` 会构造并返回一个错误。
-                ImportError::MissingRequiredColumn {
-                    file: file_name.to_string(),
-                    column: col_name.to_string(),
-                }
-            })?;
+        let index = headers.iter().position(|h| h == col_name).ok_or_else(|| {
+            // 如果找不到，`position` 返回 `None`，`ok_or_else` 会构造并返回一个错误。
+            ImportError::MissingRequiredColumn {
+                file: file_name.to_string(),
+                column: col_name.to_string(),
+            }
+        })?;
         // 如果找到，将列名和索引存入 HashMap。
         indices.insert(col_name, index);
     }
@@ -320,20 +285,8 @@ fn parse_row(
     record.counterparty_name = get_string_from_row(row, col_indices["收款方的商户名称"]);
 
     // 使用辅助函数获取浮点数，`map_err` 用于在解析失败时将错误转换为 `RowParseWarning`。
-    record.amount = get_float_from_row(row, col_indices["交易金额"]).map_err(|e| {
-        ImportError::RowParseWarning {
-            file: file.to_string(),
-            row: row_num,
-            details: format!("'交易金额'列解析失败: {}", e),
-        }
-    })?;
-    record.balance = get_float_from_row(row, col_indices["交易余额"]).map_err(|e| {
-        ImportError::RowParseWarning {
-            file: file.to_string(),
-            row: row_num,
-            details: format!("'交易余额'列解析失败: {}", e),
-        }
-    })?;
+    record.amount = get_float_from_row(row, col_indices["交易金额"]).map_err(|e| ImportError::RowParseWarning { file: file.to_string(), row: row_num, details: format!("'交易金额'列解析失败: {}", e) })?;
+    record.balance = get_float_from_row(row, col_indices["交易余额"]).map_err(|e| ImportError::RowParseWarning { file: file.to_string(), row: row_num, details: format!("'交易余额'列解析失败: {}", e) })?;
 
     // 遍历行中的每一个单元格，以收集额外数据。
     for (i, cell) in row.iter().enumerate() {
@@ -389,22 +342,16 @@ fn get_float_from_row(row: &[DataType], index: usize) -> Result<Option<f64>, Str
         // 是字符串但为空，视作 `None`。
         Some(DataType::String(s)) if s.trim().is_empty() => Ok(None),
         // 是非空字符串，尝试解析它。
-        Some(DataType::String(s)) => s
-            .parse::<f64>()
-            .map(Some)
-            .map_err(|_| format!("无法将字符串 '{}' 转换为数值", s)),
+        Some(DataType::String(s)) => s.parse::<f64>().map(Some).map_err(|_| format!("无法将字符串 '{}' 转换为数值", s)),
         // 单元格为空或索引越界，视作 `None`。
         Some(DataType::Empty) | None => Ok(None),
         // 是其他无法处理的类型，返回一个描述性错误。
-        Some(other) => Err(format!("期望一个数值，但得到类型 {}", other.type_name())),
+        Some(other) => Err(format!("期望一个数值，但得到类型 {}", other.type_name()))
     }
 }
 
 /// 使用事务和分批次策略将记录插入数据库，以提高性能并减少内存占用。
-async fn batch_insert_records(
-    pool: &SqlitePool,
-    records: Vec<TransactionRecord>,
-) -> Result<i64, ImportError> {
+async fn batch_insert_records(pool: &SqlitePool, records: Vec<TransactionRecord>) -> Result<i64, ImportError> {
     // 用于累计总共插入的行数。
     let mut total_inserted = 0;
     // 定义每个批次的大小。
@@ -418,12 +365,7 @@ async fn batch_insert_records(
         for record in chunk {
             // 准备 SQL 插入语句。`?` 是 `sqlx` 中用于参数绑定的占位符。
             let result = sqlx::query(
-                r#"
-                INSERT INTO transactions (
-                    account, transaction_type, transaction_time, amount, balance,
-                    counterparty_account, counterparty_name, details
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                "#,
+                r#"#
             )
             // 按顺序将 `record` 的字段绑定到 SQL 语句的占位符上。
             .bind(&record.account)

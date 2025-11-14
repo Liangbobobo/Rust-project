@@ -1934,7 +1934,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "calamine",
+ "serde",
+ "serde_json",
  "sqlx",
+ "thiserror",
  "tokio",
  "walkdir",
 ]
