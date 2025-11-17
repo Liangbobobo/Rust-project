@@ -192,19 +192,22 @@ async fn setup_database() -> Result<SqlitePool, ImportError> {
         .connect("sqlite:database.db")
         .await?;
     // 执行 SQL 语句来创建 `transactions` 表，`IF NOT EXISTS` 确保不会重复创建。
+    //为了在多种交易流水中执行追踪,需要对各种流水进行抽象
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            account TEXT,
-            transaction_type TEXT,
+            bill_type TEXT NOT NULL     --账单类型
+            account TEXT NOT NULL,      --交易账户
+            transaction_type TEXT,      --交易类型
             transaction_time TEXT,
-            amount REAL,
-            balance REAL,
+            amount INTEGER,             --交易金额
+            balance INTEGER,            --交易后余额
             counterparty_account TEXT,
             counterparty_name TEXT,
-            details TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            remark TEXT,                --原始流水中的备注列
+            details TEXT,               -- 原始流水中其他的列
+            created_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%d%H:%M:%S', 'now', 'utc'))
         )
         "#,
     )
@@ -221,6 +224,7 @@ async fn process_xlsx_file(
 ) -> Result<(i64, Vec<String>), ImportError> {
     // 使用 `calamine` 打开指定路径的 Excel 工作簿。
     let mut workbook: Xlsx<_> = open_workbook(file_path)?;
+    
     // 将文件路径转换为字符串，用于后续的错误信息展示。
     let file_name = file_path.to_string_lossy().to_string();
 
