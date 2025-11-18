@@ -1,6 +1,8 @@
+//对微信交易记录的处理
+
 // --- 依赖项导入 ---
 // `calamine` 用于读取 Excel 文件 (.xlsx, .xls, .ods 等)。
-use calamine::{open_workbook, DataType, Reader, Xlsx};
+use calamine::{open_workbook, Data, Reader, Xlsx};
 // `serde_json` 用于处理 JSON 数据，特别是将多余的列序列化为 JSON 字符串。
 use serde_json::Value;
 // `sqlx` 是一个现代的、异步的 Rust SQL 工具包。这里我们使用它的 `sqlite` 功能。
@@ -35,6 +37,8 @@ pub enum ImportError {
     #[error("Excel打开错误: {0}")]
     OpenError(#[from] calamine::XlsxError),
 
+    
+
     #[error("JSON序列化错误: {0}")]
     Json(#[from] serde_json::Error),
 
@@ -47,8 +51,9 @@ pub enum ImportError {
     #[error("文件 '{0}' 中找不到任何工作表")]
     SheetNotFound(String),
 
-    #[error("文件 '{file}' 的工作表 '{sheet}' 中缺少表头")]
-    HeaderNotFound { file: String, sheet: String },
+    //单个文件的工作表的表头,即第一行查找错误
+    #[error("文件 '{file}' 的工作表中缺少表头")]
+    HeaderNotFound { file: String, },
 
     #[error("文件 '{file}' 中缺少必需的列: '{column}'")]
     MissingRequiredColumn { file: String, column: String },
@@ -73,6 +78,7 @@ struct TransactionRecord {
     balance: Option<f64>,
     counterparty_account: Option<String>,
     counterparty_name: Option<String>,
+    remark: Option<String>,
     details: Option<String>, // 存储序列化后的 JSON 字符串
 }
 
@@ -92,6 +98,7 @@ async fn main() {
 async fn run() -> Result<(), ImportError> {
     // --- 用户交互部分 ---
     println!("--- XLSX 数据导入 SQLite 工具 (生产环境版) ---");
+    println!("请确保每一个xlsx文件中只有一个工作表");
     // 打印提示信息，要求用户输入路径。
     print!("请输入xlsx文件所在的路径: ");
     // `flush()` 确保提示信息能立即显示在控制台，而不是等待缓冲区填满。
@@ -197,15 +204,15 @@ async fn setup_database() -> Result<SqlitePool, ImportError> {
         r#"
         CREATE TABLE IF NOT EXISTS transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            bill_type TEXT NOT NULL     --账单类型
-            account TEXT NOT NULL,      --交易账户
-            transaction_type TEXT,      --交易类型
-            transaction_time TEXT,
+            bill_type TEXT NOT NULL     --所有人及账单类型,自定义的列
+            account TEXT NOT NULL,      --支付帐号
+            transaction_type TEXT,      --交易主体的出入账标识
+            transaction_time TEXT,      --交易时间
             amount INTEGER,             --交易金额
-            balance INTEGER,            --交易后余额
-            counterparty_account TEXT,
-            counterparty_name TEXT,
-            remark TEXT,                --原始流水中的备注列
+            balance INTEGER,            --交易余额
+            counterparty_account TEXT,  --收款方的支付帐号
+            counterparty_name TEXT,     --收款方的商户名称
+            remark TEXT,                --备注
             details TEXT,               -- 原始流水中其他的列
             created_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%d%H:%M:%S', 'now', 'utc'))
         )
@@ -228,31 +235,22 @@ async fn process_xlsx_file(
     // 将文件路径转换为字符串，用于后续的错误信息展示。
     let file_name = file_path.to_string_lossy().to_string();
 
-    // 获取工作簿中的第一个工作表的名称。
-    let sheet_name = workbook
-        .sheet_names()
-        .get(0)
-        .cloned()
-        .ok_or_else(|| ImportError::SheetNotFound(file_name.clone()))?;
+   
 
-    // 根据工作表名称获取其数据范围。`??` 是一个双重 `?`，第一个处理 `Option`，第二个处理 `Result`。
-    let sheet = workbook
-        .worksheet_range(&sheet_name)
-        .map_err(|e| ImportError::SheetNotFound(file_name.clone()))?;
+    //根据索引获取文件中的第一个工作表
+    let sheet =workbook
+    .worksheet_range_at(0)
+    //ok_or_else将上行中的Option转为Result,
+    //None转为Err,这里代表索引处无工作表类错误,执行ok_or_else中的闭包,转换为thiserror错误(ImportError)
+    //当有工作表,仍然存在读取工作表的错误XlsxError,这个错误在Result<Range<Data>, XlsxError>中
+    .ok_or_else(|| ImportError::SheetNotFound(file_name.clone()))??;
+    // 经过ok_or_else后实际转换为Result<Result<Range<Data>, XlsxError>, ImportError>
+    //上面的??,实际处理了两层Result嵌套.
 
-    // 获取工作表的所有行，并创建一个迭代器。
-    let mut rows = sheet.rows();
-    // 读取第一行作为表头。
-    let headers: Vec<String> = rows
-        .next()
-        .ok_or_else(|| ImportError::HeaderNotFound {
-            file: file_name.clone(),
-            sheet: sheet_name.clone(),
-        })?
-        .iter()
-        .map(|cell| cell.to_string().trim().to_string())
-        .collect();
-
+    // 读取文件中工作表的第一行。
+    let headers: Vec<String> = sheet.headers()
+    .ok_or_else(||ImportError::HeaderNotFound { file: file_name.clone()})?;
+   
     // 验证表头是否包含所有必需列，并获取它们的索引。
     let col_indices = map_required_columns(&headers, &file_name)?;
 
@@ -261,6 +259,8 @@ async fn process_xlsx_file(
     // 创建一个 `Vec` 来存储解析过程中遇到的所有警告。
     let mut warnings = Vec::new();
 
+    // // 获取工作表的所有行，并创建一个迭代器。
+     let  rows = sheet.rows();
     // 遍历所有数据行（表头行已被消耗）。`enumerate` 提供从0开始的索引。
     for (row_idx, row) in rows.enumerate() {
         // 调用 `parse_row` 函数解析每一行。行号 `row_idx + 2` 是因为 Excel 行号从1开始，且我们跳过了表头。
@@ -294,6 +294,7 @@ fn map_required_columns<'a>(
         "交易余额",
         "收款方的支付帐号",
         "收款方的商户名称",
+        "备注",
     ];
     // 创建一个 HashMap 来存储列名到其索引的映射。
     let mut indices = HashMap::new();
@@ -317,9 +318,9 @@ fn map_required_columns<'a>(
     Ok(indices)
 }
 
-/// 解析单行数据，将其转换为 `TransactionRecord`。
+// 解析单行数据，将其转换为 `TransactionRecord`。
 fn parse_row(
-    row: &[DataType],
+    row: &[Data],
     headers: &[String],
     col_indices: &HashMap<&str, usize>,
     file: &str,
@@ -331,11 +332,13 @@ fn parse_row(
     let mut detail_map = serde_json::Map::new();
 
     // 使用辅助函数从行中安全地获取字符串数据。
+    //交易金额和交易时间需要进一步处理数据的格式,在下面处理
     record.account = get_string_from_row(row, col_indices["支付帐号"]);
     record.transaction_type = get_string_from_row(row, col_indices["交易主体的出入账标识"]);
     record.transaction_time = get_string_from_row(row, col_indices["交易时间"]);
     record.counterparty_account = get_string_from_row(row, col_indices["收款方的支付帐号"]);
     record.counterparty_name = get_string_from_row(row, col_indices["收款方的商户名称"]);
+    record.remark = get_string_from_row(row, col_indices["备注"]);
 
     // 使用辅助函数获取浮点数，`map_err` 用于在解析失败时将错误转换为 `RowParseWarning`。
     record.amount = get_float_from_row(row, col_indices["交易金额"]).map_err(|e| {
@@ -363,11 +366,11 @@ fn parse_row(
                 if !header.is_empty() {
                     // 将单元格数据 (`DataType`) 转换为 `serde_json::Value`。
                     let value = match cell {
-                        DataType::String(s) => Value::String(s.clone()),
-                        DataType::Float(f) => Value::from(*f),
-                        DataType::Int(i) => Value::from(*i),
-                        DataType::Bool(b) => Value::from(*b),
-                        DataType::Empty => Value::Null,
+                        Data::String(s) => Value::String(s.clone()),
+                        Data::Float(f) => Value::from(*f),
+                        Data::Int(i) => Value::from(*i),
+                        Data::Bool(b) => Value::from(*b),
+                        Data::Empty => Value::Null,
                         _ => Value::String(cell.to_string()),
                     };
                     // 将表头和转换后的值插入 `detail_map`。
@@ -388,7 +391,7 @@ fn parse_row(
 // --- 数据行解析辅助函数 ---
 
 /// 从给定的行和索引中安全地获取一个字符串。返回 `Option<String>`。
-fn get_string_from_row(row: &[DataType], index: usize) -> Option<String> {
+fn get_string_from_row(row: &[Data], index: usize) -> Option<String> {
     // `get` 返回一个 `Option`，防止索引越界。
     row.get(index)
         // 将单元格内容转换为字符串。
@@ -398,21 +401,21 @@ fn get_string_from_row(row: &[DataType], index: usize) -> Option<String> {
 }
 
 /// 从给定的行和索引中安全地获取一个浮点数。能处理数字、字符串和空单元格。
-fn get_float_from_row(row: &[DataType], index: usize) -> Result<Option<f64>, String> {
+fn get_float_from_row(row: &[Data], index: usize) -> Result<Option<f64>, String> {
     match row.get(index) {
         // 直接是浮点数。
-        Some(DataType::Float(f)) => Ok(Some(*f)),
+        Some(Data::Float(f)) => Ok(Some(*f)),
         // 是整数，可以安全地转换为浮点数。
-        Some(DataType::Int(i)) => Ok(Some(*i as f64)),
+        Some(Data::Int(i)) => Ok(Some(*i as f64)),
         // 是字符串但为空，视作 `None`。
-        Some(DataType::String(s)) if s.trim().is_empty() => Ok(None),
+        Some(Data::String(s)) if s.trim().is_empty() => Ok(None),
         // 是非空字符串，尝试解析它。
-        Some(DataType::String(s)) => s
+        Some(Data::String(s)) => s
             .parse::<f64>()
             .map(Some)
             .map_err(|_| format!("无法将字符串 '{}' 转换为数值", s)),
         // 单元格为空或索引越界，视作 `None`。
-        Some(DataType::Empty) | None => Ok(None),
+        Some(Data::Empty) | None => Ok(None),
         // 是其他无法处理的类型，返回一个描述性错误。
         Some(other) => Err(format!("期望一个数值，但得到类型 {}", other.type_name())),
     }
