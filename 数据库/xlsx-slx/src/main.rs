@@ -74,8 +74,8 @@ struct TransactionRecord {
     account: Option<String>,
     transaction_type: Option<String>,
     transaction_time: Option<String>,
-    amount: Option<f64>,
-    balance: Option<f64>,
+    amount: Option<i64>,
+    balance: Option<i64>,
     counterparty_account: Option<String>,
     counterparty_name: Option<String>,
     remark: Option<String>,
@@ -169,7 +169,7 @@ fn find_all_xlsx_files(root_path: &str) -> Result<Vec<PathBuf>, ImportError> {
     // 使用 `walkdir` 创建一个目录迭代器。
     let files: Vec<PathBuf> = WalkDir::new(path)
         .into_iter()
-        // `filter_map` 会过滤掉迭代中产生的错误（如权限问题），只保留 `Ok` 的结果。
+        // `filter_map` 会过滤掉迭代中产生的错误（如权限问题），只保留 `Ok` 的结果。?应该有错误handle权限问题,并输出一个语句让用户确认共有多少文件
         .filter_map(|e| e.ok())
         // 过滤条目，只保留是文件且扩展名为 "xlsx" 的条目。
         //filter是筛选,可以看看源码的定义就明白了,其参数就是一个返回bool的闭包
@@ -401,23 +401,23 @@ fn get_string_from_row(row: &[Data], index: usize) -> Option<String> {
 }
 
 /// 从给定的行和索引中安全地获取一个浮点数。能处理数字、字符串和空单元格。
-fn get_float_from_row(row: &[Data], index: usize) -> Result<Option<f64>, String> {
+fn get_float_from_row(row: &[Data], index: usize) -> Result<Option<i64>, String> {
     match row.get(index) {
-        // 直接是浮点数。
-        Some(Data::Float(f)) => Ok(Some(*f)),
+        // 直接是浮点数。s
+        Some(Data::Float(f)) => Ok(Some((f * 100.0).round() as i64)),
         // 是整数，可以安全地转换为浮点数。
-        Some(Data::Int(i)) => Ok(Some(*i as f64)),
-        // 是字符串但为空，视作 `None`。
+        Some(Data::Int(i)) => Ok(Some(i*100)),
+        // 是字符串但为空，视作 `None`? 这里空的时候当作None是否合适?
         Some(Data::String(s)) if s.trim().is_empty() => Ok(None),
         // 是非空字符串，尝试解析它。
         Some(Data::String(s)) => s
-            .parse::<f64>()
+            .parse::<i64>()
             .map(Some)
-            .map_err(|_| format!("无法将字符串 '{}' 转换为数值", s)),
-        // 单元格为空或索引越界，视作 `None`。
+            .map_err(|_| format!("无法将字符串 '{}' 转换为数值,请查看该单元格内容的格式,然后在源码中加入处理arm", s)),
+        // 单元格为空或索引越界，视作 `None`?这是一个十分严重的错误,应该有更加精细的handle
         Some(Data::Empty) | None => Ok(None),
         // 是其他无法处理的类型，返回一个描述性错误。
-        Some(other) => Err(format!("期望一个数值，但得到类型 {}", other.type_name())),
+        Some(other) => Err(format!("期望一个数值，但得到类型 {:?}", other)),
     }
 }
 
