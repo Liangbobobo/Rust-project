@@ -37,8 +37,6 @@ pub enum ImportError {
     #[error("Excel打开错误: {0}")]
     OpenError(#[from] calamine::XlsxError),
 
-    
-
     #[error("JSON序列化错误: {0}")]
     Json(#[from] serde_json::Error),
 
@@ -72,12 +70,14 @@ pub enum ImportError {
 #[derive(Debug, Default)]
 struct TransactionRecord {
     account: Option<String>,
+    //account_info:Option<String>,//考虑增加账户所有人,账户类型,调取时长等信息
     transaction_type: Option<String>,
     transaction_time: Option<String>,
     amount: Option<i64>,
     balance: Option<i64>,
     counterparty_account: Option<String>,
     counterparty_name: Option<String>,
+    //counterparty_info:Option<String>,//考虑增加对手账户所有人,账户类型等信息
     remark: Option<String>,
     details: Option<String>, // 存储序列化后的 JSON 字符串
 }
@@ -98,11 +98,11 @@ async fn main() {
 async fn run() -> Result<(), ImportError> {
     // --- 用户交互部分 ---
     println!("--- XLSX 数据导入 SQLite 工具 (生产环境版) ---");
-    println!("请确保每一个xlsx文件中只有一个工作表");
+    println!("请确保每一个xlsx文件中只有一个工作表,如果有xlsx文件有多个表,请将每个表单独保存为一个文件");
     // 打印提示信息，要求用户输入路径。
-    print!("请输入xlsx文件所在的路径: ");
+    print!("请输入xlsx文件所在的文件夹 ");
+
     // `flush()` 确保提示信息能立即显示在控制台，而不是等待缓冲区填满。
-    
     // ?操作符作为语法糖解包result<T,E>,当表达式返回Err(error)时,会立即从当前函数返回.但它不会直接返回Err(error),而是先尝试将这个error转换为当前函数声明返回的错误类型E,然后再包装成Err返回.  
     // flush() 的返回类型是 io::Result<()>，它是 Result<(), std::io::Error>
     //的类型别名。所以，它失败时产生的错误类型是 std::io::Error

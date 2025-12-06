@@ -1,7 +1,6 @@
 //检查xlsx文件单元格中数据的格式
 
-
-use calamine::{open_workbook, Data, Reader, Xlsx};
+use calamine::{Data, Reader, Xlsx, open_workbook};
 
 // 辅助函数：根据 Data 枚举变体返回类型名称字符串
 fn get_cell_type_name(cell_data: &Data) -> &'static str {
@@ -48,7 +47,12 @@ fn main() {
     if let Some(header_row) = rows.next() {
         for (col_idx, cell_data) in header_row.iter().enumerate() {
             // 使用我们定义的辅助函数来获取类型名称
-            println!("  Col {}: Value = '{}', Type = {}", col_idx + 1, cell_data.to_string(), get_cell_type_name(cell_data));
+            println!(
+                "  Col {}: Value = '{}', Type = {}",
+                col_idx + 1,
+                cell_data.to_string(),
+                get_cell_type_name(cell_data)
+            );
         }
     } else {
         println!("Sheet is empty.");
@@ -59,8 +63,12 @@ fn main() {
     if let Some(first_data_row) = rows.next() {
         for (col_idx, cell_data) in first_data_row.iter().enumerate() {
             // 使用我们定义的辅助函数来获取类型名称
-            println!("  Col {}: Value = '{}', Type = {}", col_idx + 1, cell_data.to_string(), get_cell_type_name(cell_data));
-            
+            println!(
+                "  Col {}: Value = '{}', Type = {}",
+                col_idx + 1,
+                cell_data.to_string(),
+                get_cell_type_name(cell_data)
+            );
         }
     } else {
         println!("Sheet has only one row.");
