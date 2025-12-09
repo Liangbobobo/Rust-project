@@ -173,10 +173,9 @@ fn find_all_xlsx_files(root_path: &str) -> Result<Vec<PathBuf>, ImportError> {
         .filter_map(|e| e.ok())
         // 过滤条目，只保留是文件且扩展名为 "xlsx" 的条目。
         //filter是筛选,可以看看源码的定义就明白了,其参数就是一个返回bool的闭包
-        .filter(|e| 
-            e.path().extension()
-            //and_then从上一步产生的Option中unwrap值,对每个值执行f
-            .and_then(|s| s.to_str()) == Some("xlsx"))
+        .filter(|e| e.path().extension()
+        //and_then从上一步产生的Option中unwrap值,对每个值执行f
+        .and_then(|s| s.to_str()) == Some("xlsx"))
         // 将 `DirEntry` 对象转换为 `PathBuf`（一个拥有所有权的路径）。
         .map(|e| e.into_path())
         // 将所有符合条件的路径收集到一个 `Vec` 中。
