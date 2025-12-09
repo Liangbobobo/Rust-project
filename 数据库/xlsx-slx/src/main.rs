@@ -189,7 +189,7 @@ fn find_all_xlsx_files(root_path: &str) -> Result<Vec<PathBuf>, ImportError> {
     Ok(files)
 }
 
-/// 设置并初始化数据库连接池和表结构。
+// 设置并初始化数据库连接池和表结构。
 async fn setup_database() -> Result<SqlitePool, ImportError> {
     // 创建一个 SQLite 连接池配置，最大连接数为 5。
     let pool = SqlitePoolOptions::new()
