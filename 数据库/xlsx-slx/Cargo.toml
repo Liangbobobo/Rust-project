@@ -1,14 +1,38 @@
 [package]
 name = "xlsx-slx"
 version = "0.1.0"
-edition = "2024"
+edition = "2024" # 如你所配置
 
 [dependencies]
+# 核心异步运行时
 tokio = { version = "1", features = ["full"] }
-sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "chrono"] } # 开启 chrono 特性
-calamine = "0.31" # 或最新版
+
+# 数据库 (0.8.6+)
+# 注意: chrono 特性开启后，数据库中的 TEXT/DATETIME 可直接映射到 chrono::NaiveDateTime
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite", "chrono","rust_decimal"] }
+
+# Excel 处理 (0.32+)
+calamine = { version = "0.32", features = ["dates"] } 
+
+# 金融级高精度计算 (核心新增)
+# db-sqlx: 允许直接存入数据库
+# serde-with-str: 允许 JSON 序列化时按字符串处理（避免前端精度丢失）
+rust_decimal = { version = "1.39", features = [ "serde-with-str"] }
+
+# 命令行参数 (最新版)
+clap = { version = "4.5", features = ["derive"] }
+
+# 序列化
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# 错误处理 (2.0+)
 thiserror = "2"
+
+# 辅助工具
 walkdir = "2"
 chrono = { version = "0.4", features = ["serde"] }
+
+# 日志系统
+tracing = "0.1.43"
+tracing-subscriber = "0.3.22"

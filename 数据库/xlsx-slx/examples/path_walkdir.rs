@@ -1,6 +1,7 @@
+
 use std::{
     io::{self, Write},
-    path::Path,
+    // path::Path,
 };
 
 fn main() {
@@ -9,7 +10,7 @@ fn main() {
     let mut input = String::new();
     io::stdin().read_line(&mut input).expect("未能读取输入");
 
-    let path_str = input.trim();
-    let dir_path = Path::new(path_str);
+    // let path_str = input.trim();
+    // let dir_path = Path::new(path_str);
    
 }
