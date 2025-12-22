@@ -1,0 +1,11 @@
+[package]
+name = "wlan"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ windows-sys = { version = "0.61", features = [
+      "Win32_NetworkManagement_WiFi", # WLAN 核心功能
+     "Win32_Foundation",              # 基础错误码 (ERROR_SUCCESS)
+    "Win32_System_Memory",            # 必须：用于 WlanFreeMemory 释放系统内存
+   ] }
