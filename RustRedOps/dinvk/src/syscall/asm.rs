@@ -1,5 +1,5 @@
 // Reference: <https://github.com/janoglezcampos/rust_syscalls>
-
+//该项目中用于执行间接系统调用 (Indirect Syscalls) 的核心汇编实现
 #[cfg(target_arch = "x86_64")]
 core::arch::global_asm!("
 .global do_syscall

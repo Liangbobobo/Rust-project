@@ -1,6 +1,9 @@
 不能有仓库密钥
 不能上传单个大于50M的文件
 
+项目中存在他人的仓库(git clone的其他仓库)如何提交?
+删除子项目(他人仓库)中的.git文件
+
 
 关于换行符:
 git config --global core.autocrlf true
