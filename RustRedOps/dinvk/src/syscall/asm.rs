@@ -13,7 +13,7 @@ do_syscall:
 
     mov eax, ecx
     mov r12, rdx
-    mov rcx, r8
+    mov rcx, r8 
 
     mov r10, r9
     mov rdx,  [rsp + 0x28]
