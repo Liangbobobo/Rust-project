@@ -70,8 +70,7 @@
 
    1. ldr_data 是 PEB_LDR_DATA 结构体。
    2. InMemoryOrderModuleList 是 PEB_LDR_DATA 中的一个 LIST_ENTRY 链表头。
-   3. Flink 指向的是下一个模块的 LDR_DATA_TABLE_ENTRY 结构体中 `InMemoryOrderLinks`
-      字段的地址，而不是结构体的起始地址！
+   3. Flink 指向的是下一个模块的 LDR_DATA_TABLE_ENTRY 结构体中 `InMemoryOrderLinks`字段的地址，而不是结构体的起始地址！
 
   这意味着 data_table_entry 这个指针的值，实际上指向的是目标结构体偏移 0x10 的位置。
 
@@ -438,9 +437,6 @@
   LDR_DATA_TABLE_ENTRY 是 Windows 内部用于管理模块的账本记录。它不在 PEB
   结构体内，但通过 PEB 中的链表指针可以访问到。它是所有模块查找、枚举功能的基石。
 
-
-
-
  你感叹“最难的是用 Rust 表示数据结构”，这确实触及了 Rust
   底层开发的痛点。主要有以下几个原因：
 
@@ -449,13 +445,15 @@
   中，默认情况下编译器可以自由重新排列结构体字段的顺序，以优化内存占用。这在编写普通
   的业务逻辑时很好，但在操作系统层面，如果字段顺序变了，你读取到的就是垃圾数据甚至导
   致程序崩溃。
-   * 解决方案: 必须给每个结构体加上 #[repr(C)]。这告诉 Rust 编译器：“请严格按照 C
+
+* 解决方案: 必须给每个结构体加上 #[repr(C)]。这告诉 Rust 编译器：“请严格按照 C
      语言的规则来排列内存，不要乱动”。
 
   B. 复杂的联合体 (Unions)
   Windows 结构体中到处都是 union（联合体）。在 C 语言中，union 很自然；但在 Rust
   中，union 是非常受限的，且访问任何字段都是 unsafe 的。
-   * 难点: 你必须手动处理哪个字段在什么情况下有效，且 Rust 对 union 的派生（如 Debug,
+
+* 难点: 你必须手动处理哪个字段在什么情况下有效，且 Rust 对 union 的派生（如 Debug,
      Clone）支持也比 struct 麻烦。
 
   C. 位域 (Bitfields)
@@ -466,13 +464,15 @@
    4     // ...
    5 }
   Rust 官方语法不支持位域。
-   * 痛苦: 你必须定义一个普通的 u32，然后写一堆位运算（&, |,
+
+* 痛苦: 你必须定义一个普通的 u32，然后写一堆位运算（&, |,
      <<）来提取信息，或者使用像 bitflags 这样的库。在 dinvk 的 types.rs
      中，你可以看到作者用了大量的 bitflags!。
 
   D. 不同架构的差异 (x86 vs x64)
   在 32 位和 64 位下，同一个结构体的成员大小（尤其是指针）和偏移量是完全不同的。
-   * 麻烦: 你需要大量使用 #[cfg(target_arch = "x86_64")] 和 #[cfg(target_arch =
+
+* 麻烦: 你需要大量使用 #[cfg(target_arch = "x86_64")] 和 #[cfg(target_arch =
      "x86")]
      来写两套定义，或者使用条件编译。如果搞错一个偏移量，整个程序就会在运行时报莫名其
      妙的错误。
@@ -480,8 +480,9 @@
   E. 未公开与版本变动
   这是最玄学的地方。微软可能在 Win10 21H2 到 Win11
   之间，给某个内部结构体中间偷偷塞了一个字段。
-   * 代价: 你必须查阅像 Terminus Project
-     (https://www.nirsoft.net/kernel_struct/vista/index.html)
+
+* 代价: 你必须查阅像 Terminus Project
+     (<https://www.nirsoft.net/kernel_struct/vista/index.html>)
      这样的非官方文档，或者亲自去 WinDbg 里输入 dt nt!_EPROCESS 来肉眼观察偏移量。
 
   总结
@@ -505,25 +506,27 @@
   针对你的疑问，我分两部分为你深入解释：
 
   1. 为什么那段话是对的？
-   * 指针大小：在 64 位操作系统（Win64）中，CPU 的寻址空间是 64
+
+* 指针大小：在 64 位操作系统（Win64）中，CPU 的寻址空间是 64
      位的，因此一个内存地址（指针）必须占用 8 字节（64 bit）。
-   * 数组计算：[*mut c_void; 2] 是一个包含两个指针的数组，大小固定为 $8 \times 2 =
+* 数组计算：[*mut c_void; 2] 是一个包含两个指针的数组，大小固定为 $8 \times 2 =
      16$ 字节。
-   * `#[repr(C)]` 的作用：它保证了结构体的内存布局遵循 C 语言标准。在 C
+* `#[repr(C)]` 的作用：它保证了结构体的内存布局遵循 C 语言标准。在 C
      标准中，数组是连续排列的，且结构体字段不会被编译器乱序。这确保了 Reserved1
      准确地占住了从偏移量 0x0 到 0xF 的位置，让后续字段能对齐到正确的 Windows
      内核偏移上。
 
   ---
 
-  2. 在没有 #[repr(C)] 的模式下，*mut c_void 指针多大？
+  1. 在没有 #[repr(C)] 的模式下，*mut c_void 指针多大？
 
   答案是：依然是 8 字节（在 64 位系统上）。
 
   这里有一个常见的误区需要澄清：
 
   指针的大小由“硬件架构”决定，而不是由 repr 属性决定
-   * 裸指针 (`*mut T` / `*const T`)：它们的大小在编译成目标机器码时就已经确定了。在
+
+* 裸指针 (`*mut T` / `*const T`)：它们的大小在编译成目标机器码时就已经确定了。在
      64 位平台上永远是 8 字节，在 32 位平台上永远是 4 字节。无论你是否写
      #[repr(C)]，指针本身存储地址所需的空间是不变的。
 
@@ -545,15 +548,187 @@
   特殊情况：胖指针 (Fat Pointers)
   虽然 *mut c_void 大小固定，但 Rust 中有一种指针是两个指针大小（16
   字节），叫做“胖指针”：
-   * 切片指针：*mut [u32]（包含地址 + 长度）。
-   * Trait 对象指针：*mut dyn MyTrait（包含地址 + 虚函数表 vtable 地址）。
+
+* 切片指针：*mut [u32]（包含地址 + 长度）。
+* Trait 对象指针：*mut dyn MyTrait（包含地址 + 虚函数表 vtable 地址）。
 
   但由于 `c_void` 是一个特定的类型，`*mut c_void` 永远只是一个普通的瘦指针（Thin
   Pointer），大小始终等于 CPU 位数。
 
   总结
-   * Reserved1 在 64 位下确实是 16 字节。
-   * 不加 repr(C)，指针还是 8
+
+* Reserved1 在 64 位下确实是 16 字节。
+* 不加 repr(C)，指针还是 8
      字节，但结构体可能会崩掉，因为字段的位置会变得不可预测。
-   * 做免杀和底层开发，`#[repr(C)]` 是强制性的，因为你要和 C 编写的 Windows
+* 做免杀和底层开发，`#[repr(C)]` 是强制性的，因为你要和 C 编写的 Windows
      内核“对暗号”。
+
+## PEB
+
+```rust
+pub struct PEB {
+    pub InheritedAddressSpace: u8,
+    pub ReadImageFileExecOptions: u8,
+    pub BeingDebugged: u8,
+    pub Anonymous1: PEB_0,
+    pub Mutant: HANDLE,
+    pub ImageBaseAddress: *mut c_void,
+    pub Ldr: *mut PEB_LDR_DATA,
+    pub ProcessParameters: *mut RTL_USER_PROCESS_PARAMETERS,
+    pub SubSystemData: *mut c_void,
+    pub ProcessHeap: *mut c_void,
+    pub FastPebLock: *mut RTL_CRITICAL_SECTION,
+    pub AtlThunkSListPtr: *mut SLIST_HEADER,
+    pub IFEOKey: *mut c_void,
+    pub Anonymous2: PEB_1,
+    pub Anonymous3: PEB_2,
+    pub SystemReserved: u32,
+    pub AtlThunkSListPtr32: u32,
+    pub ApiSetMap: *mut API_SET_NAMESPACE,
+    pub TlsExpansionCounter: u32,
+    pub TlsBitmap: *mut RTL_BITMAP,
+    pub TlsBitmapBits: [u32; 2],
+    pub ReadOnlySharedMemoryBase: *mut c_void,
+    pub SharedData: *mut SILO_USER_SHARED_DATA,
+    pub ReadOnlyStaticServerData: *mut c_void,
+    pub AnsiCodePageData: *mut c_void,
+    pub OemCodePageData: *mut c_void,
+    pub UnicodeCaseTableData: *mut c_void,
+    pub NumberOfProcessors: u32,
+    pub NtGlobalFlag: u32,
+    pub CriticalSectionTimeout: LARGE_INTEGER,
+    pub HeapSegmentReserve: usize,
+    pub HeapSegmentCommit: usize,
+    pub HeapDeCommitTotalFreeThreshold: usize,
+    pub HeapDeCommitFreeBlockThreshold: usize,
+    pub NumberOfHeaps: u32,
+    pub MaximumNumberOfHeaps: u32,
+    pub ProcessHeaps: *mut c_void,
+    pub GdiSharedHandleTable: *mut c_void,
+    pub ProcessStarterHelper: *mut c_void,
+    pub GdiDCAttributeList: u32,
+    pub LoaderLock: *mut RTL_CRITICAL_SECTION,
+    pub OSMajorVersion: u32,
+    pub OSMinorVersion: u32,
+    pub OSBuildNumber: u16,
+    pub OSCSDVersion: u16,
+    pub OSPlatformId: u32,
+    pub ImageSubsystem: u32,
+    pub ImageSubsystemMajorVersion: u32,
+    pub ImageSubsystemMinorVersion: u32,
+    pub ActiveProcessAffinityMask: usize,
+    pub GdiHandleBuffer: GDI_HANDLE_BUFFER,
+    pub PostProcessInitRoutine: PPS_POST_PROCESS_INIT_ROUTINE,
+    pub TlsExpansionBitmap: *mut RTL_BITMAP,
+    pub TlsExpansionBitmapBits: [u32; 32],
+    pub SessionId: u32,
+    pub AppCompatFlags: ULARGE_INTEGER,
+    pub AppCompatFlagsUser: ULARGE_INTEGER,
+    pub pShimData: *mut c_void,
+    pub AppCompatInfo: *mut c_void,
+    pub CSDVersion: UNICODE_STRING,
+    pub ActivationContextData: *mut ACTIVATION_CONTEXT_DATA,
+    pub ProcessAssemblyStorageMap: *mut ASSEMBLY_STORAGE_MAP,
+    pub SystemDefaultActivationContextData: *mut ACTIVATION_CONTEXT_DATA,
+    pub SystemAssemblyStorageMap: *mut ASSEMBLY_STORAGE_MAP,
+    pub MinimumStackCommit: usize,
+    pub SparePointers: *mut c_void,
+    pub PatchLoaderData: *mut c_void,
+    pub ChpeV2ProcessInfo: *mut c_void,
+    pub Anonymous4: PEB_3,
+    pub SpareUlongs: [u32; 2],
+    pub ActiveCodePage: u16,
+    pub OemCodePage: u16,
+    pub UseCaseMapping: u16,
+    pub UnusedNlsField: u16,
+    pub WerRegistrationData: *mut WER_PEB_HEADER_BLOCK,
+    pub WerShipAssertPtr: *mut c_void,
+    pub Anonymous5: PEB_4,
+    pub pImageHeaderHash: *mut c_void,
+    pub Anonymous6: PEB_5,
+    pub CsrServerReadOnlySharedMemoryBase: u64,
+    pub TppWorkerpListLock: *mut RTL_CRITICAL_SECTION,
+    pub TppWorkerpList: LIST_ENTRY,
+    pub WaitOnAddressHashTable: [*mut c_void; 128],
+    pub TelemetryCoverageHeader: *mut TELEMETRY_COVERAGE_HEADER,
+    pub CloudFileFlags: u32,
+    pub CloudFileDiagFlags: u32,
+    pub PlaceholderCompatibilityMode: i8,
+    pub PlaceholderCompatibilityModeReserved: [i8; 7],
+    pub LeapSecondData: *mut c_void, // PLEAP_SECOND_DATA
+    pub Anonymous7: PEB_6,
+    pub NtGlobalFlag2: u32,
+    pub ExtendedFeatureDisableMask: u64,
+}
+```
+
+### ImageBaseAddress
+
+ImageBaseAddress 是 PEB 结构体中的一个重要字段（通常在偏移 0x10 处）
+
+* 它存储了当前进程的主模块（也就是启动这个进程的 .exe文件）被加载到内存中的起始位置。
+* 对于大多数 64 位程序，默认情况下这个地址可能是0x140000000，或者是因ASLR（地址空间布局随机化）而随机生成的某个地址。
+
+## PEB_LDR_DATA
+
+```rust
+#[repr(C)]
+pub struct PEB_LDR_DATA {
+    pub Length: u32,
+    pub Initialized: u8,
+    pub SsHandle: HANDLE,
+    pub InLoadOrderModuleList: LIST_ENTRY,
+    pub InMemoryOrderModuleList: LIST_ENTRY,
+    pub InInitializationOrderModuleList: LIST_ENTRY,
+    pub EntryInProgress: *mut c_void,
+    pub ShutdownInProgress: u8,
+    pub ShutdownThreadId: HANDLE,
+}
+```
+
+### InMemoryOrderModuleList
+
+`InMemoryOrderModuleList` 并非如其名称暗示的那样"按内存地址高低排序"，这是一个在安全研究和逆向工程社区中广泛流传的误解。  
+实际上，这个链表主要反映**模块在内存中的布局顺序和初始化关系**，而非简单的地址高低排序。
+
+InMemoryOrderModuleList的结构体中只有两个指针 Flink (前向) 和 Blink (后向),同样需要注意InMemoryOrderModuleList.flink指向的是LDR_DATA_TABLE_ENTRY这个结构体的**中间位置(不是第一个字段)**,即是一种手拉手的双向链表,而不是手拉头的双向链表:
+
+* Flink 指向的是下一个模块结构体中对应的那个 `InMemoryOrderLinks`字段的地址。
+* 它不指向下一个结构体的头部 (Base)。
+
+InMemoryOrderModuleList,在实际的运行中,根据Windows 加载器初始化模块的顺序是雷打不动的：
+
+* Head：链表头（PEB_LDR_DATA 内部）。
+* Node 1：主程序 (.exe)（第一个加载）。
+* Node 2：ntdll.dll（第二个加载，负责用户层与内核层的交互）。
+* Node 3：kernel32.dll（通常情况）。
+* 代码逻辑：从 Head 开始，执行两次 Flink 跳转，理应到达ntdll.dll。为了保险，代码还计算了模块名的 Hash 进行校验。
+
+## let mut data_table_entry = (*ldr_data).InMemoryOrderModuleList.Flink as*const LDR_DATA_TABLE_ENTRY
+
+这里的as有点复杂,as转换直接把裸地址变成了可操作的结构体对象。只要地址数值正确，且结构体布局匹配，你就可以直接像操作普通对象一样解引用和访问字段。
+
+### 物理事实 (Memory Reality)
+
+* Flink 指针里存的数值是 `0x1000`（假设这是某个模块 `InMemoryOrderLinks` 的地址）。
+* 由于 `InMemoryOrderLinks` 在该模块真正的起始位置（`0x0F90`）往后 16 字节处，所以物理地址就是 `0x1000`。
+
+### 编译器的“错觉” (Compiler's View)
+
+当你执行 `as *const LDR_DATA_TABLE_ENTRY` 时：
+
+* **指令层面**：这行代码在生成的汇编里通常不产生任何指令，它只是改变了编译器账本上的一个标记。
+* **认知层面**：你告诉编译器：“从现在开始，把 `0x1000` 这个地址看作是 `LDR_DATA_TABLE_ENTRY` 结构体的第 0 个字节。”
+
+### 结果：偏移量的“平移”
+
+因为编译器认为 `0x1000` 是 `0x00`，那么当你在代码里访问某个字段（比如偏移为 `0x48` 的字段）时：
+
+* **编译器计算**：当前位置 (`0x1000`) + 字段偏移 (`0x48`) = `0x1048`。
+* **物理对比**：在真实的内存布局中，`0x1048` 对应的是真实头部 (`0x0F90`) + `0x58`。
+* **神奇发现**：`0x58` 处正好就是我们要找的那个数据字段！
+
+### 总结
+
+* “指向...偏移位置 (`0x10`)”：这是物理事实，指针确实指在人家结构体的“肚子”上。
+* “编译器看来仍然是指向...第 0 个字节处”：这是类型转换的作用，你强迫编译器从“肚子”开始算作“头”。

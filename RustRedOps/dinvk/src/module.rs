@@ -1,6 +1,6 @@
 //! Module resolution helpers for Windows.
 //该文件是项目的基石,实现了在不调用任何windows api的情况下,手动解析内存中PE结构来获取模块和函数地址.
-// 这种技术一般被称为"Reflective DLL Injection" 或 "Shellcode coding"风格的变成,主要目的是规避EDR/AV的api hook监控,或者为了在no_std环境下运行
+// 这种技术一般被称为"Reflective DLL Injection反射式dll注入" 或 "Shellcode coding"风格的变成,主要目的是规避EDR/AV的api hook监控,或者为了在no_std环境下运行
 
 
 //引入alloc库,这是一个no_std库,提供了堆分配类型
@@ -25,6 +25,7 @@ static NTDLL: spin::Once<u64> = spin::Once::new();
 /// Retrieves the base address of the `ntdll.dll` module.
 #[inline(always)]
 pub fn get_ntdll_address() -> *mut c_void {
+    // lazy one-time initialization and thread safe and 只初始化一次 ntdll.dll地址
     *NTDLL.call_once(|| get_module_address(
         2788516083u32, 
         Some(murmur3)) as u64
@@ -49,14 +50,24 @@ where
 {
     unsafe {
         let hash = hash.unwrap_or(crc32ba);
+        //获取PEB指针,通过 GS:[0x60] on x64
         let peb = NtCurrentPeb();
+        //获取 PEB_LDR_DATA 结构指针
         let ldr_data = (*peb).Ldr;
+
+        //(*ldr_data).InMemoryOrderModuleList,获取PEB_LDR_DATA中InMemoryOrderModuleList(是一个双向链表,代表模块在内存中的布局及排列的链表)的第一个节点
+        //.Flink,双向链表的下一个节点,即主程序本身(.exe)的LDR_DATA_TABLE_ENTRY的中间位置(通常是0x10的偏移处).
         let mut list_node = (*ldr_data).InMemoryOrderModuleList.Flink;
         
         //rust中* 这个符号被重载(overloaded)了,当*在变量前表示解引用,取值操作;当出现*const *mut的时候,代表这是裸指针类型
         //这里的as只改变了指针的类型标签,不改变地址数值,也不会丢失数据,更没有读取内存中的数据
+        //直接使用指向LDR_DATA_TABLE_ENTRY中InMemoryOrderLinks这个链表的指针,作为LDR_DATA_TABLE_ENTRY的0x00处指针,方便找到DllBase的地址
+        //这里data_table_entry指向LDR_DATA_TABLE_ENTRY中InMemoryOrderLinks的位置
+        //由于as *const LDR_DATA_TABLE_ENTRY;这里将data_table_entry转为指向LDR_DATA_TABLE_ENTRY结构体中InMemoryOrderLinks所在的偏移位置(0x10),但是在编译器看来仍然是指向这个结构体的第0个字节处
         let mut data_table_entry = (*ldr_data).InMemoryOrderModuleList.Flink as *const LDR_DATA_TABLE_ENTRY;
 
+        //提供的模块参数(moudule)为空,这里将停止执行并返回当前主程序(.exe)的基址
+        //此处,模拟了 Windows 官方 API `GetModuleHandle`(用于获取模块的句柄（即内存基址）) 的行为,GetModuleHandle官方文档规定,如果传入的参数是 NULL（在 Rust 中对应空字符串或None），该函数返回用于创建调用进程的文件（即 .exe 文件）的句柄
         if module.to_string().is_empty() {
             return (*peb).ImageBaseAddress;
         }
@@ -64,6 +75,8 @@ where
         // Save a reference to the head nod for the list
         let head_node = list_node;
         let mut addr = null_mut();
+        
+        //(*data_table_entry).FullDllName实际上是访问 LDR_DATA_TABLE_ENTRY中BaseDllName这个字段(因为此时Base是0x10,FULLDLLNAME是0x48,这个操作直接指向BaseDllName的位置0x58)
         while !(*data_table_entry).FullDllName.Buffer.is_null() {
             if (*data_table_entry).FullDllName.Length != 0 {
                 // Converts the buffer from UTF-16 to a `String`
