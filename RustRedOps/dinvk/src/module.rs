@@ -1,5 +1,9 @@
 //! Module resolution helpers for Windows.
+//该文件是项目的基石,实现了在不调用任何windows api的情况下,手动解析内存中PE结构来获取模块和函数地址.
+// 这种技术一般被称为"Reflective DLL Injection" 或 "Shellcode coding"风格的变成,主要目的是规避EDR/AV的api hook监控,或者为了在no_std环境下运行
 
+
+//引入alloc库,这是一个no_std库,提供了堆分配类型
 use alloc::{
     format, vec::Vec, vec,
     string::{String, ToString}, 

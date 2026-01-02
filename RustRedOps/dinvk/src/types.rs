@@ -1225,8 +1225,9 @@ pub struct TELEMETRY_COVERAGE_HEADER {
 }
 
 #[repr(C)]
+//与verg中_LDR_DATA_TABLE_ENTRY相对应
 pub struct LDR_DATA_TABLE_ENTRY {
-    pub Reserved1: [*mut c_void; 2],
+    pub Reserved1: [*mut c_void; 2],//该字段大小16字节,因为在repr(c)模式下64 bit os一个指针占用8字节
     pub InMemoryOrderLinks: LIST_ENTRY,
     pub Reserved2: [*mut c_void; 2],
     pub DllBase: *mut c_void,
