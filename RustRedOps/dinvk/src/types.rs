@@ -1230,10 +1230,10 @@ pub struct LDR_DATA_TABLE_ENTRY {
     pub Reserved1: [*mut c_void; 2],//该字段大小16字节,因为在repr(c)模式下64 bit os一个指针占用8字节
     pub InMemoryOrderLinks: LIST_ENTRY,
     pub Reserved2: [*mut c_void; 2],
-    pub DllBase: *mut c_void,
+    pub DllBase: *mut c_void,//目标模块（通常是ntdll.dll 或 kernel32.dll）在内存中的起始地址（DllBase）
     pub Reserved3: [*mut c_void; 2],
     pub FullDllName: UNICODE_STRING,
-    pub Reserved4: [u8; 8],
+    pub Reserved4: [u8; 8],//此处位置0x58,这里是占位写法,实际上这里对应的是 struct _UNICODE_STRING BaseDllName;
     pub Reserved5: [*mut c_void; 3],
     pub Anonymous: LDR_DATA_TABLE_ENTRY_0,
     pub TimeDateStamp: u32,
