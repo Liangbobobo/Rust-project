@@ -260,7 +260,7 @@ pub struct IMAGE_OPTIONAL_HEADER64 {
     pub SizeOfHeapCommit: u64,
     pub LoaderFlags: u32,
     pub NumberOfRvaAndSizes: u32,
-    pub DataDirectory: [IMAGE_DATA_DIRECTORY; 16],
+    pub DataDirectory: [IMAGE_DATA_DIRECTORY; 16],//16个数组分别指向不同的结构,如导入表,导出表等结构
 }
 
 #[repr(C)]

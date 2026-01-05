@@ -309,20 +309,53 @@ Header）地址，从而开始解析整个 PE 结构。
 
 一个进程通常由多个 PE 文件组成（1 个 EXE + N 个 DLL）。PEB 通过 Ldr 字段维护这些 PE 文件的链表。
 
+系统负责“加载”和“维护”数据，而这个项目负责“手动读取”和“解析”数据  
+真正的 PE 结构由系统维护：  
+当程序启动或 DLL 被加载时，Windows 操作系统（加载器 Loader）负责将 PE 文件从磁盘映射到内存中。系统会维护关键的内核与用户态结构，例如 **PEB**（Process Environment Block）和 **LDR 链表**（`InMemoryOrderModuleList`），这些结构完整记录了当前进程中所有已加载模块的基地址、文件路径、大小等元信息。你的项目并没有“凭空捏造”一个 PE 结构，而是直接读取操作系统已经加载到内存中的那个**真实的 PE 映像**——它就存在于进程的虚拟地址空间里，只是通常被高级 API（如 `GetModuleHandle`）封装起来而已。
+
+代码通过“模拟”加载器行为来寻找函数：  
+通常情况下，程序员只需调用 `GetProcAddress`，让系统帮我们完成函数地址的查找。但在 `src/module.rs` 中，代码完全绕过了标准 Windows API，自己重新实现了一整套底层查找逻辑：
+
+- **获取基址**：通过内联汇编读取 x64 架构下的 `GS` 寄存器（或 x86 下的 `FS` 寄存器），定位到当前线程的 TEB，进而找到 PEB；再遍历 PEB 中的 `Ldr->InMemoryOrderModuleList` 链表，匹配目标模块名（如 `"kernel32.dll"`），从而获得其真实加载基址。
+- **手动解析 PE 结构**：拿到基址后，代码将该地址视为字节数组的起点，严格按照 PE 文件格式规范，依次解析：
+  - `IMAGE_DOS_HEADER`
+  - `IMAGE_NT_HEADERS`（含可选头）
+  - `IMAGE_DATA_DIRECTORY[IMAGE_DIRECTORY_ENTRY_EXPORT]`
+  - 最终定位到 `IMAGE_EXPORT_DIRECTORY`
+- **计算函数地址**：根据导出目录中的 `AddressOfNames`、`AddressOfNameOrdinals` 和 `AddressOfFunctions` 三个 RVA 数组，手动执行二分查找或线性遍历，将函数名映射到实际的导出 RVA，并加上模块基址得到最终虚拟地址。
+- **处理转发机制**：甚至对 Windows 的 **API Set**（如 `api-ms-win-core-file-l1-2-0.dll` 这类虚拟 DLL）也做了深度支持——通过解析 `PEB.ApiSetMap` 结构，还原出虚拟名称到真实 DLL（如 `kernelbase.dll`）的映射关系，从而正确解析转发条目。
+
+为什么要这么做？  
+这通常是为了**规避 EDR**（终端检测与响应系统）。现代安全软件普遍会对 `GetProcAddress`、`LoadLibrary` 等关键 API 进行 **User-land Hook** 监控，一旦发现程序试图获取敏感函数（如 `NtCreateThreadEx`、`VirtualAlloc`），就会触发告警或阻断。而通过这种“手动解析内存中 PE 结构”的方式（属于 **Reflective Loading / Manual Mapping** 技术的核心环节），程序可以悄无声息地获取任意函数地址，全程不调用任何被监控的系统 API，从而有效绕过用户态钩子，实现隐蔽执行——这正是红队工具和高级加载器（如你的 `dinvk` 项目）追求的核心能力。
+
 ```rust
 // src/types.rs
+#[repr(C)]
 pub struct PEB_LDR_DATA {
-    // ...
+    pub Length: u32,
+    pub Initialized: u8,
+    pub SsHandle: HANDLE,
     pub InLoadOrderModuleList: LIST_ENTRY,
     pub InMemoryOrderModuleList: LIST_ENTRY,
-    // ...
+    pub InInitializationOrderModuleList: LIST_ENTRY,
+    pub EntryInProgress: *mut c_void,
+    pub ShutdownInProgress: u8,
+    pub ShutdownThreadId: HANDLE,
 }
 
+#[repr(C)]
+//与verg中_LDR_DATA_TABLE_ENTRY相对应
 pub struct LDR_DATA_TABLE_ENTRY {
-    // ...
-    pub DllBase: *mut c_void,      // 指向该模块 PE 头部的指针
+    pub Reserved1: [*mut c_void; 2],//该字段大小16字节,因为在repr(c)模式下64 bit os一个指针占用8字节
+    pub InMemoryOrderLinks: LIST_ENTRY,
+    pub Reserved2: [*mut c_void; 2],
+    pub DllBase: *mut c_void,//目标模块（通常是ntdll.dll 或 kernel32.dll）在内存中的起始地址（DllBase）
+    pub Reserved3: [*mut c_void; 2],
     pub FullDllName: UNICODE_STRING,
-    // ...
+    pub Reserved4: [u8; 8],//此处位置0x58,这里是占位写法,实际上这里对应的是 struct _UNICODE_STRING BaseDllName;
+    pub Reserved5: [*mut c_void; 3],
+    pub Anonymous: LDR_DATA_TABLE_ENTRY_0,
+    pub TimeDateStamp: u32,
 }
 ```
 
@@ -454,7 +487,7 @@ SectionHeaders 指针 --->|   IMAGE_SECTION_HEADER [0]  |  <- .text 的描述信
 
 ### PE文件结构
 
-为了避免依赖庞大的 windows-sys 或 winapi crate，选择手动定义了这些底层结构。这种做法在恶意软件开发或红队工具（如你正在开发的RustRedOps）中非常常见，目的是为了减少特征指纹、减小二进制体积以及拥有更精细的控制权。
+为了避免依赖庞大的 windows-sys 或 winapi crate，选择手动定义了这些底层结构。这种做法在恶意软件开发或红队工具（如你正在开发的RustRedOps）中非常常见，目的是为了减少特征指纹?为什么、减小二进制体积?为什么以及拥有更精细的控制权。
 
 #### PE 文件结构详解：基于 `dinvk` 项目中的数据结构
 

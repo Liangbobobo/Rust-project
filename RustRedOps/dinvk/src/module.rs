@@ -147,6 +147,8 @@ where
         // 将模块句柄（指针）转换为 usize 类型。
         // 在 PE 结构解析中，所有的 RVA (Relative Virtual Address) 都是相对于这个基地址的偏移
         // 所以我们需要这个数值来计算内存中的绝对地址 (VA = Base + RVA)。
+        //这里是对指针的操作,h_module指针指向的就是pe文件的dos头(IMAGE_DOS_HEADER)
+        //但根据指针自身的偏移就能找到其他字段
         let h_module = h_module as usize;
 
         // Initializes the PE parser from the base address
@@ -157,6 +159,7 @@ where
 
         // Retrieves the NT header and export directory
         // pe.nt_header() 返回 NT 头指针，pe.exports().directory() 返回导出表目录指针。
+        //使用let some进行解构
         let Some((nt_header, export_dir)) = pe.nt_header().zip(pe.exports().directory()) else {
             return null_mut();
         };
@@ -165,10 +168,18 @@ where
         //通过export table大小,来判断该模块是否 函数转发”(Export Forwarding)
         //Windows 规定：如果导出地址表中的某个地址 RVA 位于导出目录（Export Directory）的内存范围内，
         // 那么该地址不是代码入口，而是一个指向 "DllName.FunctionName" 字符串的 RVA，即转发。
+        //这里的DataDirectory类型是IMAGE_DATA_DIRECTORY,是包含16个元素的数组
+        //这16个数组结构都是IMAGE_DATA_DIRECTORY
+        //IMAGE_DIRECTORY_ENTRY_EXPORT定义为 0u16,代表第一个数组,指向存储导出表的结构
         let export_size = (*nt_header).OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT as usize].Size as usize;
 
         // Retrieving information from module names
         //IMAGE_EXPORT_DIRECTORY->AddressOfNames,指向一个存储该模块函数名的数组,该数组不在本程序的二进制文件中,而在目标dll的内存映射区中
+        //AddressOfNames as usize,这里当作RVA来使用
+        //names是一个slice,长度是导出表的函数个数
+        //h_module + (*export_dir).AddressOfNames as usize,这里组成了slice中u32数组的绝对地址
+        //但,slice中u32指向的仍然是RVA
+        //构建导出函数名字符串的索引表slice
         let names = from_raw_parts(
             (h_module + (*export_dir).AddressOfNames as usize) as *const u32, 
             (*export_dir).NumberOfNames as usize
@@ -187,6 +198,8 @@ where
         // 构建导出序号表 (AddressOfNameOrdinals) 的切片。
         // 这是一个 u16 数组，它充当了 "名称表" 到 "函数地址表" 的索引映射。
         // 它的长度与 names 数组一致。即：ordinals[i] 是 names[i]对应的函数在 functions 数组中的索引。
+        //导出表会按照序号\名称\地址分别索引,名称表以a-z排序,地址表以0,1顺延排序,序号表以名称的顺序进行排序
+        //顺序表和地址表不能根据其索引做到一一对应
         //AddressOfNameOrdinals 和 AddressOfNames 的性质完全一样，它们指向的数据都存储在 PE 文件的导出表数据区域中（通常是.edata 或 .rdata 节），并且在 PE 文件被加载到内存后，都位于目标模块（DLL）的内存映射区内
         let ordinals = from_raw_parts(
             (h_module + (*export_dir).AddressOfNameOrdinals as usize) as *const u16, 
