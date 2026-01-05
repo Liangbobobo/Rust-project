@@ -4,11 +4,11 @@
       - [主要职责流程](#主要职责流程)
     - [2. 安全与红队视角：自定义加载器（Custom Loader）](#2-安全与红队视角自定义加载器custom-loader)
       - [为什么要自己写加载器？](#为什么要自己写加载器)
-      - [常见类型：](#常见类型)
+      - [常见类型](#常见类型)
     - [3. 结合你的项目（`dinvk`）：加载器的深度实现](#3-结合你的项目dinvk加载器的深度实现)
       - [第一步：解析 PE 头（PE Parsing）](#第一步解析-pe-头pe-parsing)
       - [第二步：内存分配（Allocation）](#第二步内存分配allocation)
-      - [第三步：映射节（Mapping Sections）——关键！](#第三步映射节mapping-sections关键)
+      - [第三步：映射节（Mapping Sections）——关键](#第三步映射节mapping-sections关键)
       - [第四步：基址重定位（Base Relocation）](#第四步基址重定位base-relocation)
       - [第五步：解析导入表（Resolve Imports / IAT Fixing）](#第五步解析导入表resolve-imports--iat-fixing)
       - [第六步：权限最终设置（Finalize Protections）](#第六步权限最终设置finalize-protections)
@@ -31,7 +31,12 @@
       - [第二部分：NT Headers（PE 核心头）](#第二部分nt-headerspe-核心头)
         - [2.1 File Header（文件物理概况）](#21-file-header文件物理概况)
         - [2.2 Optional Header（逻辑加载信息）](#22-optional-header逻辑加载信息)
-        - [2.3 Data Directory（功能索引表）](#23-data-directory功能索引表)
+      - [2.3 Data Directory（功能索引表）](#23-data-directory功能索引表)
+      - [`IMAGE_EXPORT_DIRECTORY->AddressOfNames` 的内存归属解析](#image_export_directory-addressofnames-的内存归属解析)
+        - [1. **物理归属：它是目标 DLL 的一部分**](#1-物理归属它是目标-dll-的一部分)
+        - [2. **内存位置：位于当前进程的虚拟地址空间内**](#2-内存位置位于当前进程的虚拟地址空间内)
+        - [3. **技术细节修正：它是一个“RVA 数组”，而非“字符串数组”**](#3-技术细节修正它是一个rva-数组而非字符串数组)
+        - [总结](#总结)
       - [第三部分：Section Headers（节表）](#第三部分section-headers节表)
       - [总结：Windows PE 加载流程](#总结windows-pe-加载流程)
   - [PEB](#peb)
@@ -49,7 +54,7 @@
     - [物理事实 (Memory Reality)](#物理事实-memory-reality)
     - [编译器的“错觉” (Compiler's View)](#编译器的错觉-compilers-view)
     - [结果：偏移量的“平移”](#结果偏移量的平移)
-    - [总结](#总结)
+    - [总结](#总结-1)
   - [指令集架构](#指令集架构)
     - [1. ARM 架构（AArch64 / ARM64）](#1-arm-架构aarch64--arm64)
     - [2. RISC-V](#2-risc-v)
@@ -70,6 +75,13 @@
     - [5. SCR（Screen Saver）—— 特殊用途的 EXE](#5-scrscreen-saver-特殊用途的-exe)
     - [6. OCX / CPL —— 插件式架构的实现者](#6-ocx--cpl--插件式架构的实现者)
   - [总结：为何需要如此多样的 PE 格式？](#总结为何需要如此多样的-pe-格式)
+  - [源码](#源码)
+    - [CStr::from\_ptr(ptr).to\_string\_lossy().into\_owned()](#cstrfrom_ptrptrto_string_lossyinto_owned)
+      - [1. `CStr::from_ptr(ptr)`：封装原始指针，创建安全视图](#1-cstrfrom_ptrptr封装原始指针创建安全视图)
+      - [2. `.to_string_lossy()`：容错式 UTF-8 转换](#2-to_string_lossy容错式-utf-8-转换)
+      - [3. `.into_owned()`：夺取所有权，实现深拷贝](#3-into_owned夺取所有权实现深拷贝)
+      - [在 `dinvk` 项目中的具体意义](#在-dinvk-项目中的具体意义)
+      - [一句话总结](#一句话总结)
 
 # 注意
 
@@ -133,7 +145,7 @@ TEB->PEB->LDR(裸指针)->PEB_LDR_DATA->InMemoryOrderModuleList(双向链表)->L
 - 标准的 Windows 加载路径（如 `CreateProcess`, `LoadLibrary`）会被 EDR 深度 Hook。
 - 自定义加载器试图在不触发警报的情况下，将恶意 Payload 注入内存并执行。
 
-#### 常见类型：
+#### 常见类型
 
 1. **Shellcode Loader**  
    - 最简单形式：调用 `VirtualAlloc` 分配 RWX 内存，复制 Shellcode，然后通过 `CreateThread` 执行。
@@ -178,7 +190,7 @@ TEB->PEB->LDR(裸指针)->PEB_LDR_DATA->InMemoryOrderModuleList(双向链表)->L
   - 申请大小 = `SizeOfImage`
   - 初始权限 = `PAGE_READWRITE`（RW），便于写入数据
 
-#### 第三步：映射节（Mapping Sections）——关键！
+#### 第三步：映射节（Mapping Sections）——关键
 
 - 不能直接 `memcpy` 整个文件！必须按节逐个映射。
 - 对每个节：
@@ -253,9 +265,6 @@ TEB->PEB->LDR(裸指针)->PEB_LDR_DATA->InMemoryOrderModuleList(双向链表)->L
 > **总结**：  
 > 对于你的 `dinvk` 项目而言，**加载器就是一个由你编写的 Rust 程序，它手动解析 PE 文件结构，使用直接系统调用（Direct Syscalls）申请内存并写入代码，最后在不被 EDR 察觉的情况下执行目标 Payload。**  
 > 你现在不是在写应用，而是在打造一辆“隐形战车”的引擎——静默、精准、穿透防御。
-
-
-
 
 ## 此项目找DLL 基址的原理
 
@@ -381,16 +390,16 @@ PE 是 Windows 可执行文件（.exe, .dll,.sys）的标准格式。它描述�
   IMAGE_DOS_HEADER 指针，通过 e_lfanew 找到 IMAGE_NT_HEADERS，再访问
   OptionalHeader.DataDirectory 找到 导出表 (Export Directory)。
 
-   1. 查找函数（Resolution）：
+   3. 查找函数（Resolution）：
       遍历导出表中的函数名称数组（AddressOfNames），找到目标函数（例如NtAllocateVirtualMemory 或 LoadLibraryA）。
 
-   2. 获取地址或 SSN（Extraction）：
+   4. 获取地址或 SSN（Extraction）：
        - 对于 API
          调用：从导出表中获取该函数的内存地址，将其强转为函数指针（如
          LoadLibraryAFn）并直接调用。
        - 对于 Syscall：解析 ntdll.dll 中对应函数的汇编代码（通常是 mov eax, SSN; syscall），提取出 SSN (System Service Number)。
 
-   3. 执行调用（Execution）：
+   5. 执行调用（Execution）：
       使用内联汇编（asm!）直接执行 syscall 指令（传入提取出的
   SSN），或者跳转到获取到的 API 函数地址执行。
 
@@ -662,18 +671,106 @@ pub struct IMAGE_OPTIONAL_HEADER64 {
 }
 ```
 
-##### 2.3 Data Directory（功能索引表）
+#### 2.3 Data Directory（功能索引表）
 
 每个条目是一个指向关键功能表的 RVA 和大小。
 
 ```rust
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct IMAGE_DATA_DIRECTORY {
-    pub VirtualAddress: u32, // 功能表在内存中的 RVA（相对于 ImageBase）
-    pub Size: u32,           // 功能表的字节大小
+pub struct IMAGE_EXPORT_DIRECTORY {
+    pub Characteristics: u32,
+    pub TimeDateStamp: u32,
+    pub MajorVersion: u16,
+    pub MinorVersion: u16,
+    pub Name: u32,
+    pub Base: u32,
+    pub NumberOfFunctions: u32,
+    pub NumberOfNames: u32,
+    pub AddressOfFunctions: u32,
+    pub AddressOfNames: u32,
+    pub AddressOfNameOrdinals: u32,
 }
 ```
+
+#### `IMAGE_EXPORT_DIRECTORY->AddressOfNames` 的内存归属解析
+
+你的理解**完全正确**：  
+`IMAGE_EXPORT_DIRECTORY` 结构体中的 `AddressOfNames` 字段所指向的函数名数组，**并不在你当前程序（.exe）的二进制文件中，而是位于目标 DLL（如 `ntdll.dll`）被加载到内存后的映射区域中**。
+
+为了更严谨地巩固这一关键概念，我们可以从以下三个维度深入拆解：
+
+---
+
+##### 1. **物理归属：它是目标 DLL 的一部分**
+
+- 该函数名数组是目标 DLL（例如 `kernel32.dll` 或 `ntdll.dll`）在**编译和链接阶段**就生成的导出表（Export Table）数据。
+- 当 Windows 加载器将该 DLL 映射进你的进程地址空间时，整个 PE 结构（包括 DOS 头、NT 头、节表、导出表等）都会被载入内存。
+- 你的程序（`.exe`）**本身不包含这些字符串**，它只是通过 `src/module.rs` 中的解析逻辑（如 `get_proc_address`）去“读取”另一个模块的内部结构。
+  > ✅ 简言之：你的代码是“读者”，DLL 是“书”。书的内容不在读者身体里，但读者可以翻开它。
+
+---
+
+##### 2. **内存位置：位于当前进程的虚拟地址空间内**
+
+- 虽然该数组不属于你的 `.exe` 模块，但由于目标 DLL 已被加载到**同一个进程**中，其内存映像就存在于**当前进程的虚拟地址空间**里。
+- 因此，你可以安全地执行如下操作：
+
+  ```rust
+  let names_array_rva = export_dir.AddressOfNames;
+  let names_array_va = h_module as usize + names_array_rva as usize;
+  let names_ptr = names_array_va as *const u32; // 实际是指向 RVA 数组
+  ```
+
+- 这种“基址 + RVA”的加法之所以有效，正是因为 `h_module`（即 DLL 的加载基址）和导出表数据**同属一个地址空间**。
+  > ⚠️ 反例：若尝试用同样方式读取**其他进程**的 DLL 内存，则会因地址空间隔离而失败（需使用 `ReadProcessMemory` 等 API）。
+
+---
+
+##### 3. **技术细节修正：它是一个“RVA 数组”，而非“字符串数组”**
+
+这里有一个**关键但易错的细节**需要澄清：
+
+- ❌ **错误理解**：  
+  `AddressOfNames` → `["NtAllocateVirtualMemory", "NtCreateThreadEx", ...]`
+
+- ✅ **正确结构**：  
+  `AddressOfNames` → `[RVA₁, RVA₂, RVA₃, ...]`  
+  其中每个 `RVAᵢ` 是一个 **相对虚拟地址（Relative Virtual Address）**，指向真正的函数名字符串。
+
+  也就是说，完整的解析路径是：
+
+  ```
+  h_module
+    └─> IMAGE_EXPORT_DIRECTORY
+          └─> AddressOfNames (RVA) 
+                └─> [RVA_to_Name1, RVA_to_Name2, ...]  ← 这是一个 u32 数组
+                      └─> h_module + RVA_to_Name1 → "NtAllocateVirtualMemory"
+                      └─> h_module + RVA_to_Name2 → "NtCreateThreadEx"
+  ```
+
+- 因此，在代码中你通常会看到两层间接寻址：
+
+  ```rust
+  // 第一层：获取第 i 个函数名的 RVA
+  let name_rva = unsafe { *(names_ptr.add(i)) };
+  // 第二层：计算真实字符串地址
+  let name_str_ptr = (h_module as usize + name_rva as usize) as *const u8;
+  ```
+
+---
+
+##### 总结
+
+你的直觉非常准确：**你的程序只是一个“观察者”或“解析器”**，它通过指针跨越了模块边界，去窥探目标 DLL 在内存中的内部数据结构。
+
+在 `dinvk` 这类红队项目中：
+
+- `h_module`（即 DLL 的加载基址）就是你进行“窥探”的**基准起始点**。
+- 所有对导出表（EAT）、导入表（IAT）、重定位表的操作，本质上都是基于这个基址 + RVA 的偏移计算。
+- 正是这种对 PE 结构的深度手动解析能力，使得加载器能够绕过 `GetProcAddress` 等被监控的 API，实现隐蔽的函数地址获取。
+
+> 掌握这一点，你就真正理解了“反射式加载”和“无痕 API 解析”的底层基石。
 
 **16 个索引的含义**：
 
@@ -1391,3 +1488,84 @@ pub struct IMAGE_FILE_HEADER {
 > - 系统臃肿、低效、极不稳定。
 
 ✅ **多样化的 PE 格式** 是现代多任务操作系统**高效、安全、可扩展**运行的基石。它们共同构成了从硬件到用户应用的完整执行链条。
+
+## 源码
+
+### CStr::from_ptr(ptr).to_string_lossy().into_owned()
+
+这段代码的核心作用是：**将目标 DLL 内存映射区中的“C 风格字符串（以 null 结尾的原始字节）”安全地转换成 Rust 环境中可用的、所有权独立的 `String` 对象。**
+
+这种转换在红队加载器（如 `dinvk`）中至关重要——既要正确读取 Windows PE 结构中的原始数据，又要避免内存安全问题。我们可以将其拆解为以下三个关键步骤：
+
+---
+
+#### 1. `CStr::from_ptr(ptr)`：封装原始指针，创建安全视图
+
+- **背景**：  
+  `ptr` 是一个裸指针（`*const i8`），指向 DLL 内存映像中某个名称字符串（例如 `"kernel32.dll\0"` 或 `"NtAllocateVirtualMemory\0"`）。
+
+- **作用**：  
+  `CStr::from_ptr(ptr)` 告诉 Rust：“从这个地址开始，逐字节读取，直到遇到 `\0` 字节为止”，并将该内存片段包装为一个 `CStr` 类型。
+
+- **关键特性**：  
+  - **零拷贝**：`CStr` 仅是对原始内存的**借用（borrow）**，不进行数据复制。
+  - **生命周期绑定**：它隐含地依赖于底层内存的有效性——如果 DLL 被卸载或内存被释放，该 `CStr` 将变为悬空引用（dangling pointer）。
+  - **安全抽象**：Rust 通过 `CStr` 提供了对 C 字符串的安全访问接口，防止越界读取。
+
+> ✅ 此步建立了对 DLL 内部字符串的**受控视图**，但尚未脱离原始内存的束缚。
+
+---
+
+#### 2. `.to_string_lossy()`：容错式 UTF-8 转换
+
+- **背景**：  
+  PE 文件中的函数名和模块名通常使用 **ASCII** 或 **ANSI（如 Windows-1252）** 编码，而 Rust 的 `String` **严格要求合法 UTF-8**。
+
+- **作用**：  
+  - 尝试将 `CStr` 中的字节序列解释为 UTF-8。
+  - **“Lossy”（有损）策略**：若遇到非法 UTF-8 序列（例如某些扩展 ASCII 字符），不会 panic，而是用 Unicode 替代字符 ``（U+FFFD）代替无效字节。
+  - 返回类型为 `Cow<str>`（Clone-on-Write）：  
+    - 如果输入已是合法 UTF-8，可能直接返回 `&str`（零分配）；  
+    - 否则，会分配新内存并返回拥有所有权的 `String`。
+
+- **为何需要？**  
+  在红队场景中，你无法控制目标 DLL 的编码细节（尤其是第三方或系统 DLL）。`to_string_lossy()` 提供了**健壮性保障**，避免因个别非标准字符导致整个加载器崩溃。
+
+---
+
+#### 3. `.into_owned()`：夺取所有权，实现深拷贝
+
+- **背景**：  
+  `to_string_lossy()` 返回的 `Cow<str>` 可能仍是对 DLL 内存的引用（尤其在纯 ASCII 情况下）。
+
+- **作用**：  
+  强制将字符串内容**深拷贝到 Rust 堆内存中**，返回一个完全独立的 `String` 对象。
+
+- **安全意义**：  
+  - 即便后续 DLL 被 `FreeLibrary` 卸载，或其内存被覆盖/释放，该 `String` 依然有效。
+  - 符合 Rust 的**所有权模型**：`dll_name` 变量现在拥有自己的数据，生命周期不再依赖外部模块。
+
+> 🔒 这是实现“内存隔离”的关键一步——让敏感操作（如日志、转发解析、哈希比对）基于**安全副本**进行。
+
+---
+
+#### 在 `dinvk` 项目中的具体意义
+
+在 `get_proc_address` 函数中，获取当前 DLL 的名称（`dll_name`）主要用于处理 **函数转发（Export Forwarding）** 场景：
+
+- 某些 DLL（如 `kernel32.dll`）并不直接实现所有导出函数，而是通过导出表中的**转发条目**指示：“请去 `kernelbase.dll!SomeFunction` 找真正的实现”。
+- 为了递归解析这类转发，程序必须知道：
+  1. 当前正在解析的是哪个 DLL（即 `dll_name`）；
+  2. 转发目标的格式（如 `"KERNELBASE.CreateFileW"`）。
+
+因此，`dll_name` 会被传入 `get_forwarded_address` 函数，用于：
+
+- 分割转发字符串（提取目标 DLL 名和函数名）
+- 递归加载或查找目标模块
+- 最终定位真实函数地址
+
+---
+
+#### 一句话总结
+
+> 这行代码完成了从 **“危险的原始内存字节”** 到 **“安全的、符合 Rust 所有权模型的标准字符串”** 的跨越，既保证了与 Windows PE 结构的兼容性，又杜绝了悬空指针和编码崩溃风险——这是构建可靠、隐蔽加载器的基石之一。
