@@ -242,7 +242,9 @@ where
         let dll_name = {
             let ptr = (h_module + (*export_dir).Name as usize) as *const i8;
             //详见module.md的源码
-            CStr::from_ptr(ptr).to_string_lossy().into_owned()
+            CStr::from_ptr(ptr)
+            .to_string_lossy()
+            .into_owned()
         };
 
         // Import By Name or Hash
@@ -254,6 +256,7 @@ where
             // 解析当前索引 i 处的函数名。
             // names[i] 是 RVA -> +Base -> 指针 -> CStr -> &str
             let name = CStr::from_ptr((h_module + names[i] as usize) as *const i8)
+                //不使用to_string_lossy(),避免在循环中分配内存,详见module.md
                 .to_str()
                 .unwrap_or("");
 
@@ -289,8 +292,10 @@ where
 
 /// Resolves forwarded exports to the actual implementation address.
 /// 处理Windows PE 导出表中比较棘手的“函数转发 (Forwarding)”机制，尤其涉及到了现代 Windows的 API Set Schema (虚拟 DLL) 解析
-/// /// 解析转发导出（Forwarded Exports）以获取实际的实现地址。
-/// 在 Windows PE 格式中，如果导出地址表 (EAT) 中的某个地址 RVA 指向了导出目录（Export Directory）自身的内存范围内，那么该地址不是代码入口而是一个指向 ASCII 字符串的指针，该字符串指明了真正的函数位置（如"NTDLL.RtlAllocateHeap"）
+/// 解析转发导出（Forwarded Exports）以获取实际的实现地址。
+/// 在 Windows PE 格式中，如果导出地址表 (EAT) 中的某个地址 RVA 指向了
+/// 导出目录（Export Directory）自身的内存范围内，那么该地址不是代码入口
+/// 而是一个指向 ASCII 字符串的指针，该字符串指明了真正的函数位置（如"NTDLL.RtlAllocateHeap"）
 fn get_forwarded_address(
     module: &str,//当前模块,如"KERNEL32.dll"），用于 API Set 解析时的宿主判断
     address: *mut c_void,//在导出表中找到的原始地址（可能是代码地址，也可能是指向转发字符串的指针）
@@ -366,7 +371,11 @@ fn get_forwarded_address(
 ///
 /// This parses the ApiSetMap from the PEB and returns all possible DLLs,
 /// excluding the current module itself if `ValueCount > 1`.
-/// Windows 7 之前，系统 DLL (如 kernel32.dll)是巨大的单体。为了重构和解耦，微软引入了 "MinWin" 和 "API Sets"。当你看到 api-ms-win-core-file-l1-1-0.dll这种奇怪的名字时，它并不是硬盘上的文件，而是一个“契约 (Contract)”或“虚拟DLL”。系统加载器会查找 PEB (进程环境块) 中的ApiSetMap，将这个虚拟名字映射到真正的物理文件（通常是 kernelbase.dll 或kernel32.dll）。
+/// Windows 7 之前，系统 DLL (如 kernel32.dll)是巨大的单体。
+/// 为了重构和解耦，微软引入了 "MinWin" 和 "API Sets"。
+/// 当你看到 api-ms-win-core-file-l1-1-0.dll这种奇怪的名字时，它并不是硬盘上的文件，
+/// 而是一个“契约 (Contract)”或“虚拟DLL”。
+/// 系统加载器会查找 PEB (进程环境块) 中的ApiSetMap，将这个虚拟名字映射到真正的物理文件（通常是 kernelbase.dll 或kernel32.dll）。
 /// 这段代码就是手动实现了这个映射查询过程,将 API Set 契约（虚拟 DLL 名）解析为实际实现的物理 DLL 名
 /// 该函数解析 PEB 中的 ApiSetMap 结构，返回所有可能的物理 DLL 列表
 /// 如果存在多个映射值（ValueCount > 1），会排除当前模块自身以避免循环引用

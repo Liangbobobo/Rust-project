@@ -39,9 +39,15 @@ pub fn ssn(function_name: &str, module: *mut c_void) -> Option<u16> {
             (*export_dir).NumberOfNames as usize
         );
         
-        for i in 0..(*export_dir).NumberOfNames as isize {
+        for i in 0..(*export_dir)
+        .NumberOfNames as isize {
             let ordinal = ordinals[i as usize] as usize;
+
+            //functions[ordinal] (获取 RVA)
+            //as *const u8,强制转换成一个指向字节的只读裸指针 
+            //后续的代码就可以通过这个指针一个字节一个字节地读取该函数的机器码（即Opcode），从而进行 Hell's Gate 等技术的特征码比对
             let address = (module + functions[ordinal] as usize) as *const u8;
+
             let name = CStr::from_ptr((module + names[i as usize] as usize) as *const i8)
                 .to_str()
                 .unwrap_or("");
