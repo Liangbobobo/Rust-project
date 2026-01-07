@@ -318,6 +318,9 @@ pub struct IMAGE_EXPORT_DIRECTORY {
     pub NumberOfFunctions: u32,
     pub NumberOfNames: u32,
     pub AddressOfFunctions: u32,
+    /// 一个RVA,指向一个u32类型的数组.数组元素也是RVA,每个u32元素,是指向具体函数名称字符串(以\0结尾)的RVA;
+    /// 这数组保存在PE文件的导出数据区域(.rdata或.edata节内);
+    /// 所以需要加两次模块基址才能找到指针的绝对地址
     pub AddressOfNames: u32,
     pub AddressOfNameOrdinals: u32,
 }

@@ -13,9 +13,12 @@ use crate::types::{
 };
 
 /// Global mutable static holding the current Windows API call.
+/// 存储当前正在 Hook 的 API 信息
+///  这是一个 unsafe 的全局变量，多线程下可能会有竞争，但在此类shellcode 加载器场景通常是单线程或受控的
 pub static mut CURRENT_API: Option<WINAPI> = None;
 
-// Atomic variable to control the use of VEH.
+/// Atomic variable to control the use of VEH.
+/// 控制 VEH (异常处理函数) 是否应该响应异常.如果为 false，即使触发了异常，VEH也会直接忽略，交给系统或其他处理器处理
 static USE_BREAKPOINT: AtomicBool = AtomicBool::new(false);
 
 /// Enables or disables the use of hardware breakpoints globally.
@@ -40,6 +43,11 @@ static USE_BREAKPOINT: AtomicBool = AtomicBool::new(false);
 /// set_use_breakpoint(false);
 /// RemoveVectoredExceptionHandler(handle); 
 /// ``
+
+///  Ordering::SeqCst,在cpu指令层加一道锁(内存屏障),
+///  它强制要求：这行代码之前的所有指令必须完成，这行代码之后的所有指令不准提前。 保证了逻辑执行顺序在所有 CPU核心看来都是一致的。
+/// .store 原子存储,对应的是 CPU 的原子指令,且在改内存之后,负责通知cpu的内存一致性,让其他cpu核心知道,缓存的旧值失效了
+/// 是原子世界的“赋值号（=）”，但它附带了硬件级的线程安全保障
 #[inline(always)]
 pub fn set_use_breakpoint(enabled: bool) {
     USE_BREAKPOINT.store(enabled, Ordering::SeqCst);

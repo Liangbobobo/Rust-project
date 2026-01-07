@@ -13,7 +13,7 @@ use crate::{
 /// Resolves the System Service Number (SSN) for a given function name within a module.
 pub fn ssn(function_name: &str, module: *mut c_void) -> Option<u16> {
     unsafe {
-        // Recovering the export directory and hashing the module 
+        // retrieving the export directory and hashing the module 
         let export_dir = PE::parse(module)
             .exports()
             .directory()?;
@@ -22,18 +22,23 @@ pub fn ssn(function_name: &str, module: *mut c_void) -> Option<u16> {
         let module = module as usize;
         
         // Retrieving information from module names
+        // 一个u32数组,里面只存了指向字符串的“指针”（RVA）,也是一个相对于模块基址（ImageBase） 的 RVA.
+        // 这里加一次RVA得到的是`名称RVA数组`在内存中的RVA
         let names = from_raw_parts(
             (module + (*export_dir).AddressOfNames as usize) as *const u32, 
             (*export_dir).NumberOfNames as usize
         );
 
         // Retrieving information from functions
+        // 函数代码真正的起始地址（RVA）
         let functions = from_raw_parts(
             (module + (*export_dir).AddressOfFunctions as usize) as *const u32, 
             (*export_dir).NumberOfFunctions as usize
         );
 
         // Retrieving information from ordinals
+        // u16数组,用于索引name[i]对应的函数地址在functions数组那个位置
+        //names[5]（第6个名字）对应的“索书号”就是 ordinals[5]
         let ordinals = from_raw_parts(
             (module + (*export_dir).AddressOfNameOrdinals as usize) as *const u16, 
             (*export_dir).NumberOfNames as usize
@@ -48,9 +53,13 @@ pub fn ssn(function_name: &str, module: *mut c_void) -> Option<u16> {
             //后续的代码就可以通过这个指针一个字节一个字节地读取该函数的机器码（即Opcode），从而进行 Hell's Gate 等技术的特征码比对
             let address = (module + functions[ordinal] as usize) as *const u8;
 
-            let name = CStr::from_ptr((module + names[i as usize] as usize) as *const i8)
-                .to_str()
-                .unwrap_or("");
+
+            //这里使用*const i8是因为from_ptr的形参是ptr: *const c_char
+            //在 x86_64 Windows（以及 Linux/macOS）上，c_char 被定义为 `i8`（有符号 8位整数）。在某些 ARM 架构上，它可能是 u8。
+            let name = CStr::from_ptr((module + names[i as usize] as usize) 
+            as *const i8)
+            .to_str()
+            .unwrap_or("");
     
             // Comparation by Hash (Default `jenkins3`)
             if jenkins3(name) == hash {
