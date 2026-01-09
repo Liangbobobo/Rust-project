@@ -13,8 +13,8 @@ use crate::types::{
 };
 
 /// Global mutable static holding the current Windows API call.
-/// 存储当前正在 Hook 的 API 信息
-///  这是一个 unsafe 的全局变量，多线程下可能会有竞争，但在此类shellcode 加载器场景通常是单线程或受控的
+/// 存储当前正在 Hook 的 API 信息,即正在进行欺骗的 API 信息（包含真实的恶意参数）;
+///  这是一个 unsafe 的全局变量( static mut 是不安全的)，多线程下可能会有竞争，但在此类shellcode 加载器场景通常是单线程或受控的
 pub static mut CURRENT_API: Option<WINAPI> = None;
 
 /// Atomic variable to control the use of VEH.
@@ -48,6 +48,7 @@ static USE_BREAKPOINT: AtomicBool = AtomicBool::new(false);
 ///  它强制要求：这行代码之前的所有指令必须完成，这行代码之后的所有指令不准提前。 保证了逻辑执行顺序在所有 CPU核心看来都是一致的。
 /// .store 原子存储,对应的是 CPU 的原子指令,且在改内存之后,负责通知cpu的内存一致性,让其他cpu核心知道,缓存的旧值失效了
 /// 是原子世界的“赋值号（=）”，但它附带了硬件级的线程安全保障
+/// 启用或禁用硬件断点功能
 #[inline(always)]
 pub fn set_use_breakpoint(enabled: bool) {
     USE_BREAKPOINT.store(enabled, Ordering::SeqCst);
@@ -60,6 +61,7 @@ pub fn is_breakpoint_enabled() -> bool {
 }
 
 /// Configures a hardware breakpoint on the specified address.
+/// 
 pub(crate) fn set_breakpoint<T: Into<u64>>(address: T) {
     let mut ctx = CONTEXT {
         ContextFlags: if cfg!(target_arch = "x86_64") { CONTEXT_DEBUG_REGISTERS_AMD64 } else { CONTEXT_DEBUG_REGISTERS_X86 },

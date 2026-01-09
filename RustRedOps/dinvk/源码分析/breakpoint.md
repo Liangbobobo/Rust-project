@@ -1,5 +1,6 @@
 # Breakpoint
 
+<<<<<<< Updated upstream
 ## CONTEXT 结构深度解析
 
 CONTENT这个结构本身是谁生成并维护的?存储在什么地方?我的项目中自定义了这个结构后,有什么用?
@@ -140,6 +141,17 @@ Windows 内核（C/C++ 编写）对内存布局有严格要求。例如，在 x6
   * 它容易被“行为监测”发现（设置上下文的动作、异常触发的瞬间）。
 
 在 `dinvk` 这个项目中，为了不被发现，它必须配合 Syscalls (绕过 API 监控) 使用，并且赌 EDR 没有进行高频的线程寄存器扫描。这是一种高级的红队对抗技术。
+=======
+Hardware Breakpoint Spoofing(硬件断点参数欺骗) 或 "Tampering Syscalls"的原理:  
+
+1. EDR 的监控点：现代 EDR (Endpoint Detection and Response) 通常会 Hook用户态的敏感 API（如 NtAllocateVirtualMemory）。当你调用这些 API 时，EDR会先检查你的参数（例如：你是不是在申请 RWX可读可写可执行的内存？）。如果参数看起来是恶意的，EDR 就会拦截。
+2. 欺骗策略 (The Spoof)：  
+    * 第一步：我们调用 API 时，传入完全无害的假参数（例如：申请只读内存PAGE_READONLY）。EDR 检查通过，放行。  
+    * 第二步：我们在 API 执行“系统调用(Syscall)”指令之前的瞬间，利用硬件断点暂停 CPU  
+    *第三步：在异常处理函数（VEH）中，我们将寄存器或栈里的假参数替换为真实的恶意参数（例如：改为 PAGE_EXECUTE_READWRITE）  
+    * 第四步：恢复执行。此时 EDR 的检查已经结束了，Syscall将带着恶意参数进入内核。
+3. 不同于软件断点（修改内存写入 0xCC，容易被 EDR.硬件断点是修改 CPU 的寄存器，不修改任何内存代码，因此极其隐蔽
+>>>>>>> Stashed changes
 
 ## 背景知识
 
