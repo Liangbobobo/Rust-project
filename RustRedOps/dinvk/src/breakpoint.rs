@@ -164,28 +164,59 @@ pub enum WINAPI {
 }
 
 /// Handles exceptions triggered by hardware breakpoints (x64).
+/// 用户调用了一个系统 API如（NtAllocateVirtualMemory），但传入了假参数
 /// 当cpu执行到设置的硬件断点后,拦截异常，偷偷把寄存器里的假参数换成真参数，然后让程序继续跑
 #[cfg(target_arch = "x86_64")]
+
+// 允许在 unsafe 函数体中直接进行 unsafe 操作（Rust 2024 edition 风格）
 #[allow(unsafe_op_in_unsafe_fn)]
+
+// extern "system"告诉 Rust 编译器使用 Windows标准的调用约定（stdcall 的变体）这样操作系统（Windows内核）才能正确地回调这个函数
 pub unsafe extern "system" fn veh_handler(exceptioninfo: *mut EXCEPTION_POINTERS) -> i32 {
     
     // 判断异常是否是硬件断点触发的单步调试异常
+    // EXCEPTION_SINGLE_STEP (0x80000004)硬件断点触发的特定异常代码.如果收到 Access Violation（内存访问违规）或 Divide by Zero（除零），这个函数必须说“不归我管”，返回EXCEPTION_CONTINUE_SEARCH，让系统去找别的处理程序（否则程序会崩溃或者死循环）。
     if !is_breakpoint_enabled() || (*(*exceptioninfo).ExceptionRecord).ExceptionCode != EXCEPTION_SINGLE_STEP {
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
+    // ContextRecord 是一个指向mut CONTEXT 结构体的指针.指向当前线程在异常发生瞬间的寄存器状态快照
+    // 这个结构体不仅是“只读”的快照，它还是可写的。如果我们修改了context 里的值，当函数返回 ContinueExecution时，操作系统会将这些修改后的值写回真正的 CPU 寄存器里
     let context = (*exceptioninfo).ContextRecord;
+
+    // 异常发生时,rip指向导致异常的那条指令,即rip应指向dr0中在set_breakpoint设置的api地址
+    // .Dr7 & 1,取出dr7的第0位,确认断点是在硬件层面开启的
     if (*context).Rip == (*context).Dr0 && (*context).Dr7 & 1 == 1 {
-        if let Some(current) = (*addr_of_mut!(CURRENT_API)).take() {
+
+        // addr_of_mut!(CURRENT_API),获取全局变量CURRENT_API的裸指针
+        if let Some(current) = (*addr_of_mut!(CURRENT_API))
+        // 获取option中的值,并将原值设为NONE
+        // 原子级取出并销毁操作,确保同一hook参数只使用一次
+        .take() {
+
+            // winapi.rs负责spoof,breakpoint负责圆回来.
+            // 在winapi.rs中spoof了下面函数的部分参数,现在只需要修改这些参数,并传入真实意图就行了
+            // 影子空间预留给前四个参数,初始状态是空或垃圾值,调用者不负责把前4个参数填入影子空间,只负责放入对应的寄存器(rcx rdx r8 r9)
+            // 多余的参数沿栈向高地址(向上)增长的
+            // 栈顶高地址,入栈向低地址增长,后入先出.所以,函数参数需要倒着入栈,这样取值才是正序
             match current {
+
+                // NtAllocateVirtualMemory 原型：(Handle, Base, ZeroBits, Size, Type,Protect)。 Protect 是第 6 个
                 WINAPI::NtAllocateVirtualMemory {
                     ProcessHandle, 
                     Protect 
                 } => {
+
+                    // 修改第一个参数,winapi中用的是一个无效值,此处应改为真实的handle
                     (*context).R10 = ProcessHandle as u64;
+                    // 修改第6个参数,直接使用rsp+offset找到第6个参数地址
+                    // winapi传入的是PAGE_READONLY (0x02),此处应改为0x40(rwx)
                     *(((*context).Rsp + 0x30) as *mut u32) = Protect;
                 },
 
+
+                // NtProtectVirtualMemory 原型：(Handle, Base, Size, NewProtect,OldProtect)
+                // 直接修改寄存器，最简单高效
                 WINAPI::NtProtectVirtualMemory { 
                     ProcessHandle, 
                     NewProtect, 
