@@ -418,7 +418,7 @@ pub struct CONTEXT {
     pub P3Home: u64,
     pub P4Home: u64,
     pub P5Home: u64,
-    pub P6Home: u64,
+    pub P6Home: u64,//p1至p6,是Register Parameter HomeArea（影子空间）。Windows API要求调用者在栈上预留空间，这里用于存储寄存器参数
     pub ContextFlags: u32,
     pub MxCsr: u32,
     pub SegCs: u16,

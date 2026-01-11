@@ -2,7 +2,23 @@
 
 ## CONTEXT 结构深度解析
 
+CONTEXT 结构体，这是 Windows 用来描述线程所有寄存器状态的结构。
+
 CONTENT这个结构本身是谁生成并维护的?存储在什么地方?我的项目中自定义了这个结构后,有什么用?
+
+该结构的来源自 Windows SDK 中的 winnt.h 文件,翻译为rust的结构体.并保证了:  
+
+1. 内存布局兼容 (#[repr(C)]),Rust 默认不保证结构体的字段顺序（为了优化内存，Rust编译器可能会重排字段）
+2. 内存对齐 (#[repr(align(16))]),CONTEXT结构体内部包含了 M128A(XMM 寄存器，128位/16字节)，需要 16 字节对齐。如果不对齐，当 CPU尝试使用 SSE/AVX指令加载这些寄存器时，会导致程序崩溃（STATUS_DATATYPE_MISALIGNMENT），或者 Windows API 直接返回错误。
+3. 数据类型映射.为了保证每个字段的大小（Size）准确，必须进行严格的类型映射
+4. 字段顺序与填充.在winnt.h 中 ContextFlags 和 MxCsr 是两个 DWORD(4字节)，加起来 8 字节。紧接着是一堆 WORD (2字节)。 Rust 的 #[repr(C)] 会自动处理这些字段之间的Padding（填充字节），以确保后续的 u64 字段是对齐到 8 字节边界的。只要字段定义的顺序和类型大小没错，#[repr(C)]就能保证偏移量（Offset）是正确的。
+5. 验证方法.在开发此类底层库时，验证结构体准确性的标准方法通常是编写单元测试，检查结构体大小和关键字段的偏移量：
+
+### CONTEXT字段
+
+#### ContextFlags
+
+CONTEXT 结构体包含了 CPU的所有寄存器状态。由于该结构体非常庞大（1000 多字节），Windows为了效率，允许你通过设置 ContextFlags来告诉内核：“我只想操作哪一部分寄存器”
 
 ### 一、这个结构是谁生成并维护的？
 
@@ -151,7 +167,10 @@ Hardware Breakpoint Spoofing(硬件断点参数欺骗) 或 "Tampering Syscalls"�
     *第三步：在异常处理函数（VEH）中，我们将寄存器或栈里的假参数替换为真实的恶意参数（例如：改为 PAGE_EXECUTE_READWRITE）  
     * 第四步：恢复执行。此时 EDR 的检查已经结束了，Syscall将带着恶意参数进入内核。
 3. 不同于软件断点（修改内存写入 0xCC，容易被 EDR.硬件断点是修改 CPU 的寄存器，不修改任何内存代码，因此极其隐蔽
+<<<<<<< Updated upstream
 
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
 
 ## 背景知识
@@ -462,6 +481,7 @@ pub enum c_void {
 
 利用枚举来禁止实例化，利用 `repr(u8)` 来保证内存布局非零，利用 `lang item`来获得编译器的原生支持，最终造就了一个完全服务于 FFI 指针操作的特殊类型
 
+<<<<<<< Updated upstream
 ## 关于NtGetContextThread的工作原理
 
 ### 系统调用 (Syscall)：CPU 从用户模式（Ring 3）切换到内核模式（Ring 0）
@@ -522,3 +542,8 @@ pub enum c_void {
 ### 总结
 
 `NtGetContextThread` 是一个赋予程序强大“内省”（Introspection）能力的底层系统函数。它允许代码捕获并保存 CPU 在某一时刻的完整状态快照。在合法开发中，它是编写调试器（Debugger）和性能分析工具的基础。而在安全开发（无论是攻击还是防御）中，它被用于实现高级的代码钩子（Hook）、进程注入、反调试和反分析技术，是理解现代用户态恶意软件规避技术的关键组件之一。
+=======
+### NtGetContextThread(NtCurrentThread(), &mut ctx);
+
+这里为什么不使用indirect syscall?
+>>>>>>> Stashed changes
