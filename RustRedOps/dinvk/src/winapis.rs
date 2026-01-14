@@ -12,8 +12,12 @@ use crate::{types::*, dinvoke};
 pub fn LoadLibraryA(module: &str) -> *mut c_void {
     let name = alloc::format!("{module}\0");
     let kernel32 = get_module_address(s!("KERNEL32.DLL"), None);
+
+    // 无痕加载dll,不经过windows系统加载器,手动在内存中找到`LoadLibraryA` 函数的地址并执行它，从而加载一个新的 DLL 到当前进程中
+
     dinvoke!(
         kernel32,
+        // 编译时混淆LoadLibraryA这个字符串,在执行代码的瞬间解码到当前线程的栈内存,且用完就丢弃
         s!("LoadLibraryA"),
         LoadLibraryAFn,
         name.as_ptr().cast()
