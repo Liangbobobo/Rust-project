@@ -73,7 +73,7 @@ pub(crate) fn set_breakpoint<T: Into<u64>>(address: T) {
         ..Default::default()
     };
 
-<<<<<<< Updated upstream
+
     // NtCurrentThread()：获取当前线程的“伪句柄”（Pseudo Handle）即-2
     // ctx 是一个存在于内存（RAM）中的数据结构，它是 CPU内部寄存器的一个镜像。在ring3模式下,只能用ctx作为cpu寄存器的载体(ring3不能直接操作特殊的cpu寄存器)
     // NtGetContextThread是win中底层的原生api,位于ntdll.dll中,是ring3和ring0交互桥梁,用于获取某时刻完整cpu的寄存器状态
@@ -81,10 +81,9 @@ pub(crate) fn set_breakpoint<T: Into<u64>>(address: T) {
     // ring0收到请求后,去物理cpu读取寄存器状态
     // ring0把读到的数据填回到ctx中
     // 这段代码是硬件断点设置逻辑中“读取-修改-写入”安全范式的核心读取dinvk 的封装将当前线程的伪句柄（-2）和预先设置了过滤标志（ContextFlags）的ctx 结构体指针转发给底层的 ntdll.dll，触发系统调用进入 Ring 0内核态；内核根据标志位仅读取物理 CPU中当前的调试寄存器（Dr0-Dr7）状态，并将其精准回填到用户态的 ctx内存镜像中，从而确保后续对断点位的修改是基于最新且完整的硬件状态进行的，防止因盲目覆盖而破坏 CPU 现有的其他上下文信息。
-=======
+
     // retrieving current thread register(dr0-7)
     // 实现了隐藏导入表,但没有实现indirect syscall
->>>>>>> Stashed changes
     NtGetContextThread(NtCurrentThread(), &mut ctx);
 
 
