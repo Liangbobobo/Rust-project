@@ -1,9 +1,154 @@
+- [程序执行全生命周期](#程序执行全生命周期)
+  - [标准 Windows 64位控制台程序（如 Rust 编译出的 .exe）从双击到退出的全景流程](#标准-windows-64位控制台程序如-rust-编译出的-exe从双击到退出的全景流程)
+    - [第一阶段：进程创建与内核态工作(打造容器)](#第一阶段进程创建与内核态工作打造容器)
+    - [第二阶段：苏醒（用户态加载器 Loader）](#第二阶段苏醒用户态加载器-loader)
+    - [第三阶段：运行（Runtime 与 Main）](#第三阶段运行runtime-与-main)
+    - [第四阶段：终结（进程退出）](#第四阶段终结进程退出)
+  - [ntdll.dll](#ntdlldll)
+  - [PEB](#peb)
+    - [PEB结构](#peb结构)
+  - [⚠️ 关键技术声明 (必读)](#️-关键技术声明-必读)
+  - [PE](#pe)
+    - [🗺️ PE 文件全景地图 (Memory Layout)](#️-pe-文件全景地图-memory-layout)
+    - [🧬 核心数据结构详解](#-核心数据结构详解)
+      - [1. IMAGE\_DOS\_HEADER (DOS 头)](#1-image_dos_header-dos-头)
+      - [2. IMAGE\_NT\_HEADERS64 (NT 头)](#2-image_nt_headers64-nt-头)
+      - [3. IMAGE\_SECTION\_HEADER (节表)](#3-image_section_header-节表)
+      - [4. The Sections (具体的节内容)](#4-the-sections-具体的节内容)
+    - [🧱 实战案例：从 dinvk 视角看结构链](#-实战案例从-dinvk-视角看结构链)
+    - [🧪 学习小技巧：偏移计算 (Address Conversion)](#-学习小技巧偏移计算-address-conversion)
+  - [为什么如果一个导出函数的 RVA 指向了导出目录 (Export Directory) 所在的内存范围内那么它一定不是代码，而是一个转发字符串 (Forwarder String)](#为什么如果一个导出函数的-rva-指向了导出目录-export-directory-所在的内存范围内那么它一定不是代码而是一个转发字符串-forwarder-string)
 
-# 程序执行全生命周期：权威修正版 (针对 Windows x64)
+# 程序执行全生命周期
 
-这份文档是经过严格核验与修正后的版本。移除了所有不准确的偏移量、虚构的统计数据以及过时的架构描述（如 x86 SEH 混淆进 x64 的情况）。
+## 标准 Windows 64位控制台程序（如 Rust 编译出的 .exe）从双击到退出的全景流程
 
-内容基于 **Windows Internals 7th Edition** 原理及 **Windows 11 (x64) 实机逆向** 逻辑。
+---
+
+### 第一阶段：进程创建与内核态工作(打造容器)
+
+当你双击 dinvk.exe 时，父进程（通常是 Explorer.exe）发起请求。此时代码甚至还没开始加载。
+
+1. **API 调用**
+   - Layer 1 (Win32): Explorer.exe 调用 CreateProcessW。
+   - Layer 2 (KernelBase): CreateProcessInternalW 处理参数、环境变量、继承句柄。
+   - Layer 3 (Native): ntdll.dll 中的 NtCreateUserProcess 发起 syscall (系统调用指令 0F 05)。
+   - Layer 4 (Kernel - Ring 0): CPU 切换到内核模式，执行 ntoskrnl.exe 中的 NtCreateUserProcess。
+
+2. **内核对象的建立 (The EPROCESS)**
+   操作系统内核开始分配核心数据结构：
+   - EPROCESS: 创建一个执行体进程块。这是进程在内核中的“肉身”，包含 PID、创建时间、配额等。
+   - VAD (Virtual Address Descriptors): 初始化虚拟地址描述符树。这是管理该进程 128TB 虚拟内存空间的账本。此时内存是空的，VAD 树只是个根节点。
+   - 句柄表 (Handle Table): 创建句柄表，如果是从控制台启动，会继承父进程的标准输入/输出（Stdin/Stdout）句柄。
+
+3. **映射可执行映像 (Section Object)**
+   内核不会把整个 EXE 文件读取到物理内存（RAM）中（那太慢了）。
+   - 创建 Section: 内核打开磁盘上的 .exe 文件，创建一个 Section Object（节对象）。
+   - 内存映射 (Map): 内核将这个 Section 映射到进程的虚拟地址空间。
+       - PE 头的 ImageBase（如 0x140000000）决定了首选位置。
+       - ASLR（地址随机化）会在此刻介入，给它选一个新的随机基址。
+   - 注意: 此时物理内存里几乎什么都没有，只是建立了一个“地址 -> 磁盘偏移”的映射关系。只有当代码执行访问到某页时，才会触发缺页中断 (Page Fault)，真正把数据从磁盘读入 RAM。
+
+4. **映射 NTDLL**
+   内核强制将 ntdll.dll 映射到进程空间。这是所有用户态进程的根基，包含堆管理器、加载器和系统调用存根。
+
+5. **创建初始线程 (ETHREAD)**
+   进程必须至少有一个线程。
+   - 内核分配 ETHREAD 结构。
+   - 分配 内核栈 (Kernel Stack) 和 用户栈 (User Stack)。
+   - 初始化 Context (寄存器上下文)：
+       - RIP (指令指针) 被设置为 ntdll!RtlUserThreadStart (不是你的 main 函数！)。
+       - RCX (第一个参数) 被设置为 EXE 的入口点地址。
+
+---
+
+### 第二阶段：苏醒（用户态加载器 Loader）
+
+内核工作完成，执行 sysret 或 iret 指令，CPU 权限级从 Ring 0 降回 Ring 3。线程开始在 ntdll.dll 中运行。
+
+1. **初始化的入口 (LdrInitializeThunk)**
+   - PEB 初始化: 线程首先访问 GS:[0x60] 获取 PEB (Process Environment Block)。
+   - 堆初始化: 调用 RtlCreateHeap 创建进程的默认堆（Default Heap）。这是后续 malloc 或 Rust Box 的底层来源。
+
+2. **递归加载依赖 (Dependency Walking)**
+   ntdll 中的 LdrpInitializeProcess 开始工作，它是一个图遍历算法：
+   - 解析导入表: 读取 .exe 的 PE 头 -> OptionalHeader -> DataDirectory[1] (Import Table)。
+   - 检查依赖: 发现程序依赖 KERNEL32.DLL。
+   - KnownDlls 检查: 为了加速，加载器先查看 \KnownDlls 对象目录（内存中预加载的系统 DLL 缓存）。如果找到了，直接映射 Section，不需要读磁盘。
+   - 搜索路径: 如果没找到，按 当前目录 -> System32 -> Windows ... 的顺序搜索磁盘。
+   - 递归: 加载 KERNEL32.DLL 后，发现它依赖 ntdll (已加载) 和 KERNELBASE.DLL。加载器会递归加载所有深层依赖。
+   - 构建链表: 每加载一个 DLL，就在堆上分配一个 LDR_DATA_TABLE_ENTRY，并挂入 PEB.Ldr.InLoadOrderModuleList 等三个链表中。
+
+3. **地址重定位 (Base Relocations)**
+   由于 ASLR，DLL 加载地址与编译时的首选地址不同。
+   - 加载器读取 DLL 的 .reloc 节。
+   - 遍历所有需要修正的地址，计算 Delta = 实际基址 - 首选基址。
+   - 将 Delta 加到代码段的硬编码地址上。
+
+4. **导入地址绑定 (IAT Snapping)**
+   这是最关键的一步，也是 dinvk 手动模仿的步骤：
+   - 加载器遍历 .exe 的导入表 (IAT)。
+   - 对于每一个导入函数（如 WriteFile）：
+       - 在 KERNEL32.DLL 的导出表 (EAT) 中查找该名字。
+       - 获取其确切内存地址。
+       - 写入: 将地址填入 .exe 的 IAT 表槽位中。
+   - 至此，你的代码中的 call [WriteFile] 才能正确跳转。
+
+5. **安全机制初始化**
+
+- Stack Cookie: 生成随机数种子 __security_cookie，防止栈溢出攻击。
+- CFG (控制流卫士): 验证间接调用目标的位图。
+
+1. **执行 DLL 初始化**
+   加载器按照依赖顺序的反序（先底层库，后上层库），依次调用所有 DLL 的入口点：
+
+- DllMain(hInst, DLL_PROCESS_ATTACH, ...)。
+- 此时 DLL 可以创建线程或初始化全局锁。
+
+---
+
+### 第三阶段：运行（Runtime 与 Main）
+
+此时所有 DLL 准备就绪，控制权终于要交给你的 EXE 了。
+
+1. **语言运行时 (CRT Startup)**
+   加载器跳转到 PE 头中定义的 AddressOfEntryPoint。对于 Rust/C++ 程序，这通常不是 main，而是编译器插入的桩代码（如 mainCRTStartup 或 _start）：
+
+- 命令行解析: 调用 GetCommandLineW 并解析成 argv 数组。
+- C++ 全局构造: 如果有全局对象（如 static 类实例），在此刻执行构造函数。
+- Rust Runtime: 初始化 Rust 的 panic 钩子、栈溢出保护等。
+
+1. **你的代码 (Main Execution)**
+
+- 调用 main()。
+- 此时程序逻辑正式执行。
+
+---
+
+### 第四阶段：终结（进程退出）
+
+当 main 函数返回，或者调用 exit() 时：
+
+1. **用户态清理**
+
+- CRT 清理: 调用 C++ 全局析构函数，刷新 stdio 缓冲区（把没写完的日志写进文件）。
+- DllMain Detach: 加载器再次遍历 DLL 链表，调用 DllMain(..., DLL_PROCESS_DETACH, ...)，让 DLL 有机会清理内存。
+
+1. **进入内核自杀**
+
+- 调用 NtTerminateProcess。
+- 内核态:
+  - 关闭所有打开的句柄（文件、Socket）。引用计数减一。
+  - 解除内存映射（VAD 清空）。
+  - 将进程对象的 Signaled 状态置位（通知父进程“我退出了”）。
+  - 退出代码（Exit Code）写入进程对象。
+- 最后的清理: 最后一个线程终结。如果没有任何其他进程持有该进程的句柄，内核销毁 EPROCESS 结构，PID 被回收。
+
+---
+
+这是一个程序在 Windows 上“生老病死”的完整物理过程。dinvk 的所谓“黑客技术”，本质上就是在用户态手动模拟了第 7、8、9 步（加载、重定位、IAT绑定），从而欺骗操作系统认为该模块从未存在过。
+
+## ntdll.dll
 
 ## PEB
 
@@ -16,227 +161,6 @@
 1. **结构体不透明性**：`EPROCESS`, `ETHREAD`, `KPROCESS` 等内核结构体是 **非公开 (Opaque)** 的。微软从未保证其成员偏移量（Offsets）的稳定性。文中标记的偏移量仅为示例或特定历史版本，实战中**必须**通过符号文件 (`.pdb`) 或运行时特征码搜索动态获取。
 2. **ASLR (地址空间布局随机化)**：现代 Windows (Vista+) 强制开启 ASLR。文中出现的内存地址仅为**逻辑示意**，实际运行时基址、堆栈地址每次启动均不同。
 3. **架构限定**：本文核心描述 **x64 (AMD64)** 架构下的 Windows 运行机制。
-
----
-
-## 📊 一、程序执行的 5 大核心阶段概览
-
-| 阶段 | 执行环境 | 关键操作 (逻辑流) | 涉及核心数据结构 |
-| :--- | :--- | :--- | :--- |
-| **1. 启动请求** | 用户模式 (Ring 3) | 验证路径 / 参数打包 / 系统调用 | `STARTUPINFO`, `RTL_USER_PROCESS_PARAMETERS` |
-| **2. 内核构造** | 内核模式 (Ring 0) | 创建进程对象 / 映射内存 / 创建初始线程 | `EPROCESS`, `ETHREAD`, `VAD` Tree |
-| **3. 用户注入** | 内核写入用户态 | 填充用户空间环境 / 映射 NTDLL | **`PEB`**, `TEB`, `KUSER_SHARED_DATA` |
-| **4. 加载器初始化**| 用户模式 (Ring 3) | LDR 链表构建 / DLL 加载 / 导入表修复 | `PEB_LDR_DATA`, `LDR_DATA_TABLE_ENTRY` |
-| **5. 运行时** | 用户模式 (Ring 3) | CRT 初始化 / Main / 异常分发 | `.pdata` (`RUNTIME_FUNCTION`), Heap |
-
----
-
-## 🧩 二、阶段 1：启动请求 (Ring 3 -> Ring 0 过渡)
-
-### 2.1 触发流程
-
-用户调用 `CreateProcess` 后，请求由 `kernel32.dll` -> `kernelbase.dll` 传递，最终在 `ntdll.dll` 处转为系统调用。
-
-### 2.2 核心动作：参数打包
-
-父进程在**自己的堆**上为子进程准备参数块。注意：这部分内存尚在父进程中。
-
-```c
-// Windows SDK - winternl.h
-// 由父进程构造，随后内核会将其拷贝到子进程地址空间
-typedef struct _RTL_USER_PROCESS_PARAMETERS {
-    ULONG MaximumLength;
-    ULONG Length;
-    ULONG Flags;
-    // ...
-    HANDLE ConsoleHandle;
-    ULONG ConsoleFlags;
-    HANDLE StdInputHandle;
-    HANDLE StdOutputHandle;
-    HANDLE StdErrorHandle;
-    UNICODE_STRING CurrentDirectory;
-    UNICODE_STRING DllPath;
-    UNICODE_STRING ImagePathName;
-    UNICODE_STRING CommandLine;   // ★ 红队重点：进程欺骗常修改此处
-    PVOID Environment;            // ★ 环境变量块
-    // ...
-} RTL_USER_PROCESS_PARAMETERS, *PRTL_USER_PROCESS_PARAMETERS;
-```
-
-**关键修正**：权限检查 (`Access Check`) 不是完全在阶段 1 完成的。用户态只做基本的 Token 检查，真正的安全令牌生成和内核对象访问检查发生在 **阶段 2 (SeCreateAccessStateEx)**。
-
----
-
-## ⚙️ 三、阶段 2 & 3：内核构造与注入 (Ring 0)
-
-这是操作系统执行体 (Executive) 分配资源的核心阶段。
-
-### 3.1 核心流程 (Windows Kernel Logic)
-
-```mermaid
-graph TD
-    A[NtCreateUserProcess Syscall] --> B[PspAllocateProcess]
-    B[创建 EPROCESS/KPROCESS] --> C[MmCreateProcessAddressSpace]
-    C[初始化 CR3/VAD 树] --> D[MmCreateSection]
-    D[映射 EXE/NTDLL 到虚拟空间] --> E[SeCreateAccessStateEx]
-    E[生成 Security Token] --> F[MmCreatePeb]
-    F[向用户态写入 PEB] --> G[PspCreateThread]
-    G[创建 ETHREAD/TEB/KernelStack] --> H[PspInsertProcess]
-    H[触发 EDR 回调 / 挂入活动链表] --> I[KiUserApcDispatcher]
-```
-
-### 3.2 关键内核对象 (不可硬编码偏移)
-
-#### 3.2.1 EPROCESS (执行体进程块)
-
-这是内核管理进程的核心。**注意：偏移量随 Windows 版本剧烈变动。**
-
-```c
-// 伪代码结构示意 (请勿硬编码偏移!)
-struct _EPROCESS {
-    struct _KPROCESS Pcb;          // 调度信息 (CR3 页目录基址在此)
-    // ...
-    PVOID UniqueProcessId;         // PID (Win11 中位置约为 0x440 附近)
-    struct _LIST_ENTRY ActiveProcessLinks; // 双向链表，连接所有进程 (Win11 约为 0x448)
-    struct _EX_FAST_REF Token;     // 安全令牌 (提权攻击的目标)
-    PVOID Peb;                     // ★ 指向用户态 PEB 的指针 (Win11 约为 0x550)
-    // ...
-    // EDR 通常在此处注册的 ProcessNotifyRoutine 回调中拦截进程
-};
-```
-
-### 3.3 内核构建的用户态结构
-
-内核虽然在 Ring 0，但它直接向新进程的 Ring 3 内存空间写入以下关键结构：
-
-#### 3.3.1 PEB (Process Environment Block)
-
-`GS:[0x60]` 指向 PEB。它是用户态全局信息的根节点。
-
-```c
-typedef struct _PEB {
-    BOOLEAN InheritedAddressSpace;
-    BOOLEAN ReadImageFileExecOptions;
-    BOOLEAN BeingDebugged;         // 反调试检查点 IsDebuggerPresent()
-    // ...
-    PVOID ImageBaseAddress;        // EXE 加载基址 (受 ASLR 影响)
-    PPEB_LDR_DATA Ldr;             // ★ 指向加载器数据 (此时 Ldr 内容尚未初始化!)
-    PRTL_USER_PROCESS_PARAMETERS ProcessParameters; // 指向从父进程拷贝过来的参数块
-    // ...
-    // Windows 10+ 包含 LdrpHeap 随机化种子等安全字段
-} PEB, *PPEB;
-```
-
-**修正**：在阶段 2/3 结束时，**`PEB.Ldr` 虽然有指针，但指向的数据结构主要字段为空**。DLL 列表是在用户态初始化阶段 (阶段 4) 才构建的。
-
-#### 3.3.2 TEB (Thread Environment Block)
-
-`GS:[0x0]` 指向 TEB。
-
-```c
-typedef struct _TEB {
-    NT_TIB NtTib;                  // 线程信息块 (栈底、栈顶范围)
-    PVOID EnvironmentPointer;
-    CLIENT_ID ClientId;            // PID, TID
-    PVOID ThreadLocalStoragePointer; // TLS 数组指针
-    PPEB ProcessEnvironmentBlock;  // 指回 PEB
-    ULONG LastErrorValue;
-    // ...
-} TEB, *PTEB;
-```
-
----
-
-## 📦 四、阶段 4：用户态加载器 (ntdll!LdrInitializeThunk)
-
-此时线程从内核返回，RIP 指向 `ntdll`。这是 **API Hashing 和 Manual Mapping** 主要模仿或绕过的阶段。
-
-### 4.1 核心动作
-
-1. **LdrpInitializeProcess**: 初始化进程堆 (`RtlCreateHeap`)。
-2. **构建链表**: 分配并初始化 `PEB_LDR_DATA`，建立三个模块链表 (`InLoadOrder`, `InMemoryOrder`, `InInitOrder`)。此时链表中只有 `ntdll` 和 `exe`。
-3. **递归加载依赖**: 扫描 IAT (导入表)，调用 `LdrLoadDll` 加载 Kernel32 等依赖。
-4. **TLS 回调**: 执行 `.tls` 段中的回调函数（恶意软件常在此驻留，早于 OEP）。
-
-### 4.2 核心链表结构
-
-```c
-// PEB->Ldr 指向此处
-typedef struct _PEB_LDR_DATA {
-    ULONG Length;
-    BOOLEAN Initialized;
-    PVOID SsHandle;
-    LIST_ENTRY InLoadOrderModuleList;
-    LIST_ENTRY InMemoryOrderModuleList;      // ★ 红队最爱：按内存布局排序，容易解析 DllBase
-    LIST_ENTRY InInitializationOrderModuleList;
-} PEB_LDR_DATA, *PPEB_LDR_DATA;
-
-// 链表节点
-typedef struct _LDR_DATA_TABLE_ENTRY {
-    LIST_ENTRY InLoadOrderLinks;
-    LIST_ENTRY InMemoryOrderLinks;
-    LIST_ENTRY InInitializationOrderLinks;
-    PVOID DllBase;                           // ★ DLL 基址
-    PVOID EntryPoint;
-    ULONG SizeOfImage;
-    UNICODE_STRING FullDllName;
-    UNICODE_STRING BaseDllName;              // ★ 用于 API Hashing 对比的名字
-    // ...
-} LDR_DATA_TABLE_ENTRY, *PLDR_DATA_TABLE_ENTRY;
-```
-
----
-
-## 🚀 五、阶段 5：运行时与异常处理 (x64修正)
-
-### 5.1 x64 异常处理模型 (Table-Based)
-
-**修正说明**：旧文档常提到的“栈上构建 SEH 链表 (`fs:[0]`)”是 **x86 (32位)** 的机制。**x64 完全不同**，不再依赖栈上的链表，而是依赖静态数据表。
-
-1. **`.pdata` 段**: 编译器生成的 `.pdata` 节包含 `RUNTIME_FUNCTION` 结构体数组。
-2. **`RUNTIME_FUNCTION`**:
-
-    ```c
-    typedef struct _RUNTIME_FUNCTION {
-        DWORD BeginAddress; // 函数起始 RVA
-        DWORD EndAddress;   // 函数结束 RVA
-        DWORD UnwindData;   // 指向 Unwind Info (展开信息) 的指针
-    } RUNTIME_FUNCTION;
-    ```
-
-3. **栈回溯 (Unwinding)**: 当异常发生或 EDR 检查堆栈时，系统调用 `RtlVirtualUnwind`，通过查找当前 RIP 对应的 `.pdata` 记录，计算出上一帧的 RSP 和 RIP。**这就是 `uwd` (Stack Spoofing) 技术欺骗的核心对象。**
-
-### 5.2 堆管理
-
-Windows 10+ 引入了 **Segment Heap** (用于 UWP/Edge) 和传统的 **NT Heap** (LFH - Low Fragmentation Heap)。堆结构的头部包含 cookie (XOR key) 用于防止溢出攻击。
-
----
-
-## 💎 六、权威数据源指引
-
-如果需要获取当前系统最准确的结构体偏移，请勿依赖静态文章，应使用 **WinDbg** 现场调试获取：
-
-* **获取 EPROCESS 偏移**:
-    `dt nt!_EPROCESS -r` (在内核调试模式下)
-* **获取 PEB 结构**:
-    `dt nt!_PEB`
-* **查看 LDR 链表**:
-    `!peb` (会自动解析并打印 LDR 链表内容)
-
----
-
-### 总结：关键差异点
-
-| 概念 | x86 (Legacy) | **x64 (Modern)** |
-| :--- | :--- | :--- |
-| **TEB 指针** | `FS:[0]` | **`GS:[0]`** |
-| **PEB 指针** | `FS:[0x30]` | **`GS:[0x60]`** |
-| **系统调用指令** | `int 0x2e` / `sysenter` | **`syscall`** |
-| **调用约定** | `stdcall` / `cdecl` (栈传参) | **FastCall** (RCX, RDX, R8, R9 寄存器传参 + Shadow Space) |
-| **异常处理** | 栈链表 (`_EXCEPTION_REGISTRATION`) | **基于表 (`RUNTIME_FUNCTION` / .pdata)** |
-| **内核防护** | 较少 | **PatchGuard (KPP)**, **DSE (签名强制)**, **HVCI** |
-
-这才是你在 2025 年进行 Rust 顶级红队开发（Syscall / Stack Spoofing / Rootkit）所依赖的真实底层图景。
 
 ## PE
 
@@ -290,16 +214,16 @@ SectionHeaders 指针 --->|   IMAGE_SECTION_HEADER [0]  |  <- .text 的描述信
 
 #### 1. IMAGE_DOS_HEADER (DOS 头)
 
-* **位置**：文件偏移 `0x00`。
-* **作用**：为了兼容 1980 年代的 DOS 系统，现在主要是为了找到 NT 头。
-* **关键成员**：
-  * `e_magic`: **WORD (2字节)**。必须是 `0x5A4D` (**"MZ"**)。
-  * `e_lfanew`: **LONG (4字节)**。位于偏移 `0x3C` 处。**这是指向 PE 头（NT Headers）的文件偏移量**。这是解析的第一跳。
+- **位置**：文件偏移 `0x00`。
+- **作用**：为了兼容 1980 年代的 DOS 系统，现在主要是为了找到 NT 头。
+- **关键成员**：
+  - `e_magic`: **WORD (2字节)**。必须是 `0x5A4D` (**"MZ"**)。
+  - `e_lfanew`: **LONG (4字节)**。位于偏移 `0x3C` 处。**这是指向 PE 头（NT Headers）的文件偏移量**。这是解析的第一跳。
 
 #### 2. IMAGE_NT_HEADERS64 (NT 头)
 
-* **位置**：`基地址 + e_lfanew`。
-* **结构**：
+- **位置**：`基地址 + e_lfanew`。
+- **结构**：
 
     ```c
     struct IMAGE_NT_HEADERS64 {
@@ -311,61 +235,61 @@ SectionHeaders 指针 --->|   IMAGE_SECTION_HEADER [0]  |  <- .text 的描述信
 
 **2.1 IMAGE_FILE_HEADER (文件头)**
 
-* **位置**：紧跟 Signature 之后。
-* **作用**：描述文件的物理属性。
-* **关键成员**：
-  * `Machine`: `0x8664` (AMD64) 或 `0x14C` (i386)。
-  * `NumberOfSections`: **WORD**。决定了后面要读取多少个节表项。**循环解析节表时的计数器**。
-  * `SizeOfOptionalHeader`: 后面那个结构体的大小。
+- **位置**：紧跟 Signature 之后。
+- **作用**：描述文件的物理属性。
+- **关键成员**：
+  - `Machine`: `0x8664` (AMD64) 或 `0x14C` (i386)。
+  - `NumberOfSections`: **WORD**。决定了后面要读取多少个节表项。**循环解析节表时的计数器**。
+  - `SizeOfOptionalHeader`: 后面那个结构体的大小。
 
 **2.2 IMAGE_OPTIONAL_HEADER64 (可选头)**
 
-* **位置**：紧跟 File Header 之后。
-* **作用**：PE 的灵魂，告诉 OS 加载器如何运行它。
-* **关键成员**：
-  * `AddressOfEntryPoint` (OEP): **RVA**。程序启动后 IP 指针指向的第一行代码（通常是 `mainCRTStartup`）。
-  * `ImageBase`: **QWORD**。程序的首选加载内存地址。
-  * `SectionAlignment`: 内存对齐粒度（通常 4KB / `0x1000`）。
-  * `FileAlignment`: 磁盘对齐粒度（通常 512B / `0x200`）。
-  * **`DataDirectory[16]`**: **这是红队最关注的数组**。它包含 16 个关键数据结构的 **地址 (RVA)** 和 **大小**。
+- **位置**：紧跟 File Header 之后。
+- **作用**：PE 的灵魂，告诉 OS 加载器如何运行它。
+- **关键成员**：
+  - `AddressOfEntryPoint` (OEP): **RVA**。程序启动后 IP 指针指向的第一行代码（通常是 `mainCRTStartup`）。
+  - `ImageBase`: **QWORD**。程序的首选加载内存地址。
+  - `SectionAlignment`: 内存对齐粒度（通常 4KB / `0x1000`）。
+  - `FileAlignment`: 磁盘对齐粒度（通常 512B / `0x200`）。
+  - **`DataDirectory[16]`**: **这是红队最关注的数组**。它包含 16 个关键数据结构的 **地址 (RVA)** 和 **大小**。
 
 **DataDirectory 的关键索引**：
 
-* **[0] Export Table** (`dinvk` 解析的目标)
-* **[1] Import Table** (正常 IAT)
-* **[3] Exception Table** (`uwd` 需要解析的 `.pdata`)
-* **[5] Base Relocation Table** (手动映射必须处理的)
+- **[0] Export Table** (`dinvk` 解析的目标)
+- **[1] Import Table** (正常 IAT)
+- **[3] Exception Table** (`uwd` 需要解析的 `.pdata`)
+- **[5] Base Relocation Table** (手动映射必须处理的)
 
 #### 3. IMAGE_SECTION_HEADER (节表)
 
-* **位置**：紧跟在 NT Headers 后面。
-* **作用**：目录表。描述了真实数据（代码、变量）在哪里，以及有多大。
-* **数量**：由 `FileHeader.NumberOfSections` 决定。
-* **结构成员 (关键)**：
-  * `Name`: 8 字节 ASCII (e.g., ".text")。注意不一定以 `\0` 结尾。
-  * `VirtualSize`: 数据在内存中未对齐前的真实大小。
-  * **`VirtualAddress` (RVA)**: 该节被映射到内存后的起始偏移。**ImageBase + VirtualAddress = 内存真实地址**。
-  * `SizeOfRawData`: 该节在磁盘文件中对齐后的大小。
-  * **`PointerToRawData`**: 该节在磁盘文件中的起始偏移。
-  * **`Characteristics`**: 权限位掩码。
-    * `0x20000000` (Executable)
-    * `0x40000000` (Readable)
-    * `0x80000000` (Writable) - **警报：**如果 .text 段有此标志，必杀。
+- **位置**：紧跟在 NT Headers 后面。
+- **作用**：目录表。描述了真实数据（代码、变量）在哪里，以及有多大。
+- **数量**：由 `FileHeader.NumberOfSections` 决定。
+- **结构成员 (关键)**：
+  - `Name`: 8 字节 ASCII (e.g., ".text")。注意不一定以 `\0` 结尾。
+  - `VirtualSize`: 数据在内存中未对齐前的真实大小。
+  - **`VirtualAddress` (RVA)**: 该节被映射到内存后的起始偏移。**ImageBase + VirtualAddress = 内存真实地址**。
+  - `SizeOfRawData`: 该节在磁盘文件中对齐后的大小。
+  - **`PointerToRawData`**: 该节在磁盘文件中的起始偏移。
+  - **`Characteristics`**: 权限位掩码。
+    - `0x20000000` (Executable)
+    - `0x40000000` (Readable)
+    - `0x80000000` (Writable) - **警报：**如果 .text 段有此标志，必杀。
 
 #### 4. The Sections (具体的节内容)
 
 这些不是结构体，而是大块的二进制数据，由上面的节表指向。
 
-* **`.text` 段**:
-  * 存放机器码 (OpCode)。
-  * `Indirect Syscall` 的跳板 (`syscall; ret`) 就藏在这里面。
-* **`.rdata` 段** (Read-only Data):
-  * **导出表 (Export Directory)** 通常在这里。
-    * `IMAGE_EXPORT_DIRECTORY` 结构体：包含 `AddressOfFunctions`, `AddressOfNames`, `AddressOfNameOrdinals` 三个并列数组。**这是 dinvk 实现 GetProcAddress 的核心数据源**。
-  * **导入表 (Import Directory)** 及其 Lookup Table。
-  * **异常目录 (Exception Directory)**：`RUNTIME_FUNCTION` 数组，用于栈回溯。**这是 uwd 的核心数据源**。
-* **`.reloc` 段**:
-  * 包含一堆数据块，告诉加载器：“如果我的加载基址变了（ASLR），请帮我把代码里 offset `0x100` 和 offset `0x500` 处的硬编码地址修改一下。”
+- **`.text` 段**:
+  - 存放机器码 (OpCode)。
+  - `Indirect Syscall` 的跳板 (`syscall; ret`) 就藏在这里面。
+- **`.rdata` 段** (Read-only Data):
+  - **导出表 (Export Directory)** 通常在这里。
+    - `IMAGE_EXPORT_DIRECTORY` 结构体：包含 `AddressOfFunctions`, `AddressOfNames`, `AddressOfNameOrdinals` 三个并列数组。**这是 dinvk 实现 GetProcAddress 的核心数据源**。
+  - **导入表 (Import Directory)** 及其 Lookup Table。
+  - **异常目录 (Exception Directory)**：`RUNTIME_FUNCTION` 数组，用于栈回溯。**这是 uwd 的核心数据源**。
+- **`.reloc` 段**:
+  - 包含一堆数据块，告诉加载器：“如果我的加载基址变了（ASLR），请帮我把代码里 offset `0x100` 和 offset `0x500` 处的硬编码地址修改一下。”
 
 ---
 
@@ -375,8 +299,8 @@ SectionHeaders 指针 --->|   IMAGE_SECTION_HEADER [0]  |  <- .text 的描述信
 
 1. **输入**：模块内存基址 `BaseAddress`。
 2. **跳跃**：
-    * `DOS` -> `NT` (`Base + DOS.e_lfanew`)
-    * `NT` -> `Optional` -> `DataDirectory[0]` (导出表 RVA)。
+    - `DOS` -> `NT` (`Base + DOS.e_lfanew`)
+    - `NT` -> `Optional` -> `DataDirectory[0]` (导出表 RVA)。
 3. **定位**：`ExportDir = BaseAddress + DataDirectory[0].VirtualAddress`。
 4. **遍历**：读取 `ExportDir->AddressOfNames` (指向一堆字符串指针)。
 5. **计算**：`PointerToFunctionName = BaseAddress + NameRVA`。
@@ -390,16 +314,16 @@ SectionHeaders 指针 --->|   IMAGE_SECTION_HEADER [0]  |  <- .text 的描述信
 
 在红队开发中（特别是做 Manual Mapping 时），你必须精通 **RVA 转 FOA** 的计算：
 
-* **RVA (Relative Virtual Address)**: 内存中的偏移。
-* **FOA (File Offset Address)**: 磁盘文件中的偏移。
+- **RVA (Relative Virtual Address)**: 内存中的偏移。
+- **FOA (File Offset Address)**: 磁盘文件中的偏移。
 
 **转换逻辑**：
 
 1. 遍历所有 **节表 (Section Headers)**。
 2. 判断：目标 RVA 是否在 `[Section.VirtualAddress, Section.VirtualAddress + Section.VirtualSize]` 区间内？
 3. 如果中：
-    * `偏移量 = RVA - Section.VirtualAddress`
-    * `FOA = Section.PointerToRawData + 偏移量`
+    - `偏移量 = RVA - Section.VirtualAddress`
+    - `FOA = Section.PointerToRawData + 偏移量`
 
 掌握了这个，你就打通了“文件”与“内存”的壁垒，这是写加载器的终极内功。
 
@@ -417,8 +341,8 @@ SectionHeaders 指针 --->|   IMAGE_SECTION_HEADER [0]  |  <- .text 的描述信
 2. 设计者的思路：复用 AddressOfFunctions  
 当 Windows 加载器 (Loader) 解析导出表时，它会读取 AddressOfFunctions数组里的 RVA (Relative Virtual Address)。此时面临两种情况：
 
-* 情况 A：普通导出函数我们需要指向函数的代码入口。RVA 指向代码段。
-* 情况 B：转发函数 (Forwarder)我们需要一个字符串（例如"NTDLL.RtlAllocateHeap"）来告诉加载器去哪里找这个函数。
+- 情况 A：普通导出函数我们需要指向函数的代码入口。RVA 指向代码段。
+- 情况 B：转发函数 (Forwarder)我们需要一个字符串（例如"NTDLL.RtlAllocateHeap"）来告诉加载器去哪里找这个函数。
 
 设计者不想增加额外的字段（比如加个 boolisForwarder），那样会浪费空间并破坏对齐。于是他们制定了这条规则：
 > “如果在取出的 RVA 地址处，发现居然刚好落在了导出目录在这个 DLL里的地盘内，那它一定不是代码（因为代码不可能写在目录表里），而是指向了一个字符串。”

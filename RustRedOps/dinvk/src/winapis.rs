@@ -9,18 +9,22 @@ use crate::module::{get_ntdll_address, get_module_address};
 use crate::{types::*, dinvoke};
 
 /// Wrapper for the `LoadLibraryA` function from `KERNEL32.DLL`.
+/// 
 pub fn LoadLibraryA(module: &str) -> *mut c_void {
+
+    // 用户传入的字符串(如 user.dll)转为c格式,存入name
     let name = alloc::format!("{module}\0");
+
+    // 找到LoadLibraryA所在的dll基址,即KERNEL32.dll基址
     let kernel32 = get_module_address(s!("KERNEL32.DLL"), None);
 
     // 无痕加载dll,不经过windows系统加载器,手动在内存中找到`LoadLibraryA` 函数的地址并执行它，从而加载一个新的 DLL 到当前进程中
-
     dinvoke!(
-        kernel32,
+        kernel32, // 去哪找函数？去 KERNEL32.DLL 找
         // 编译时混淆LoadLibraryA这个字符串,在执行代码的瞬间解码到当前线程的栈内存,且用完就丢弃
-        s!("LoadLibraryA"),
-        LoadLibraryAFn,
-        name.as_ptr().cast()
+        s!("LoadLibraryA"), // 找哪个函数？找真正的系统的 LoadLibraryA
+        LoadLibraryAFn, // 函数长什么样？（函数原型定义）
+        name.as_ptr().cast() // 给这个函数传什么参数？传的就是上面那个name
     )
     .unwrap_or(null_mut())
 }
