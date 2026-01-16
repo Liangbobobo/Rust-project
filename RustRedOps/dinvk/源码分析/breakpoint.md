@@ -54,7 +54,7 @@ CONTENT这个结构本身是谁生成并维护的?存储在什么地方?我的�
 该结构的来源自 Windows SDK 中的 winnt.h 文件,翻译为rust的结构体.并保证了:  
 
 1. 内存布局兼容 (#[repr(C)]),Rust 默认不保证结构体的字段顺序（为了优化内存，Rust编译器可能会重排字段）
-2. 内存对齐 (#[repr(align(16))]),CONTEXT结构体内部包含了 M128A(XMM 寄存器，128位/16字节)，需要 16 字节对齐。如果不对齐，当 CPU尝试使用 SSE/AVX指令加载这些寄存器时，会导致程序崩溃（STATUS_DATATYPE_MISALIGNMENT），或者 Windows API 直接返回错误。
+2. 内存对齐 (#[repr(align(16))]),代表CONTEXT这个结构体整体的起始地址必须是 16的倍数,结构体的大小也必须是其对其要求(alignment)的整数倍,但内部字段不一定按16对齐.#[repr(C)],表示结构体内存布局遵循c的标准,即结构体内部字段的排列和间距,确保每个字段满足其自身自然对其的要求(比如u64要求8字节对齐,SSE/AVX 指令读取寄存器时,要求内存地址是16字节对齐的).CONTEXT结构体内部包含了 M128A(XMM 寄存器，128位/16字节)，需要 16 字节对齐。如果不对齐，当 CPU尝试使用 SSE/AVX指令加载这些寄存器时，会导致程序崩溃（STATUS_DATATYPE_MISALIGNMENT），或者 Windows API 直接返回错误。
 3. 数据类型映射.为了保证每个字段的大小（Size）准确，必须进行严格的类型映射
 4. 字段顺序与填充.在winnt.h 中 ContextFlags 和 MxCsr 是两个 DWORD(4字节)，加起来 8 字节。紧接着是一堆 WORD (2字节)。 Rust 的 #[repr(C)] 会自动处理这些字段之间的Padding（填充字节），以确保后续的 u64 字段是对齐到 8 字节边界的。只要字段定义的顺序和类型大小没错，#[repr(C)]就能保证偏移量（Offset）是正确的。
 5. 验证方法.在开发此类底层库时，验证结构体准确性的标准方法通常是编写单元测试，检查结构体大小和关键字段的偏移量：
@@ -201,7 +201,7 @@ Windows 内核（C/C++ 编写）对内存布局有严格要求。例如，在 x6
   - 它容易被“行为监测”发现（设置上下文的动作、异常触发的瞬间）。
 
 在 `dinvk` 这个项目中，为了不被发现，它必须配合 Syscalls (绕过 API 监控) 使用，并且赌 EDR 没有进行高频的线程寄存器扫描。这是一种高级的红队对抗技术
-=======
+
 
 Hardware Breakpoint Spoofing(硬件断点参数欺骗) 或 "Tampering Syscalls"的原理:  
 
@@ -520,7 +520,11 @@ pub enum c_void {
 
 利用枚举来禁止实例化，利用 `repr(u8)` 来保证内存布局非零，利用 `lang item`来获得编译器的原生支持，最终造就了一个完全服务于 FFI 指针操作的特殊类型
 
+<<<<<<< Updated upstream
 ## 关于启用硬件端点时,调用NtGetContextThread的工作原理
+=======
+## 关于NtGetContextThread的工作原理
+>>>>>>> Stashed changes
 
 ### 系统调用 (Syscall)：CPU 从用户模式（Ring 3）切换到内核模式（Ring 0）
 
@@ -581,6 +585,7 @@ pub enum c_void {
 
 `NtGetContextThread` 是一个赋予程序强大“内省”（Introspection）能力的底层系统函数。它允许代码捕获并保存 CPU 在某一时刻的完整状态快照。在合法开发中，它是编写调试器（Debugger）和性能分析工具的基础。而在安全开发（无论是攻击还是防御）中，它被用于实现高级的代码钩子（Hook）、进程注入、反调试和反分析技术，是理解现代用户态恶意软件规避技术的关键组件之一
 =======
+<<<<<<< Updated upstream
 
 ### NtGetContextThread(NtCurrentThread(), &mut ctx)
 
@@ -599,3 +604,13 @@ pub enum c_void {
    3. 如果你希望文档像代码一样严谨：
       引入 mdBook 并配置 CI (GitHub Actions) 运行 mdbook
   build，一旦发现死链就报错，强迫你在提交代码前修复链接。
+=======
+
+### NtGetContextThread(NtCurrentThread(), &mut ctx)
+
+NtGetContextThread 是 Windows 的Native API（原生 API），它不属于标准的 Windows SDK（Win32 API）.Nt* 系列函数通常位于底层的 ntdll.dll中，且大多数是未文档化或半文档化的
+
+本文件中 pub fn NtGetContextThread并不是一个普通的“函数调用”，它是一个封装器（Wrapper）,通过dinvk!宏等其他包装手段,找到该函数的在内存中的地址,而进行的**直接调用**
+
+#### 这里为什么不使用indirect syscall?(重要)
+>>>>>>> Stashed changes

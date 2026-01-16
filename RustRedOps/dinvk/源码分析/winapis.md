@@ -1,3 +1,4 @@
+<<<<<<< Updated upstream
 # winapis
 
 ## LoadLibraryA
@@ -27,3 +28,8 @@ Windows API 通常成对出现：
 
 - 动态扩展能力：程序不需要在编译时就把所有功能都打包进去。可以通过 LoadLibraryA 在运行时按需加载插件。
 - 获取其他 API 的前置条件：如果你想调用某个 DLL 里的函数（比如 MessageBox），你首先必须确保这个 DLL 已经被加载到内存里了，并且你需要拿到它的基地址，才能计算出 MessageBox 在内存里的准确位置。
+=======
+# winapis.rs
+
+## 
+>>>>>>> Stashed changes

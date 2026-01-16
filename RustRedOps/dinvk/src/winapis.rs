@@ -1,6 +1,9 @@
 //! Windows API and NT system call wrappers.
 
+// c_void对应c中的void类型,表示未知类型的指针
+// null_mut返回一个 null mutable raw pointer(*mut T) 
 use core::{ffi::c_void, ptr::null_mut};
+// 使用如s!("NTDLL.DLL")形式,
 use obfstr::obfstr as s;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
