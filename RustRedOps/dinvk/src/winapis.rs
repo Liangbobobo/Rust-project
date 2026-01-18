@@ -160,10 +160,11 @@ pub fn NtProtectVirtualMemory(
     .unwrap_or(STATUS_UNSUCCESSFUL)
 }
 
-/// Wrapper for the `NtCreateThreadEx` function from `NTDLL.DLL`.
+/// Wrapper for the `NtCreateThreadEx` function from `NTDLL.DLL`. 
 #[allow(unused_mut)]
+// 定义为mut的参数,即为实现硬件断点参数欺骗所必须使用的
 pub fn NtCreateThreadEx(
-    mut thread_handle: *mut HANDLE,
+    mut thread_handle: *mut HANDLE,// 双指针,
     mut desired_access: u32,
     mut object_attributes: *mut OBJECT_ATTRIBUTES,
     mut process_handle: HANDLE,
@@ -209,6 +210,8 @@ pub fn NtCreateThreadEx(
         }
     }
 
+    //  dinvoke! 宏底层是通过 core::mem::transmute将地址强制转换为你提供的函数指针类型 (`$ty`)
+    // 所有的参数都需要在dinvk!使用时完整的传入
     dinvoke!(
         get_ntdll_address(),
         s!("NtCreateThreadEx"),
@@ -280,24 +283,33 @@ pub fn NtWriteVirtualMemory(
 }
 
 /// Wrapper for the `AddVectoredExceptionHandler` function from `KERNEL32.DLL`.
+/// 
+/// 注册一个全局异常处理函数（VEH）,当触发EXCEPTION_SINGLE_STEP 异常时,由自定义的veh_handler处理
 pub fn AddVectoredExceptionHandler(
-    first: u32,
-    handler: PVECTORED_EXCEPTION_HANDLER,
+    first: u32,// 处理顺序
+    handler: PVECTORED_EXCEPTION_HANDLER,// 自定义的处理异常的函数指针
 ) -> *mut c_void {
     let kernel32 = get_module_address(s!("KERNEL32.DLL"), None);
+
+    // 这里调用dinvk!后,是得到了AddVectoredExceptionHandlerFn这个函数的地址并立即执行.最终会返回一个指向已注册异常处理程序的句柄
+    // 
     dinvoke!(
-        kernel32,
-        s!("AddVectoredExceptionHandler"),
-        AddVectoredExceptionHandlerFn,
-        first,
-        handler
+        kernel32,// 在kernel32的基址中查找
+        s!("AddVectoredExceptionHandler"),// 查找这个函数的地址
+        AddVectoredExceptionHandlerFn,// 查找的函数的指针类型(定义了参数和返回值的类型)
+        first,// 1最先调用,0最后调用
+        handler// 你的异常处理函数的指针
     )
     .unwrap_or(null_mut())
 }
 
 /// Wrapper for the `RemoveVectoredExceptionHandler` function from `KERNEL32.DLL`.
+/// 
+/// 只要注册了（Add），无论任务成功与否，必须保证移除（Remove），否则就是留下了致命的隐患
+/// 
+/// AddVectoredExceptionHandler 的“撤销键”.虽然代码中用的是kernel32中的RemoveVectoredExceptionHandler,这只是一个wraper,真正的实现在ntdll中的RtlRemoveVectoredExceptionHandler 函数中
 pub fn RemoveVectoredExceptionHandler(
-    handle: *mut c_void,
+    handle: *mut c_void,// 不是项目中自定义的veh_handler函数,而是AddVectoredExceptionHandler 执行成功后返回的那个不透明指针Opaque Pointer
 ) -> u32 {
     let kernel32 = get_module_address(s!("KERNEL32.DLL"), None);
     dinvoke!(
@@ -310,6 +322,8 @@ pub fn RemoveVectoredExceptionHandler(
 }
 
 /// Wrapper for the `NtGetContextThread` function from `NTDLL.DLL`.
+/// 
+/// 用于在修改调试寄存器(hardware breakpoints)之前,获取线程当前的全部状态,避免覆盖已有的关键配置
 pub fn NtGetContextThread(
     hthread: HANDLE,
     lpcontext: *mut CONTEXT,
@@ -325,9 +339,13 @@ pub fn NtGetContextThread(
 }
 
 /// Wrapper for the `NtSetContextThread` function from `NTDLL.DLL`.
+/// 
+/// 该函数用于将指定的 CONTEXT 结构体内容强制写入目标线程的物理 CPU 寄存器状态（如 Rip、Rsp 或 Dr0-7），从而实现对线程执行流或硬件调试特性的直接操控
+/// 
+/// 在breakpoint.rs中的set_breakpoint中调用
 pub fn NtSetContextThread(
-    hthread: HANDLE,
-    lpcontext: *const CONTEXT,
+    hthread: HANDLE,// 目标线程句柄
+    lpcontext: *const CONTEXT,// 新的上下文数据(只读指针)
 ) -> i32 {
     dinvoke!(
         get_ntdll_address(),
@@ -340,6 +358,12 @@ pub fn NtSetContextThread(
 }
 
 /// Wrapper for the `GetStdHandle` function from `KERNEL32.DLL`.
+/// 
+///  在 dinvk 中，它是你与控制台对话的唯一官方通道.用来获取 Windows “标准流句柄”（输入、输出、错误）的函数。在 dinvk项目中，它通常被底层宏（如println!）用来向控制台打印调试信息，或者在隐蔽操作中用于重定向输出
+/// 
+///  作为 `no_std` 环境下自定义输出系统（`println!`宏）的基石，通过动态解析调用的方式，隐蔽地获取控制台输出权限，从而为复杂的系统调用欺骗逻辑提供必要的运行时调试反馈。。
+/// 
+/// 是 dinvk 调试输出系统（User-Land Debugging System） 的源头,使用本项目中的println!时
 pub fn GetStdHandle(handle: u32) -> HANDLE {
     let kernel32 = get_module_address(s!("KERNEL32.DLL"), None);
     dinvoke!(
@@ -352,12 +376,18 @@ pub fn GetStdHandle(handle: u32) -> HANDLE {
 }
 
 /// Returns a pseudo-handle to the current process ((HANDLE)-1).
+/// 
+/// 在 Windows内核对象管理器中，正常的句柄（Handle）是一个索引值，指向内核句柄表中的具体对象
+/// 
+/// `-1`: 永远代表 “调用者当前的进程”
 #[inline(always)]
 pub fn NtCurrentProcess() -> HANDLE {
     -1isize as HANDLE
 }
 
 /// Returns a pseudo-handle to the current thread ((HANDLE)-2).
+/// 
+/// `-2`: 永远代表 “调用者当前的线程”
 #[inline(always)]
 pub fn NtCurrentThread() -> HANDLE {
     -2isize as HANDLE
@@ -374,17 +404,19 @@ pub fn GetProcessHeap() -> HANDLE {
 #[inline(always)]
 pub fn GetCurrentProcessId() -> u32 {
     let teb = NtCurrentTeb();
-    (unsafe { *teb }).Reserved1[8] as u32
+    (unsafe { *teb }).Reserved1[8] as u32// 偏移0x40(根据TEB在rust中的映射内存布局)
 }
 
 /// Returns the thread ID of the calling thread from the TEB.
 #[inline(always)]
 pub fn GetCurrentThreadId() -> u32 {
     let teb = NtCurrentTeb();
-    (unsafe { *teb }).Reserved1[9] as u32
+    (unsafe { *teb }).Reserved1[9] as u32// 偏移0x48
 }
 
 /// Retrieves a pointer to the PEB of the current process.
+/// 
+///  Windows x64 架构下，CPU 的 GS 段寄存器 指向当前线程的 TEB (Thread Environment Block) 结构体基址。
 #[inline(always)]
 pub fn NtCurrentPeb() -> *const PEB {
     #[cfg(target_arch = "x86_64")]
@@ -417,8 +449,8 @@ pub fn __readgsqword(offset: u64) -> u64 {
     let out: u64;
     unsafe {
         core::arch::asm!(
-            "mov {}, gs:[{:e}]",
-            lateout(reg) out,
+            "mov {}, gs:[{:e}]",// 要生成的汇编指令原型
+            lateout(reg) out,   // 对应第一个占位符{},out是u64,编译器会分配一个64为通用寄存器,如果编译器分配rax,这里就变成rax
             in(reg) offset,
             options(nostack, pure, readonly),
         );
@@ -461,6 +493,17 @@ pub fn __readx18(offset: u64) -> u64 {
 }
 
 /// Evaluates to TRUE if the return value specified by `nt_status` is a success
+/// 
+///  Windows 内核函数的返回值（NTSTATUS）是一套特殊的代码：
+/// `0` 到 `0x3FFFFFFF`: 成功 (Success)。例如 STATUS_SUCCESS (0)。 
+/// 
+/// `0x40000000` 到 `0x7FFFFFFF`: 信息 (Informational)。
+/// 
+/// `0x80000000` 到 `0xBFFFFFFF`: 警告 (Warning)。
+/// 
+/// `0xC0000000` 到 `0xFFFFFFFF`: 错误 (Error)。例如 STATUS_ACCESS_DENIED (0xC0000022)。
+/// 
+///  由于 NTSTATUS 是 i32，所有错误代码（最高位为 1）都被视为负数.因此，nt_status >= 0 涵盖了所有成功和信息性的状态。
 pub const fn NT_SUCCESS(nt_status: NTSTATUS) -> bool {
     nt_status >= 0
 }
