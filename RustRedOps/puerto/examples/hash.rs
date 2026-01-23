@@ -1,7 +1,11 @@
 fn main(){
 
   pub fn fnv1a(string: &str) -> u32 {
+
+    /// 需要修改的种子
     const FNV_OFFSET_BASIS: u32 = 0x3D91_4AB7;
+
+    /// 需要修改的素数(避免出现hash撞库)
     const FNV_PRIME: u32 = 0xAD37_79B9;
 
     let mut hash = FNV_OFFSET_BASIS;
@@ -98,7 +102,7 @@ mod tests {
             } else {
                 hashes.insert(hash, api);
                 // Print Hash value for easy copying
-                println!("API: {:<35} | Hash: 0x{:08X} ({})", api, hash, hash);
+                println!("API: {:<35} | 十六进制Hash: 0x{:08X} (十进制:{})", api, hash, hash);
             }
         }
 

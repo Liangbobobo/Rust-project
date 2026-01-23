@@ -1,0 +1,15 @@
+[package]
+name = "puerto"
+version = "0.1.0"
+edition = "2024"
+
+
+[dependencies]
+obfstr = "0.4"
+spin="0.10.0"
+bitflags="2.10.0"
+
+[features]
+default = []
+alloc = []
+panic = []

@@ -28,6 +28,13 @@ spin = "0.10.0"
 windows-targets = "0.53.4"
 bitflags = { version = "2.8.0", default-features = false }
 
+[profile.release]
+strip = true
+lto = true
+panic = "abort"
+codegen-units = 1
+opt-level = "z"
+
 [features]
 default = []
 alloc = []
