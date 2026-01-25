@@ -1074,8 +1074,15 @@ pub struct PEB_LDR_DATA {
 
 ### InMemoryOrderModuleList
 
-`InMemoryOrderModuleList` 并非如其名称暗示的那样"按内存地址高低排序"，这是一个在安全研究和逆向工程社区中广泛流传的误解。  
+`InMemoryOrderModuleList` ,是一个双向循环链表的表头（Sentinel Node/Head）,并非如其名称暗示的那样"按内存地址高低排序"，这是一个在安全研究和逆向工程社区中广泛流传的误解。  
 实际上，这个链表主要反映**模块在内存中的布局顺序和初始化关系**，而非简单的地址高低排序。
+
+(*ldr_data).InMemoryOrderModuleList 本身不包含任何模块信息（它只是PEB_LDR_DATA 结构体中的一个字段）
+如果要指向“表头”，也是用 (*ldr_data).InMemoryOrderModuleList
+
+如果你想表达整个链表的“锚点”或“哨兵节点”，那么就是(*ldr_data).InMemoryOrderModuleList。在汇编或底层 C开发中，我们通常用它的地址来判断是否已经遍历完一圈
+
+(*ldr_data).InMemoryOrderModuleList.Flink 指向链表的第一个真正节点
 
 InMemoryOrderModuleList的结构体中只有两个指针 Flink (前向) 和 Blink (后向)，不包含 DLL 信息  
 同样需要注意InMemoryOrderModuleList.flink指向的是LDR_DATA_TABLE_ENTRY这个结构体的**中间位置(不是第一个字段)**,即是一种手拉手的双向链表,而不是手拉头的双向链表:
@@ -1091,8 +1098,8 @@ InMemoryOrderModuleList,在实际的运行中,根据Windows 加载器初始化�
 - Head：链表头（PEB_LDR_DATA 内部）。
 - Node 1：主程序 (.exe)（第一个加载）。
 - Node 2：ntdll.dll（第二个加载，负责用户层与内核层的交互）。
-- Node 3：kernel32.dll（通常情况）。
-- 代码逻辑：从 Head 开始，执行两次 Flink 跳转，理应到达ntdll.dll。为了保险，代码还计算了模块名的 Hash 进行校验。
+- Node 3：kernel32.dll（通常情况）,也有可能是kernelbase.dll。
+- 代码逻辑：从 Head 开始，执行两次 Flink 跳转，理应到达ntdll.dll。为了保险，代码还计算了模块名的 Hash 进行校验(重要)。
 
 ### LDR_DATA_TABLE_ENTRY
 

@@ -7,7 +7,7 @@ pub enum Error {
     Success = 0,
     Fail,
     HashFuncNotFound,
-    ModuleNotFound,
+    ModuleNameIsEmpty,
     SymbolNotFound,
     HashFunctionMissing,
     SyscallResolutionFailed,

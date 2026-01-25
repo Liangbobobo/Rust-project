@@ -6,7 +6,9 @@ use crate::types::{PEB};
     /// gs指向当前线程的TEB起始地址,其offset 0x60(win64)处指向peb地址
 pub fn NtcurrentPeb()->*const PEB {
 
-  #[cfg(target_arch = "x86_64")]
+    #[cfg(target_arch = "x86_64")]
+    // __readgsqword在msvc编译器中预定义为内联函数,用于读取GS的偏移
+    // __代表该函数时一个极低层实现,是系统内核/编译器级别的逻辑
     return __readgsqword(0x60) as *const PEB;
 
     #[cfg(target_arch = "x86")]
