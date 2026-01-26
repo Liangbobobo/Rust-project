@@ -30,8 +30,8 @@ static NTD:Once<u64>=Once::new();
 // 普通句柄 (如 `HANDLE` for File/Process/Thread)：它们通常是进程句柄表里的一个索引（Index），数值通常很小（如 4, 8, 12...）。你不能直接去读取这些数值指向的内存。模块句柄 (`HMODULE` / `HINSTANCE`)：它们是特例，直接就是内存地址
 
 // 区分retrieve_moudle_add传入的参数类型
-pub enum MoudleType<'a> {
-    name(& 'a str),
+pub enum MoudleType {
+    // 非特殊情况不应该传入模块名称  name(& 'a str),
     hash(u32),
     empty
 }
@@ -129,10 +129,10 @@ hash_func:Option<fn(&[u16]) -> u32>)->Result<HMODULE,Error>
 
                 // 传入dll名称这种建议后续删掉,不应该传入名称,只需要使用hash就行
 
-                if let MoudleType::name(dll_dile_name) =module  {
-                    addr = (*InMemoryOrderModuleList_flink_LDR_DATA_TABLE_ENTRY).Reserved2[0];
-                        break;
-                }
+            //     if let MoudleType::name(dll_dile_name) =module  {
+            //         addr = (*InMemoryOrderModuleList_flink_LDR_DATA_TABLE_ENTRY).Reserved2[0];
+            //             break;
+            //     }
                 
 
             }

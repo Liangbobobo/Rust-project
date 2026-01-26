@@ -1,33 +1,14 @@
  
-// /// 这里是否可以修改为返回一个十六进制的数?
-//  pub fn fnv1a(string: &str) -> u32 {
-
-//     /// 需要修改的种子
-//     const FNV_OFFSET_BASIS: u32 = 0x3D91_4AB7;
-
-//     /// 需要修改的素数(避免出现hash撞库)
-//     const FNV_PRIME: u32 = 0xAD37_79B9;
-
-//     let mut hash = FNV_OFFSET_BASIS;
-//     for &byte in string.as_bytes() {
-//         hash ^= byte as u32;
-//         hash = hash.wrapping_mul(FNV_PRIME);
-//     }
-
-//     hash
-// }
 
 
 
 //  1. 传什么字符串？
-//   根据 dinvk 的惯例以及 Windows
-//   加载器的行为，你应该传递：大写的模块名，且通常不带后缀。
+//   根据 dinvk 的惯例以及 Windows加载器的行为，windows不区分大小写,所以应该将string 全部转为大写.你应该传递：大写的模块名，且通常不带后缀。
 
-//    * 目标字符串："NTDLL"
-//    * 理由：
+//    *目标字符串："NTDLL"
+//    *理由：
 //        * 大写：Windows
-//          模块名是不区分大小写的，将所有输入转为大写（Canonicalization）是确保哈希一
-//          致性的标准做法。
+//          模块名是不区分大小写的，将所有输入转为大写（Canonicalization）是确保哈希一致性的标准做法。
 //        * 去掉后缀：dinvk 的 canonicalize_module 函数会去掉 .DLL 后缀。如果你在
 //          puerto 中也沿用了这个逻辑，那么哈希的对象就是 "NTDLL"。
 
@@ -73,3 +54,22 @@ pub fn fnv1a_utf16(data: &[u16]) -> u32 {
     }
     hash
 }
+
+
+// 传入名字的fnv1a hash算法
+//  pub fn fnv1a(string: &str) -> u32 {
+
+//     /// 需要修改的种子
+//     const FNV_OFFSET_BASIS: u32 = 0x3D91_4AB7;
+
+//     /// 需要修改的素数(避免出现hash撞库)
+//     const FNV_PRIME: u32 = 0xAD37_79B9;
+
+//     let mut hash = FNV_OFFSET_BASIS;
+//     for &byte in string.as_bytes() {
+//         hash ^= byte as u32;
+//         hash = hash.wrapping_mul(FNV_PRIME);
+//     }
+
+//     hash
+// }
