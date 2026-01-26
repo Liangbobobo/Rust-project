@@ -423,23 +423,23 @@ PE 是 Windows 可执行文件（.exe, .dll,.sys）的标准格式。它描述�
   内核和硬件看到的二进制数据完全一致。
 
    1. 获取基址（Base Address）：
-      代码首先通过读取 TEB (Thread Environment Block) -> PEB (Process Environment Block) -> Ldr (Loader Data) 链表，找到目标模块（通常是ntdll.dll 或 kernel32.dll）在内存中的起始地址（DllBase）。
+      代码首先通过读取 TEB (Thread Environment Block) -> PEB (Process Environment Block) -> Ldr (Loader Data) 链表，找到目标模块（通常是ntdll.dll 或 kernel32.dll）在内存中的起始地址（LDR_DATA_TABLE_ENTRY中的DllBase）。 DllBase 的数值在内存中指向的位置正是该 DLL 的 DOS 头 (`IMAGE_DOS_HEADER`)，它是整个 PE 结构的开头
 
    2. 解析 PE 结构（Parsing）：
       利用第 1 步定义的结构体，代码将这个基址强转为 *const
   IMAGE_DOS_HEADER 指针，通过 e_lfanew 找到 IMAGE_NT_HEADERS，再访问
   OptionalHeader.DataDirectory 找到 导出表 (Export Directory)。
 
-   3. 查找函数（Resolution）：
+   1. 查找函数（Resolution）：
       遍历导出表中的函数名称数组（AddressOfNames），找到目标函数（例如NtAllocateVirtualMemory 或 LoadLibraryA）。
 
-   4. 获取地址或 SSN（Extraction）：
+   2. 获取地址或 SSN（Extraction）：
        - 对于 API
          调用：从导出表中获取该函数的内存地址，将其强转为函数指针（如
          LoadLibraryAFn）并直接调用。
        - 对于 Syscall：解析 ntdll.dll 中对应函数的汇编代码（通常是 mov eax, SSN; syscall），提取出 SSN (System Service Number)。
 
-   5. 执行调用（Execution）：
+   3. 执行调用（Execution）：
       使用内联汇编（asm!）直接执行 syscall 指令（传入提取出的
   SSN），或者跳转到获取到的 API 函数地址执行。
 
