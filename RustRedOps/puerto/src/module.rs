@@ -8,11 +8,12 @@ use core::{
 };
 
 // use crate::{hash};
-use crate::error::Error;
+use crate::{error::Error, types::EVENT_ALL_ACCESS};
 use obfstr::obfbytes;
 use crate::types::{HMODULE,LDR_DATA_TABLE_ENTRY};
 use spin::Once;
 use crate::winapis::{NtcurrentPeb};
+use crate::helper::{PE};
 
 /// crate a static variable to store the ntall.dll's address
 /// 
@@ -31,18 +32,24 @@ static NTD:Once<u64>=Once::new();
 
 // 区分retrieve_moudle_add传入的参数类型
 pub enum MoudleType {
-    // 非特殊情况不应该传入模块名称  name(& 'a str),
+    // name(& 'a str), // 非特殊情况不应该传入模块名称 
     hash(u32),
     empty
 }
 
+/// 获取模块基址
+/// 
+///  let addr = retrieve_moudle_add(MoudleType::hash(0x12345678),Some(fnv1a_utf16) 
+/// 
+/// 使用Result(定义在core中)不需要引入std,
 #[inline(always)]
 pub fn retrieve_moudle_add<T>(module:MoudleType,
 hash_func:Option<fn(&[u16]) -> u32>)->Result<HMODULE,Error>
 // where T:ToString
 {   
     // 成功会返回u32类型的hash值,并赋值给左侧的hash变量
-    // 失败会返回匹配Result中Error类型的错误
+    // 失败会返回匹配Result中Error类型的错误,并退出retrieve_moudle_add,不会后续执行
+    // 这里解出来的hash是一个函数指针
     let hash = hash_func.ok_or(Error::HashFuncNotFound)?;
 
     // 下面主要是通过TEB->PEB->Ldr->InMemoryOrderModuleList(LIST_ENTRY)->LDR_DATA_TABLE_ENTRY(并非指向第一个字段,而是该结构体的中间位置的字段)
@@ -152,9 +159,41 @@ hash_func:Option<fn(&[u16]) -> u32>)->Result<HMODULE,Error>
 
         }
       
-    Ok(addr)
+      if addr.is_null(){
+        Err(Error::ModuleAddrIsEmpty)
+    }
+      else{
+        Ok(addr)
+      }
+         
+      }
+        
     
     }
     
 
+
+
+
+// 与dinvk的原代码对比,重写及删除部分是否更优?
+pub fn get_proc_address(
+    h_moudle:Result<HMODULE,Error>,
+    function:MoudleType,
+    hash_func:Option<fn(&[u16]) -> u32>
+) -> Result<*mut c_void,Error>{
+    
+// 使用? ,当ok会解出里面的内容并向左赋值,Err会直接让整个 get_proc_address 函数返回那个错误
+let h_moudle_base=h_moudle?;
+
+// initializes a new pe struct
+let pe=PE::prase(h_moudle_base);
+unsafe {
+
+    let Some((nt_header,export_dir))=pe.nt_header().zip(pe.exports)
+// let h_moudle=h_moudle_base as usize;
+
+
+}
+
+todo!()
 }

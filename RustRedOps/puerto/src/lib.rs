@@ -14,4 +14,4 @@ pub mod hash;
 pub mod module;
 pub mod types;
 pub mod winapis;
-
+pub mod helper;

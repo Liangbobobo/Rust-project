@@ -8,6 +8,8 @@ pub enum Error {
     Fail,
     HashFuncNotFound,
     ModuleNameIsEmpty,
+    ModuleAddrIsEmpty,
+    FuncAddNotFound,
     SymbolNotFound,
     HashFunctionMissing,
     SyscallResolutionFailed,
