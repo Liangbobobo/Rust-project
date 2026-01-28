@@ -4,7 +4,7 @@ use crate::types::{PEB};
     /// 不调用windows api通过cpu的gs寄存器读取当前进程的peb
     /// 
     /// gs指向当前线程的TEB起始地址,其offset 0x60(win64)处指向peb地址
-pub fn NtcurrentPeb()->*const PEB {
+pub fn NtCurrentPeb()->*const PEB {
 
     #[cfg(target_arch = "x86_64")]
     // __readgsqword在msvc编译器中预定义为内联函数,用于读取GS的偏移
