@@ -1,8 +1,10 @@
 - [TEB](#teb)
 - [PEB相关(使用dinvk中的例子及windbg)](#peb相关使用dinvk中的例子及windbg)
     - [一个可执行文件产生多个进程时PEB是怎么样的?](#一个可执行文件产生多个进程时peb是怎么样的)
-    - [LDR](#ldr)
-    - [PEB\_LDR\_DATA](#peb_ldr_data)
+  - [ApiSetMap](#apisetmap)
+    - [结构体定义](#结构体定义)
+  - [LDR](#ldr)
+  - [PEB\_LDR\_DATA](#peb_ldr_data)
     - [InMemoryOrderModuleList](#inmemoryordermodulelist)
     - [LDR\_DATA\_TABLE\_ENTRY](#ldr_data_table_entry)
       - [LDR\_DATA\_TABLE\_ENTRY如何产生并维护?](#ldr_data_table_entry如何产生并维护)
@@ -61,6 +63,8 @@
 # TEB
 
 # PEB相关(使用dinvk中的例子及windbg)
+
+请记得使用windbg对结构体进行分析,所有的结构体可以用这种方式reveal
 
 1. **结构体不透明性**：`EPROCESS`, `ETHREAD`, `KPROCESS` 等内核结构体是 **非公开 (Opaque)** 的。微软从未保证其成员偏移量（Offsets）的稳定性。文中标记的偏移量仅为示例或特定历史版本，实战中**必须**通过符号文件 (`.pdb`) 或运行时特征码搜索动态获取。
 2. **ASLR (地址空间布局随机化)**：现代 Windows (Vista+) 强制开启 ASLR。文中出现的内存地址仅为**逻辑示意**，实际运行时基址、堆栈地址每次启动均不同。
@@ -178,7 +182,23 @@ pub struct PEB {
 
 无论一个 .exe 启动了多少次，或者它自己又派生了多少子进程，只要那是 Windows上的一个标准 Win32 进程，它就一定拥有一个属于它自己的、独一无二的 PEB。
 
-### LDR
+## ApiSetMap
+
+在 PEB 结构体中，ApiSetMap 字段被定义为 PVOID（即void*），因为它是一个不透明指针，指向的结构体随着Windows 版本变化（Win7,Win8, Win10 结构体都不一样）。
+
+因为在PEB中,ApiSetMap被定义为一个指针,要找到它真正指向的结构体，你需要去查找 Loader (Ldr) 相关的头文件，而不是 PEB 的头文件。
+
+在phnt的github仓库中,有该结构体的详细定义(ntpebteb.h文件中)
+
+Google 搜索：site:geoffchappell.com "API Set Schema"
+
+目前主流环境（Win10/11）使用的是 Schema Version 6。所有的Offset（偏移量）都是相对于 ApiSetMap 结构体起始地址的字节偏移
+
+### 结构体定义
+
+
+
+## LDR
 
 Ldr 是一个指向 PEB_LDR_DATA 结构体的指针 (*mut PEB_LDR_DATA)。
 
@@ -186,7 +206,7 @@ Ldr 是一个指向 PEB_LDR_DATA 结构体的指针 (*mut PEB_LDR_DATA)。
 
 - Rust 类型: 在 dinvk 中，它被定义为裸指针，意味着访问它需要使用unsafe 代码块。
 
-### PEB_LDR_DATA
+## PEB_LDR_DATA
 
 ```rust
 #[repr(C)]

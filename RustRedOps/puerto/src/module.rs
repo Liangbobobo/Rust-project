@@ -84,6 +84,8 @@ use crate::{debug_log, types::IMAGE_DIRECTORY_ENTRY_EXPORT};
 use crate::helper::PE;
 use crate::types::{HMODULE, IMAGE_EXPORT_DIRECTORY, LDR_DATA_TABLE_ENTRY};
 use crate::winapis::NtCurrentPeb;
+use alloc::string::String;
+use alloc::vec::Vec;
 use spin::Once;
 
 type hash_type = Option<u32>;
@@ -329,18 +331,43 @@ pub fn get_forwarded_address(
 )->Option<*mut c_void>{
     
     // 如果不是转发函数,EAT里的RVA应指向.text中代码段的位置,是真正的机器码.如果EAT指向导出目录,自己的内存范围,则是一个转发函数
-    // 此时address指向的是一个指针(该指针指向的是ascii字符串),这个字符串的格式是 moudle.function.之后再通过module再次查找函数地址
+    // 此时address指向的是一个指针(该指针指向的是ascii字符串),这个字符串的格式是 moudle.function.之后再通过module查找函数地址
     if (address as usize) >= export_dir as usize&&
     (address as usize)<= export_dir as usize + export_size {
         
+        unsafe {
         // 源dinvk中是将*const i8转为str,再通过splite_once分割,重构中直接对指针指向的i8内容进行分割
         // 手动找*const i8中的边界容易出错,利用CStr转为bytes,可以利用core的优化及避开utf-8的校验
-        unsafe {
-            let cstr=CStr::from_ptr(address);
+            let cstr=CStr::from_ptr(address as *const i8);
+        
+        // 该转换是否有副作用?
+            let byte=cstr.to_bytes();
+            if let Some(dot_index)=byte.iter().position(|&b| b==b'.')
+            {
+
+            }
         }
         
 
 
     }
+    todo!()
+}
+
+/// peb.ApiSetMap
+fn resolve_api_set_map(
+    host_name:&str,// 宿主模块名
+    contract_name:&str// api set契约名
+)->Option<Vec<String>> {
+
+unsafe {
+
+let peb = NtCurrentPeb();
+let map =(*peb).ApiSetMap ;
+
+}
+
+
+
     todo!()
 }
