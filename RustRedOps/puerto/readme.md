@@ -2,6 +2,8 @@
 
 1. 将敏感的变量或函数名通过全选替换为一个随机的字符串,当然自己要留一个备份表
 
+## 在https://www.vergiliusproject.com/kernels/x64/windows-11/25h2 怎么找不到IMAGE_EXPORT_DIRECTORY的结构解析
+
 ## 编译方式
 
 Strip（剥离）符号,以release方式编译,并添加strip = true  

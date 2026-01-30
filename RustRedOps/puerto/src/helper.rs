@@ -75,7 +75,7 @@ impl <'a> Exports<'a> {
     /// 
     /// ->DataDirectory(DataDirectory: [IMAGE_DATA_DIRECTORY; 16])
     /// 
-    /// ->IMAGE_DIRECTORY_ENTRY_EXCEPTION
+    /// ->IMAGE_EXPORT_DIRECTORY(里面有三个重要数组)
     pub fn directory(&self)->Option<*const IMAGE_EXPORT_DIRECTORY> {
         
         unsafe {
