@@ -1,87 +1,150 @@
- pub fn get_forwarded_address(
-    6     _module: *const i8, // 这里的 module
-      参数在你的代码片段中未被使用，保留以匹配签名
-    7     address: *mut c_void,
-    8     export_dir: *const IMAGE_EXPORT_DIRECTORY,
-    9     export_size: usize,
-   10     hash: fn(&[u16]) -> u32,
-   11 ) -> Option<*mut c_void> {
-   12     // 1. 范围检查：判断是否指向导出表内部（即是否为转发器）
-   13     let addr_usize = address as usize;
-   14     let dir_usize = export_dir as usize;
-   15
-   16     if addr_usize >= dir_usize && addr_usize < dir_usize + export_size {
-   17         unsafe {
-   18             // 2. 获取原始字节切片（避免 UTF-8 检查）
-   19             // CStr::from_ptr 会自动扫描直到遇到 \0，非常高效且相对安全
-   20             let c_str = CStr::from_ptr(address as *const i8);
-   21             let bytes = c_str.to_bytes(); // 得到 &[u8]，这是纯 ASCII 字节
-   22
-   23             // 3. 在字节流中寻找 '.' (ASCII 46)
-   24             // position 返回的是相对于 bytes 起始位置的索引
-   25             if let Some(dot_index) = bytes.iter().position(|&b| b == b'.')
-   26                 // 4. 切分切片
-   27                 let dll_name_bytes = &bytes[..dot_index];
-   28                 // dot_index + 1 跳过 '.' 符号
-   29                 let func_name_bytes = &bytes[dot_index + 1..];
-   30
-   31                 // 5. 转换为 u16 (Wide String) 以适配 hash 函数
-   32                 // 转发器格式通常是 "DLL.Func"，是 ASCII，直接强转为 u16
-      即可
-   33                 let dll_name_u16: Vec<u16> = dll_name_bytes
-   34                     .iter()
-   35                     .map(|&b| b as u16)
-   36                     .collect();
-   37
-   38                 let func_name_u16: Vec<u16> = func_name_bytes
-   39                     .iter()
-   40                     .map(|&b| b as u16)
-   41                     .collect();
-   42
-   43                 // 6. 调用 Hash 函数 (这里演示逻辑，具体如何使用 hash
-      查找模块基址取决于你的 helper 实现)
-   44                 let _dll_hash = hash(&dll_name_u16);
-   45                 let _func_hash = hash(&func_name_u16);
-   46
-   47                 // 在这里你需要编写加载目标 DLL 并获取函数地址的逻辑
-   48                 // 例如：LdrLoadDll -> LdrGetProcedureAddress
-   49                 // 因为这部分逻辑比较复杂，通常涉及到递归调用
-      get_module_handle/get_proc_address
-   50
-   51                 // 返回值通常是解析后的真实地址
-   52                 // return Some(real_address);
-   53
-   54                 // 临时占位
-   55                 return None;
-   56             }
-   57         }
-   58     }
-   59
-   60     // 如果不是转发器，address 本身就是函数代码的起始地址
-   61     // 但根据函数名 get_forwarded_address，如果不是转发器通常返回 None
-      或原地址？
-   62     // 这里视你的设计而定，如果只处理转发，则返回 None
-   63     None
-   64 }
+关于你的疑问：resolve_api_set_map 返回 u8（即
+  &[u8]）在语义上是可以的，但由于 Windows PEB 中的字符串（包括 API Set
+  的物理映射名）原生就是 UTF-16
+  (`u16`)，最安全且最高效（零分配）的方案是直接返回 `Option<&[u16]>`。
 
-  关键点解释
+  这样你可以直接将结果传给你的 hash 函数（它的签名是 &[u16]），完全避免了在
+  u8 和 u16 之间来回转换。
 
-   1. `CStr::from_ptr(...).to_bytes()`:
-      这是核心。它帮你处理了“寻找空字符结尾”的底层逻辑，返回一个安全的 Rust
-  &[u8] 切片。这比你自己写 while *ptr != 0 既安全又快，而且完全不进行 UTF-8
-  校验。
+  以下是实现 resolve_api_set_map 剩余逻辑以及在 get_forwarded_address
+  中安全使用的方案：
 
-   2. `bytes.iter().position(|&b| b == b'.')`:
-      这是替代 split_once 的字节级操作。它在内存中查找 ASCII 码为 46 的字节。
+  1. resolve_api_set_map 的完整实现
 
-   3. `map(|&b| b as u16)`:
-      PE 导出表里的转发字符串是 ASCII 的，但 Windows API 和你的哈希函数需要
-  Unicode (u16)。这里直接将 u8 强转为 u16 是一种标准的 ASCII -> Wide
-  转换方式（比使用 MultiByteToWideChar 系统 API 更快且不依赖 OS）。
+  在 types.rs 中确保你有 API_SET_VALUE_ENTRY 结构体。
 
-   4. 关于 `todo!()`:
-      转发器处理是非常复杂的。解析出 NTDLL 和 RtlAllocateHeap 后，你实际上需要：
-       * 看 NTDLL 是否已加载（遍历 LDR 链表）。
-       * 如果没有加载，调用 LdrLoadDll 加载它。
-       * 在目标 DLL 中再次调用你的 get_proc_address 逻辑来寻找 RtlAllocateHeap。
-      这就是为什么这通常需要递归或者回调的原因。
+    1 fn resolve_api_set_map<'a>(
+    2     host_name: *const i8, // 宿主模块名 (用于过滤重定向)
+    3     contract_name: &[u8], // api set 契约名 (ASCII)
+    4 ) -> Option<&'a [u16]> {
+    5     unsafe {
+    6         let peb = NtCurrentPeb();
+    7         let map = (*peb).ApiSetMap;
+    8         let base = map as usize;
+    9
+   10         let ns_entry_ptr = (base + (*map).EntryOffset as usize) as
+      *const API_SET_NAMESPACE_ENTRY;
+   11         let ns_entries = from_raw_parts(ns_entry_ptr, (*map).Count as
+      usize);
+   12
+   13         for entry in ns_entries {
+   14             // 获取 ApiSet 名字的 RVA 并转为 u16 切片
+   15             let name_u16 = from_raw_parts(
+   16                 (base + entry.NameOffset as usize) as *const u16,
+   17                 entry.NameLength as usize / 2
+   18             );
+   19
+   20             // 方案：使用迭代器比较 &[u16] 和 &[u8] (免分配)
+   21             if name_u16.len() >= contract_name.len() &&
+   22                contract_name.iter().zip(name_u16.iter()).all(|(&a, &b)
+      a as u16 == b)
+   23             {
+   24                 // 找到匹配的 Entry，现在解析 Value (物理映射)
+   25                 let values = from_raw_parts(
+   26                     (base + entry.ValueOffset as usize) as *const
+      API_SET_VALUE_ENTRY,
+   27                     entry.ValueCount as usize
+   28                 );
+   29
+   30                 if values.is_empty() { return None; }
+   31
+   32                 // 核心：如果有多个映射值，需要根据 host_name 过滤
+   33                 // 比如某些 API 在不同的宿主下会重定向到不同的 DLL
+   34                 let mut target_val = &values[0];
+   35
+   36                 if values.len() > 1 && !host_name.is_null() {
+   37                     for val in values {
+   38                         if val.NameLength != 0 {
+   39                             let import_name = from_raw_parts(
+   40                                 (base + val.NameOffset as usize) as
+      *const u16,
+   41                                 val.NameLength as usize / 2
+   42                             );
+   43
+   44                             // 检查宿主名是否匹配
+      (这里需要实现一个简单的 u16 与 i8 比较)
+   45                             if compare_u16_i8(import_name, host_name)
+   46                                 target_val = val;
+   47                                 break;
+   48                             }
+   49                         }
+   50                     }
+   51                 }
+   52
+   53                 // 返回真正的物理 DLL 名字的 u16 切片
+   54                 return Some(from_raw_parts(
+   55                     (base + target_val.ValueOffset as usize) as *const
+      u16,
+   56                     target_val.ValueLength as usize / 2
+   57                 ));
+   58             }
+   59         }
+   60     }
+   61     None
+   62 }
+   63
+   64 // 辅助函数：比较 UTF-16 切片和 C 风格 ASCII 字符串
+   65 unsafe fn compare_u16_i8(u16_str: &[u16], i8_ptr: *const i8) -> bool {
+   66     let mut i = 0;
+   67     while i < u16_str.len() {
+   68         let c = *i8_ptr.add(i);
+   69         if c == 0 || (u16_str[i] != c as u16) { return false; }
+   70         i += 1;
+   71     }
+   72     *i8_ptr.add(i) == 0 // 确保长度也一致
+   73 }
+
+  2. 在 get_forwarded_address 中的下一步处理
+
+  在获取到模块地址后，你需要递归调用一次查找逻辑，因为转发可能有多层（虽然罕
+  见）。
+
+    1             // ... 接你的代码 ...
+    2             if dll_name_bytes.starts_with(b"api-ms") ||
+      dll_name_bytes.starts_with(b"ext-ms") {
+    3                 let last_index = dll_name_bytes.iter().rposition(|&b|
+      == b'-').unwrap_or(dll_name_bytes.len());
+    4
+    5                 if let Some(resolved_mod_u16) =
+      resolve_api_set_map(module, &dll_name_bytes[..last_index]) {
+    6                     let h_mod =
+      retrieve_module_add(Some(hash(resolved_mod_u16)), Some(hash));
+    7
+    8                     if let Some(base) = h_mod {
+    9                         // 将函数名转为 u16 并在目标模块中递归查找
+   10                         return lookup_recursive(base, func_name_bytes,
+      hash);
+   11                     }
+   12                 }
+   13             } else {
+   14                 // 普通 DLL 处理：比如 "NTDLL.RtlAlloc"
+   15                 // 你需要在栈上构造 "NTDLL.DLL" 的 u16 数组来计算模块
+      hash
+   16                 let mut buf = [0u16; 64];
+   17                 let mut len = 0;
+   18                 for &b in dll_name_bytes { buf[len] = b as u16; len +=
+      1; }
+   19                 // 补全后缀以匹配 retrieve_module_add 里的 Ldr 链表
+   20                 for &b in b".DLL" { buf[len] = b as u16; len += 1; }
+   21
+   22                 if let Some(base) =
+      retrieve_module_add(Some(hash(&buf[..len])), Some(hash)) {
+   23                     return lookup_recursive(base, func_name_bytes,
+      hash);
+   24                 }
+   25             }
+
+  为什么这样写最安全？
+
+   1. 内存安全：resolve_api_set_map 返回的是指针切片
+      &[u16]，它的生命周期直接绑定在 PEB
+      所在的内存区域。在进程运行期间，这块内存是合法的，不会发生悬垂指针。
+   2. 类型对齐：通过返回 &[u16]，你完美契合了 hash(buffer: &[u16])
+      的参数要求。
+   3. 零副作用：你没有修改 PEB，没有调用任何可能会被 EDR 钩住的系统函数（如
+      wcscmp 或 String 转换），所有的比较逻辑都是你手写的纯内存操作。
+
+  下一步建议：
+  如果你在 retrieve_module_add 找不到模块，说明目标 DLL
+  可能尚未加载。在高级重构中，你通常需要在这里实现一个简单的 LoadLibrary
+  逻辑，或者通过解析 Ldr 尝试手动加载。
