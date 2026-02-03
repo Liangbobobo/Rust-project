@@ -391,6 +391,7 @@ fn resolve_api_set_map(
         );
 
         // 直接使用迭代器对u8和u16比较,避免转为string产生内存分配
+        // 作为一种极高性能的 ASCII 字符模式匹配工具是非常地道的；但如果要扩展到通用文本搜索，请务必先将输入转码为 UTF-16，再进行匹配
         let k =contract_name.len() ;
         if name_u16.len()>=contract_name.len()&&
         // 使用了滑动窗口,windows(k)不复制数据,创建迭代器,将调用者以k长度为单位分割
@@ -400,7 +401,9 @@ fn resolve_api_set_map(
         .any(|window|{
             window.iter()
             .zip(contract_name.iter())
-            .all(|(&b16,&b8)|b16==b8 as u16)
+            // 这里是按元素比较的(name_u16：[65, 66, 67, 68] contract_name:[66, 67] ,窗口 1：拿出 [65, 66],窗口 2：拿出 [66, 67] <-- 这是我们要找的)
+            // 这里uu16::from(b8)安全的(扩容),但u16 as u8是危险的(高位截断)
+            .all(|(&b16,&b8)|b16==u16::from(b8))
         })
         {
             // 如果找到了匹配的entry,解析value(物理地址)
