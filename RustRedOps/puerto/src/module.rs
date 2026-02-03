@@ -374,7 +374,7 @@ fn resolve_api_set_map(
         let peb = NtCurrentPeb();
         let map = (*peb).ApiSetMap;
 
-        // 找到指向所有API_SET_NAMESPACE_ENTRY的地址
+        // 找到数组中指向第一个API_SET_NAMESPACE_ENTRY的地址
         let ns_entry =
             ((*map).EntryOffset as usize + map as usize) as *const API_SET_NAMESPACE_ENTRY;
         
@@ -390,16 +390,18 @@ fn resolve_api_set_map(
                 (map as usize+entry.NameOffset as usize) as *const u16,entry.NameLength as usize / 2,
         );
 
-        // let name_u8 =name.iter()
-        // .map(|&b|b as u8)
-        // .collect() ;
-
         // 直接使用迭代器对u8和u16比较,避免转为string产生内存分配
-        // 这段可以改为函数方便使用
+        let k =contract_name.len() ;
         if name_u16.len()>=contract_name.len()&&
-        contract_name.iter()
-        .zip(name_u16.iter())
-        .all(|(&a,&b)|a as u16 ==b)
+        // 使用了滑动窗口,windows(k)不复制数据,创建迭代器,将调用者以k长度为单位分割
+        // 比如 name_u16 是 [A, B, C, D]，k 是 2，它会依次给出 [A, B], [B, C], [C, D]
+        name_u16.windows(k)
+        // 一旦有一个窗口满足条件，立刻停止搜索（短路特性），返回 true
+        .any(|window|{
+            window.iter()
+            .zip(contract_name.iter())
+            .all(|(&b16,&b8)|b16==b8 as u16)
+        })
         {
             // 如果找到了匹配的entry,解析value(物理地址)
             // 这里为啥不用除以2了?

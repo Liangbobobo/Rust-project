@@ -512,6 +512,50 @@ Google 搜索：site:geoffchappell.com "API Set Schema"
 
 ### peb.apisetmap作用
 
+主要是API_SET_NAMESPACE API_SET_NAMESPACE_ENTRY API_SET_VALUE_ENTRY  
+
+API_SET_NAMESPACE:  
+Count字段,是一个u32数字,代表虚拟dll的数量,每个虚拟dll都有一个API_SET_NAMESPACE_ENTRY结构  
+EntryOffset字段,是一个RVA,和基址共同组成指向第一个API_SET_NAMESPACE_ENTRY数组的指针,即Base + EntryOffset = API_SET_NAMESPACE_ENTRY 数组的起始地址.  
+指向数据的类型：`[API_SET_NAMESPACE_ENTRY; Count]` (结构体数组)
+
+API_SET_NAMESPACE_ENTRY(是数组的形式):  
+NameOffset字段,RVA,代表虚拟 DLL 名称偏移.  
+指向数据的类型：`[u16; NameLength/2]` (UTF-16 字符数组)
+
+ValueCount字段,表示这个虚拟 DLL 有多少条重定向规则（通常是1）  
+
+ValueOffset字段,是一个RVA,和基址共同组成一个指针,指针指向的是 `API_SET_VALUE_ENTRY` 数组的起始地址.  
+指向数据的类型：`[API_SET_VALUE_ENTRY; ValueCount]` (结构体数组)
+
+
+API_SET_VALUE_ENTRY(是数组的形式):  
+NameOffset字段,是一个RVA,和基址共同组成一个指针,该指针指向的是一个utf-16类型的字符串  
+指向数据的类型：`[u16; NameLength/2]` (UTF-16 字符数组)
+
+NameLength字段,代表名称NameOffset指向的字符串的长度(字节数)
+
+ValueOffset字段,是一个RVA,和基址共同组成一个指针,指针指向的是目标 DLL 名称字符串
+指向数据的类型：`[u16; ValueLength/2]` (UTF-16 字符数组)
+
+ValueLength字段,目标 DLL 名称的字节长度
+
+ 总结图谱
+
+  为了让你在写代码时脑子像 CPU 一样清晰，请看这张数据流向图：
+
+   1. PEB.ApiSetMap (&API_SET_NAMESPACE)
+       * EntryOffset (u32)
+           * ⬇️ (Base + Offset)
+   2. Entry Array (&[API_SET_NAMESPACE_ENTRY])
+       * [0] -> ValueOffset (u32)
+           * ⬇️ (Base + Offset)
+   3. Value Array (&[API_SET_VALUE_ENTRY])
+       * [0] -> ValueOffset (u32)
+           * ⬇️ (Base + Offset)
+   4. Raw Memory (&[u16])
+       * 6B 00 65 00 72 00 ... ("kernelbase.dll")
+
 ApiSetMap 是 Windows 用户层的“DNS服务器”,有四个数据结构组成,
 
 详解其作用有:
