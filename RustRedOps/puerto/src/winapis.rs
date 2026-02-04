@@ -1,7 +1,7 @@
 use crate::types::{PEB};
 
 #[inline(always)]
-    /// 不调用windows api通过cpu的gs寄存器读取当前进程的peb
+    /// 不调用windows api通过cpu的gs寄存器读取当前进程的peb地址
     /// 
     /// gs指向当前线程的TEB起始地址,其offset 0x60(win64)处指向peb地址
 pub fn NtCurrentPeb()->*const PEB {

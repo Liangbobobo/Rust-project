@@ -737,6 +737,7 @@ pub struct PEB {
     pub Anonymous1: PEB_0,
     pub Mutant: HANDLE,
     pub ImageBaseAddress: *mut c_void,
+    // Ldr字段是一个指向类型为PEB_LDR_DATA的结构体的原始指针
     pub Ldr: *mut PEB_LDR_DATA,
     pub ProcessParameters: *mut RTL_USER_PROCESS_PARAMETERS,
     pub SubSystemData: *mut c_void,

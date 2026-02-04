@@ -1,10 +1,15 @@
 - [基础知识](#基础知识)
   - [ASCII UTF-8 UTF-16 ANSI / Code Pages (GBK, Latin1)](#ascii-utf-8-utf-16-ansi--code-pages-gbk-latin1)
+    - [什么是编码?](#什么是编码)
     - [ASCII (American Standard Code for Information Interchange)](#ascii-american-standard-code-for-information-interchange)
     - [OEM Code Pages (ANSI / DBCS) —— “乱码之源”](#oem-code-pages-ansi--dbcs--乱码之源)
     - [UTF-16 LE (Little Endian) —— Windows 的皇冠](#utf-16-le-little-endian--windows-的皇冠)
     - [UTF-8 —— Rust 与现代网络的标准](#utf-8--rust-与现代网络的标准)
     - [pe peb结构体及其字段编码格式](#pe-peb结构体及其字段编码格式)
+  - [Red Team中常用的u8 u16 raw pointer之间的转化及安全性操作(垂悬指针等问题) `&[u8]` (ASCII) 与 `&[u16]` (UTF-16)之间转换](#red-team中常用的u8-u16-raw-pointer之间的转化及安全性操作垂悬指针等问题-u8-ascii-与-u16-utf-16之间转换)
+    - [`&[u8]` (ASCII) 与 `&[u16]` (UTF-16)之间转换](#u8-ascii-与-u16-utf-16之间转换)
+  - [ffi::c\_void \*mut c\_void \*const c\_void](#ffic_void-mut-c_void-const-c_void)
+  - [rust种引用和指针的区别](#rust种引用和指针的区别)
 - [前言](#前言)
   - [为啥要定义这么多数据结构(types.rs中)](#为啥要定义这么多数据结构typesrs中)
 - [TEB](#teb)
@@ -79,10 +84,73 @@
 
 ## ASCII UTF-8 UTF-16 ANSI / Code Pages (GBK, Latin1)
 
- 这不仅是编程基础，这是内存取证（Memory Forensics）和反编译（Reverse Engineering）的基石。
+这不仅是编程基础，这是内存取证（Memory Forensics）和反编译（Reverse Engineering）的基石。
 
-  ---
+### 什么是编码?
+
 字符编码的本质:在 CPU 眼里，没有“文字”，只有数字。编码就是一本“字典”，规定了哪个数字代表哪个图形。
+
+之所以说结构体本身没有“编码格式”，是因为在计算机科学中，“编码”是专门为“文
+  本（字符）”设计的，而结构体是由“二进制数值”组成的。
+
+  为了让你彻底理解，我们可以从以下三个层面剖析：
+
+
+  1. 文本 vs 数值（概念的区别）
+   * 编码
+     (Encoding)：是将“抽象的字符”（如：'A'，'中'）映射为“二进制数字”的字典
+     。只有当你处理文本时，才需要讨论它是 UTF-8、ASCII 还是 UTF-16。
+   * 二进制数值 (Binary Value)：结构体成员（如 Length）是直接的数字。
+       * 比如 Length 是 20，在内存里就是 14
+         00（十六进制）。这不代表任何字符，它就是一个长度数值。
+       * 数值不需要“编码字典”，CPU 的寄存器直接就能读懂它。
+
+
+  2. 结构体就像一个“标签”或“信封”
+  想象一个信封：
+   * 信封上的属性：
+       * 信件长度：100 字节（这是一个数值）
+       * 信件地址：内存 0x123456（这是一个指针）
+   * 信封里的内容：
+       * 一封用“中文”写的信（这就是编码，比如 UTF-16）。
+
+
+  `UNICODE_STRING`
+  结构体本身就是那个“信封”。它只负责告诉你：字符串有多长、在哪个地址。它自
+  己不包含任何文本字符，所以它不需要编码。
+
+  3. 内存中的真实样子 (x64 环境)
+  如果你在内存中观察一个 UNICODE_STRING 结构体，它看起来是这样的：
+
+
+
+  ┌──────┬─────────────┬─────────────────────┬─────────────────────────────
+  ┐
+  │ 偏移 │ 字段名      │ 内存数据 (示例)     │ 说明
+  │
+  ├──────┼─────────────┼─────────────────────┼─────────────────────────────
+  ┤
+  │ +... │ Length      │ 0C 00               │ 二进制数 12，表示 12 字节
+  │
+  │ +... │ `Maximum... │ 0E 00               │ 二进制数 14，表示缓冲区 ...
+  │
+  │ +... │ (填充)      │ 00 00 00 00         │ 为了 8 字节对齐而存在的空白
+  │
+  │ +... │ Buffer      │ `A0 55 44 33 22 ... │ 内存地址，指向真正存字符...
+  │
+  └──────┴─────────────┴─────────────────────┴─────────────────────────────
+  ┘
+
+
+  结论：
+  你看，这里面全是十六进制的数字（二进制值）。只有当你顺着 Buffer
+  提供的地址 0x00001122334455A0 找过去，读到的那一串数据，才需要用 UTF-16LE
+  编码去解释。
+
+
+  一句话总结：
+  结构体是“元数据（管理数据的数据）”，它是纯二进制数值；只有它指向的缓冲区
+  才是“文本数据”，才需要编码。
 
 ### ASCII (American Standard Code for Information Interchange)
 
@@ -359,6 +427,89 @@
 - 找文件头、找导出函数 -> 盯着 ASCII (`u8`)，注意 \0 结尾。
 - 找模块基址、解析 ApiSet、伪装命令行 -> 盯着 UTF-16 (`u16`)，注意 UNICODE_STRING 的
      Length。
+
+## Red Team中常用的u8 u16 raw pointer之间的转化及安全性操作(垂悬指针等问题) `&[u8]` (ASCII) 与 `&[u16]` (UTF-16)之间转换
+
+###  `&[u8]` (ASCII) 与 `&[u16]` (UTF-16)之间转换
+
+Rust 中，切片 `&[T]` 要求内存必须是连续且对齐的
+
+因为 u16 占 2 字节，而u8 占 1 字节，你无法在不移动数据或分配新空间的情况下，直接把 `&[u8] 转成&[u16]`
+
+为什么不能直接强转指针？  
+```rust
+// 错误示范
+let ptr = name_slice.as_ptr() as *const u16;
+let slice = from_raw_parts(ptr, len);
+```
+如果你强转，CPU 会每 2 个字节读一次内存。如果你原始数据是 [0x41, 0x42,0x43, 0x44] ("ABCD")，强转后你会读到 [0x4241, 0x4443]。这和你想要模拟的[0x0041, 0x0042, 0x0043, 0x0044]完全不同。所以物理上的内存转换是必须的，除非你改变哈希计算的步长
+
+方案一：使用“双重哈希”策略（兼容性最好）
+
+由于 PEB (LDR) 里是 UTF-16，而 EAT (导出表) 里是ASCII。为了避免类型转换的麻烦，最简单的办法是针对同一算法实现两个版本的哈希函数
+
+1. hash_u16(data: &[u16]) -> 用于模块名
+2. hash_u8(data: &[u8]) -> 用于函数名
+
+实现原理：  
+由于 ASCII 本质上是高位为 0 的 UTF-16。只要你的 hash_u8在计算时，逻辑上把每个字节当成 u16 来处理（即结果与 u16版本一致），你就可以直接传入 `&[u8]`
+
+
+
+
+
+
+
+
+方案二:重构哈希函数为“流式”计算（最地道，推荐）  
+
+在红队编程中，为了灵活性，通常不会传递 `fn(&[u16]) -> u32`这种死板的函数指针。更好的做法是让哈希函数支持增量更新
+
+```rust
+pub fn fnv1a_generic<I>(iter: I) -> u32
+ where I: IntoIterator<Item = u16>
+ {
+    let mut hash = 0x811c9dc5;
+    for code in iter {
+      hash ^= code as u32;
+      hash = hash.wrapping_mul(0x01000193);}
+      hash
+ }
+```
+在 `get_proc_address` 中调用:  
+// 无需创建数组，直接传递迭代器  
+let func_hash = fnv1a_generic(name_slice.iter().map(|&b| b as u16));
+
+原理：迭代器是延迟计算的（Lazy）。它会逐个取出 u8，强转为u16，然后立即参与哈希运算。全程不需要存储中间的 `u16` 数组  
+优点：完美解决签名问题，且内存占用为 0
+
+
+
+方案三(最直接,无堆分配):  
+
+能够保证`&[u8]`类型的变量不超过固定长度情况下,可以在栈上开辟一个固定大小的缓冲区,存放转换之后的数据
+
+```rust
+let mut buffer = [0u16; 256];
+
+let len = if name_slice.len() > 256 { 256 } else { name_slice.len() };
+
+// 手动拷贝并提升类型
+for i in 0..len {
+buffer[i] = name_slice[i] as u16;
+}
+
+// 传递切片的一段引用
+let func_hash = (hash_func.unwrap())(&buffer[..len]);
+```
+
+完全没有 alloc，速度极快;  
+在当前函数的栈帧中分配了一块空间。这种方式符合 `&[u16]`  
+如果函数名超过 256（极少见），哈希会不匹配
+
+## ffi::c_void *mut c_void *const c_void
+
+## rust种引用和指针的区别
 
 # 前言
 

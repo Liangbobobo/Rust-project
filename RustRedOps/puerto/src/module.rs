@@ -8,91 +8,49 @@
 //   core::ptr::read_volatile 防止编译器生成过于规律的汇编模式。
 
 // 哈希函数的多样化： 不要只传一个固定的
-//       hash_func。可以考虑在调用处根据不同的模块使用不同的哈希算法（例如
-//       ：找 ntdll 用 fnv1a，找 kernel32 用 murmur3），这会让你的行为在
-//       EDR 的启发式分析中显得极其混乱，难以定性。
-//    2. 不使用 `is_null()`： 在极其严苛的免杀场景下，可以使用 (ptr as
-//       usize) == 0 来代替
-//       ptr.is_null()。虽然语义相同，但有时能避开某些针对 Rust
-//       标准库特定函数签名的扫描。
-//    3. 循环展开 (Loop Unrolling)： 如果你知道目标 DLL
-//       通常在链表的前几个位置，可以尝试手动展开前两次循环。这会打破常见的
-//       “遍历链表”指令序列指纹。
 
-// 为了在项目中使用 debug_log! 宏，你需要在 src/macros.rs
-//   文件中添加该宏的定义。
-
-//   由于这是一个红队工具项目（Red
-//   Ops），通常希望调试信息只在开发阶段（Debug
-//   模式）显示，而在正式发布（Release
-//   模式）时自动消失，以减小体积并提高隐蔽性。
-
-//   1. 修改 src/macros.rs
-//   在文件末尾添加以下内容：
-
-//     1 /// 仅在 Debug 模式下向 Windows 控制台打印调试信息。
-//     2 /// 在 Release 模式下，该宏的内容会被编译器忽略，不占用空间。
-//     3 #[macro_export]
-//     4 macro_rules! debug_log {
-//     5     ($($arg:tt)*) => {
-//     6         #[cfg(debug_assertions)]
-//     7         {
-//     8             $crate::println!($($arg)*);
-//     9         }
-//    10     };
-//    11 }
-//    12
-//    13 /// 为了兼容文档中的示例，建议同时增加 eprintln! 的定义
-//    14 #[macro_export]
-//    15 macro_rules! eprintln {
-//    16     ($($arg:tt)*) => {
-//    17         $crate::println!($($arg)*);
-//    18     };
-//    19 }
-
-//   2. 为什么这样设计？
-//    * `#[cfg(debug_assertions)]`: 这是 Rust 的内置属性。当你运行 cargo
-//      run 或 cargo build 时，宏会生效；当你使用 cargo build --release
-//      时，整个代码块会被剔除。
-//    * `$crate::println!`: 它复用了你项目中已经实现的 println!
-//      宏逻辑（通过 ConsoleWriter 调用 Windows API）。
-//    * `#[macro_export]`: 确保该宏在整个 crate 以及外部都可以通过
-//      crate::debug_log! 或直接 debug_log! 访问。
-
-//   3. 在代码中使用
-//   修改完成后，你就可以像之前设想的那样在 src/module.rs
-//   或其他地方安全地使用了：
-
-//    1 if addr.is_null() {
-//    2     debug_log!("[-] 模块 hash 匹配失败，未找到地址");
-//    3     None
-//    4 } else {
-//    5     debug_log!("[+] 成功获取模块地址: {:?}", addr);
-//    6     Some(addr)
-//    7 }
-
-//   提示：如果你发现报错 cannot find macro println in this scope，请确保在
-//   src/macros.rs 中 println! 的定义位于 debug_log! 之前（Rust
-//   宏的定义是有顺序要求的）。从你之前提供的文件内容看，顺序已经是正确的。
+// 导出表的函数名是 ASCII (char / i8) 编码
+// win64架构下,usize u64 *mut c_void都是8字节,在寄存器种的表示完全相同
 use core::{ffi::CStr, ffi::c_void, ptr::null_mut, slice::from_raw_parts};
 
+use obfstr::obfstr;
 use crate::hash::fnv1a_utf16;
 use crate::helper::PE;
 use crate::types::{
-    API_SET_NAMESPACE_ENTRY, HMODULE, IMAGE_EXPORT_DIRECTORY, LDR_DATA_TABLE_ENTRY,
+    API_SET_NAMESPACE_ENTRY,API_SET_VALUE_ENTRY, HMODULE, IMAGE_EXPORT_DIRECTORY, LDR_DATA_TABLE_ENTRY,
 };
 use crate::winapis::NtCurrentPeb;
 use crate::{debug_log, types::IMAGE_DIRECTORY_ENTRY_EXPORT};
-use alloc::string::String;
-use alloc::vec::Vec;
 use spin::Once;
 
 type hash_type = Option<u32>;
 
-/// crate a static variable to store the ntall.dll's address
+/// crate a static variable to store the ntdll.dll's address
 ///
 ///
 static NTD: Once<u64> = Once::new();
+
+/// retrieve the base address of the ntdll.dll module
+#[inline(always)]
+pub fn get_ntdll_address()->*mut c_void {
+
+    // rust中裸指针(*mut c_void)默认无send sync trait
+    // 意味着不能将裸指针存入static,编译器无法保障多线程下的指针访问安全
+    // 将指针转为u64,得到纯数据,可以在线程中安全传递
+    // win64架构下,usize u64 *mut c_void都是8字节,在寄存器种的表示完全相同
+    // u64 是为了完整容纳 64 位系统的内存地址，防止截断导致崩溃
+    let addr = NTD
+    .call_once(|| retrieve_module_add(Some(3006804307u32), 
+    Some(fnv1a_utf16))
+    // unwrap失败返回全为0的原始指针
+    .unwrap_or(null_mut()) as u64) ;
+
+    // add是&u64,是对数据的引用,是内存地址,不是数据本身
+    // 必须解引用才能得到真实数据
+    *addr as *mut c_void
+}
+
+
 
 /// 获取模块基址
 ///
@@ -122,9 +80,16 @@ pub fn retrieve_module_add(
         let peb = NtCurrentPeb();
         let ldr = (*peb).Ldr;
 
+        // ldr->PEB_LDR_DATA->InMemoryOrderModuleList(代表模块在内存中的布局及排列的双向链表)->Flink(链表的第一个节点)
+        // 第一个节点指向主程序本身(.exe)的LDR_DATA_TABLE_ENTRY的中间位置(通常是0x10的偏移处)
         let mut InMemoryOrderModuleList_flink = (*ldr).InMemoryOrderModuleList.Flink;
+
+        // (*ldr).InMemoryOrderModuleList.Flink:*mut LIST_ENTRY就是指向LDR_DATA_TABLE_ENTRY的InMemoryOrderLinks: LIST_ENTRY
+        // 这里直接将中间位置(0x10的偏移处)作为0偏移,构建错位
         let mut InMemoryOrderModuleList_flink_LDR_DATA_TABLE_ENTRY =
-            (*ldr).InMemoryOrderModuleList.Flink as *const LDR_DATA_TABLE_ENTRY;
+            (*ldr).InMemoryOrderModuleList.Flink 
+            // 此处的as按照语义来说,是改变了指向的数据类型,但(*ldr).InMemoryOrderModuleList.Flink 本来就是指向LDR_DATA_TABLE_ENTRY的中间位置,等于只更改了指针标签
+            as *const LDR_DATA_TABLE_ENTRY;
 
         // 处理传入的module是None的情况
         let module = match module {
@@ -133,10 +98,10 @@ pub fn retrieve_module_add(
             // 需要对这种条件下的返回值(*peb).ImageBaseAddress做is_null()判定,排除极端环境(peb破坏)返回some(0x0)的情况,这时候依然会出现错误
             None => {
                 if (*peb).ImageBaseAddress.is_null() {
-                    debug_log!("[-] ImageBaseAddress is NULL");
+                    debug_log!("传入的module(模块hash)是空的[-] ImageBaseAddress is NULL");
                     return None;
                 }
-                // debug_log!("[+] Returning ImageBaseAddress: {:?}", base);
+                 debug_log!("传入的module(模块hash)不可用,返回的是(*peb).ImageBaseAddress的地址(exe程序加载入内存的起始地址)[+] Returning ImageBaseAddress");
                 return Some((*peb).ImageBaseAddress);
             }
         };
@@ -145,7 +110,10 @@ pub fn retrieve_module_add(
         let mut addr = null_mut();
 
         while !(*InMemoryOrderModuleList_flink_LDR_DATA_TABLE_ENTRY)
+        // LDR_DATA_TABLE_ENTRY->FullDllName
+        // FullDllName类型struct UNICODE_STRING,本身没有编码格式,遵循c的内存布局
             .FullDllName
+            // FullDllName.Buffer是utf-16le编码格式(每个字符占用 2 个字节,低位字节在前,无 Null 终止符(虽然通常以00 00结尾,但windows只信任UNICODE_STRING 结构体中的 Length 字段（以字节为单位）))
             .Buffer
             // 检查原始类型的指针本身的地址是否为一个有效的内存地址(is null,指针本身为空,代表指针不可用),不是检查指针指向的内容为空(指针指向的内容为空,比如全是0时,通常指针本身不是空的)
             .is_null()
@@ -231,7 +199,7 @@ pub fn get_proc_address(
 
         // AddressOfNames(RVA)指向一个数组([u32]类型),数组中每个元素也是RVA
         // PE文件规范,所有RVA都是4字节(u32).
-        // names数组是*const u32的,加上基址后需要转为一个指向ascii字符串的指针(*const i8)
+        // names数组本身是*const u32的,加上基址后需要转为一个指向ascii字符串的指针(*const i8)
         // names[i]指向的是以 `\0` 结尾的 ASCII字符串
         // ASCII 字符在内存中占用 1 个字节，所以在 Rust（以及 C）中，我们用 i8（即 c_char）指针来指向它(使用i8保存和c的兼容性)
         // 在计算names[i]中的字符串个数时,如果我们把它当作 u32 指针，一次就会读出 4 个字母（比如把 "NtMa" 读成一个数字），这显然是不对的
@@ -287,14 +255,34 @@ pub fn get_proc_address(
                 len += 1;
             }
 
+
+            // h_module+names[i]代表peb结构中导出表的名称数组
+            // 该数组中的内容是ascii编码的字符串
             let to_u16 = from_raw_parts(
-                (h_module + names[i] as usize) as *const u16,
-                (len + 1) / 2 as usize,
+                (h_module + names[i] as usize) as *const i8,
+                len as usize,
             );
 
+            // 解构hash_func
             let hash_func = hash_func.unwrap();
 
-            let func_hash = hash_func(to_u16);
+            // 将ascii转为u16,匹配hash函数,这么做是否安全?
+            let mut u8_to_u16 = [0u16;256];
+
+            // 避免超过范围
+            let to_u16_len =if to_u16.len()>256 {
+                256
+            } else {
+                to_u16.len()
+            } ;
+
+            // 将u8数组的每个字节转为u16
+            for i in 0..to_u16_len{
+                u8_to_u16[i]=to_u16[i] as u16;
+            }
+
+            // 使用&[u16]数组,传入hash函数
+            let func_hash = hash_func(&u8_to_u16[..to_u16_len]);
 
             if function.unwrap() == func_hash {
                 // 返回函数的地址
@@ -347,17 +335,38 @@ pub fn get_forwarded_address(
             let func_name_bytes = &byte[dot_index + 1..];
 
             // 去掉最右侧的 - 连字符
-            if dll_name_bytes.starts_with(b"api-ms") || dll_name_bytes.starts_with(b"ext-ms") {
+            if dll_name_bytes.starts_with(obfstr!("api-ms").as_bytes()) || dll_name_bytes.starts_with(obfstr!("ext-ms").as_bytes()) {
                 // 从右开始找 - (ascii 45)位置
                 let module_resolved =
                     if let Some(last_index) = dll_name_bytes.iter().rposition(|&b| b == b'-') {
                         resolve_api_set_map(module, &dll_name_bytes[..last_index])
                     } else {
                         resolve_api_set_map(module, dll_name_bytes)
-                    };
-            }
-            // 使用resolve_api_set_map的返回值,进一步处理
 
+                        
+                    };
+
+                    // 使用resolve_api_set_map的返回值,进一步处理
+                    if let Some(modules) =module_resolved  {
+                        for module in modules{
+                    // 尝试获取目标模块在内存中的基地址?    
+                            
+                            let dll_hash =fnv1a_utf16(module) ;
+              // 如果目标模块尚未加载到当前进程内存中，则手动调用 加载它,如何不通过LoadLibrary,避免被hook?
+
+
+
+
+                        }
+                    }
+            } else {
+                      // 不是虚拟dll的情况
+                      // 这里将&[u8]转为*mut c_void
+                      // 这里是否有指针的安全问题
+                        return Some(dll_name_bytes.as_ptr() as *mut c_void);
+                    };
+
+            
         }
     }
 
@@ -366,10 +375,10 @@ pub fn get_forwarded_address(
 
 /// peb.ApiSetMap
 /// 继续使用module的*const i8格式
-fn resolve_api_set_map(
+fn resolve_api_set_map<'a>(
     host_name: *const i8, // 宿主模块名
     contract_name: &[u8], // api set契约名
-) -> *const &[u16] {
+) -> Option<&'a [u16]> {
     unsafe {
         let peb = NtCurrentPeb();
         let map = (*peb).ApiSetMap;
@@ -408,12 +417,47 @@ fn resolve_api_set_map(
         {
             // 如果找到了匹配的entry,解析value(物理地址)
             // 这里为啥不用除以2了?
-            let values =from_raw_parts((map as usize+entry.ValueOffset as usize)as *const u16, 
+            let values =from_raw_parts((map as usize+entry.ValueOffset as usize)as *const API_SET_VALUE_ENTRY, 
         entry.ValueCount as usize) ;
-            if values.is_empty(){return null_mut();}
 
-            // 如果有多个映射值,需要根据host_name过滤(如某些api再不同宿主下会重定向到不同的dll)
+            if values.is_empty(){return None}
+
+            // 如果只有一个映射值,value结构体中ValueCount字段为1,直接返回*const [u16]的原始类型(Windows中peb的常用类型)
+            if values.len()==1 {
+                // 注意values是个数组,注意其使用方式
+                // let val =&values[0] ;
+
+                let dll =from_raw_parts((map as usize+ (&values[0]).ValueOffset as usize) as *const u16, (&values[0]).ValueLength as usize /2);
+
+                return Some(dll)
+            }
+
+            // 如果有多于1个的映射值,需要根据host_name过滤(如某些api再不同宿主下会重定向到不同的dll)
             // 对多个宿主
+            for val in values{
+
+                let name = from_raw_parts((map as usize+val.NameOffset as usize)as *const u16, 
+        val.NameLength as usize/2) ;
+
+                let host_name_u8 = CStr::from_ptr(host_name).to_bytes();
+
+                let name_eq_host_name_u8 = name.iter()
+                .zip(host_name_u8.iter())
+                .all(|(&name,&host_name_u8)|name== host_name_u8 as u16);
+
+                if !name_eq_host_name_u8 {
+                    let dll = from_raw_parts((map as usize+ (&values[0]).ValueOffset as usize) as *const u16, (&values[0]).ValueLength as usize /2);
+
+                    if !dll.is_empty() {
+                        return Some(dll);
+                    }
+                }
+
+                
+
+
+            }
+
         }
 
         
@@ -432,3 +476,5 @@ fn resolve_api_set_map(
 
 
 // u[8] u[16]等不同编码方式之间的转换需要自己实现方便使用
+
+// 测试代码需要补充
