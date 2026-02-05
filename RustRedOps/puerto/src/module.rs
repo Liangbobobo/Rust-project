@@ -9,6 +9,8 @@
 
 // 哈希函数的多样化： 不要只传一个固定的
 
+use core::ptr::addr_of;
+use core::slice;
 // 导出表的函数名是 ASCII (char / i8) 编码
 // win64架构下,usize u64 *mut c_void都是8字节,在寄存器种的表示完全相同
 use core::{ffi::CStr, ffi::c_void, ptr::null_mut, slice::from_raw_parts};
@@ -351,10 +353,12 @@ pub fn get_forwarded_address(
                         for module in modules{
                     // 尝试获取目标模块在内存中的基地址?    
                             
-                            let dll_hash =fnv1a_utf16(module) ;
+                            // 这里的slice::from_ref将u16转为&[u16]
+                            let dll_hash =fnv1a_utf16(slice::from_ref(&*module)) ;
               // 如果目标模块尚未加载到当前进程内存中，则手动调用 加载它,如何不通过LoadLibrary,避免被hook?
+                            let mut addr =retrieve_module_add(Some(dll_hash), Some(fnv1a_utf16));
 
-
+                            
 
 
                         }
