@@ -1,3 +1,4 @@
+- [工具](#工具)
 - [基础知识](#基础知识)
   - [ASCII UTF-8 UTF-16 ANSI / Code Pages (GBK, Latin1)](#ascii-utf-8-utf-16-ansi--code-pages-gbk-latin1)
     - [什么是编码?](#什么是编码)
@@ -7,16 +8,16 @@
     - [UTF-8 —— Rust 与现代网络的标准](#utf-8--rust-与现代网络的标准)
     - [pe peb结构体及其字段编码格式](#pe-peb结构体及其字段编码格式)
   - [Red Team中常用的u8 u16 raw pointer之间的转化及安全性操作(垂悬指针等问题) `&[u8]` (ASCII) 与 `&[u16]` (UTF-16)之间转换](#red-team中常用的u8-u16-raw-pointer之间的转化及安全性操作垂悬指针等问题-u8-ascii-与-u16-utf-16之间转换)
-    - [`&[u8]` (ASCII) 与 `&[u16]` (UTF-16)之间转换](#u8-ascii-与-u16-utf-16之间转换)
+    - [`&[u8]` (ASCII) 与 `&[u16]` (UTF-16)之间转换(Rust中不能直接转换)](#u8-ascii-与-u16-utf-16之间转换rust中不能直接转换)
+      - [不同解决方案](#不同解决方案)
   - [ffi::c\_void \*mut c\_void \*const c\_void](#ffic_void-mut-c_void-const-c_void)
-  - [rust种引用和指针的区别](#rust种引用和指针的区别)
+  - [rust中引用和指针的区别](#rust中引用和指针的区别)
 - [前言](#前言)
-  - [为啥要定义这么多数据结构(types.rs中)](#为啥要定义这么多数据结构typesrs中)
+  - [dinvk等项目操作pe peb的原理](#dinvk等项目操作pe-peb的原理)
 - [TEB](#teb)
 - [PEB相关(使用dinvk中的例子及windbg)](#peb相关使用dinvk中的例子及windbg)
-    - [一个可执行文件产生多个进程时PEB是怎么样的?](#一个可执行文件产生多个进程时peb是怎么样的)
+    - [一个可执行文件产生多个进程的PEB情况?](#一个可执行文件产生多个进程的peb情况)
   - [ApiSetMap](#apisetmap)
-    - [peb.apisetmap作用](#pebapisetmap作用)
     - [结构体定义](#结构体定义)
       - [API\_SET\_NAMESPACE(根结构体,Schema 头部)](#api_set_namespace根结构体schema-头部)
       - [API\_SET\_NAMESPACE\_ENTRY (虚拟模块条目)](#api_set_namespace_entry-虚拟模块条目)
@@ -24,6 +25,7 @@
       - [API\_SET\_HASH\_ENTRY (哈希索引条目)](#api_set_hash_entry-哈希索引条目)
     - [puerto中resolve\_api\_set\_map解析apisetmap的逻辑](#puerto中resolve_api_set_map解析apisetmap的逻辑)
     - [免杀视角 —— 这些结构体在对抗中的核心作用](#免杀视角--这些结构体在对抗中的核心作用)
+    - [如果虚拟dll在ApiSetMap中找不到呢](#如果虚拟dll在apisetmap中找不到呢)
   - [LDR](#ldr)
   - [PEB\_LDR\_DATA](#peb_ldr_data)
     - [InMemoryOrderModuleList](#inmemoryordermodulelist)
@@ -80,6 +82,11 @@
     - [6. OCX / CPL —— 插件式架构的实现者](#6-ocx--cpl--插件式架构的实现者)
     - [总结：为何需要如此多样的 PE 格式？](#总结为何需要如此多样的-pe-格式)
 
+
+# 工具
+
+逆向经典：Windows Internals Part 1 (7th Ed), Chapter 3 "System Mechanisms"
+
 # 基础知识
 
 ## ASCII UTF-8 UTF-16 ANSI / Code Pages (GBK, Latin1)
@@ -88,41 +95,30 @@
 
 ### 什么是编码?
 
-字符编码的本质:在 CPU 眼里，没有“文字”，只有数字。编码就是一本“字典”，规定了哪个数字代表哪个图形。
+字符编码的本质:在 CPU 眼里，没有“文字”，只有数字。编码就是一本“字典”，规定了哪个数字代表哪个图形。而在程序的源码中,有些内容需要编码,有些比如源码中的结构体不需要编码,只是二进制数据.
 
-之所以说结构体本身没有“编码格式”，是因为在计算机科学中，“编码”是专门为“文
-  本（字符）”设计的，而结构体是由“二进制数值”组成的。
+之所以说结构体本身没有“编码格式”，是因为在计算机科学中，“编码”是专门为“文本（字符）”设计的，而结构体是由“二进制数值”组成的。
 
-  为了让你彻底理解，我们可以从以下三个层面剖析：
-
-
-  1. 文本 vs 数值（概念的区别）
-   * 编码
-     (Encoding)：是将“抽象的字符”（如：'A'，'中'）映射为“二进制数字”的字典
-     。只有当你处理文本时，才需要讨论它是 UTF-8、ASCII 还是 UTF-16。
-   * 二进制数值 (Binary Value)：结构体成员（如 Length）是直接的数字。
-       * 比如 Length 是 20，在内存里就是 14
-         00（十六进制）。这不代表任何字符，它就是一个长度数值。
-       * 数值不需要“编码字典”，CPU 的寄存器直接就能读懂它。
+1. 文本 vs 数值（概念的区别）
+* 编码(Encoding)：是将“抽象的字符”（如：'A'，'中'）映射为“二进制数字”的字典。只有当你处理文本时，才需要讨论它是 UTF-8、ASCII 还是 UTF-16。
+* 二进制数值 (Binary Value)：结构体成员（如 Length）是直接的数字。
+* 比如 Length 是 20，在内存里就是 1400（十六进制）。这不代表任何字符，它就是一个长度数值。
+* 数值不需要“编码字典”，CPU 的寄存器直接就能读懂它。
 
 
-  2. 结构体就像一个“标签”或“信封”
-  想象一个信封：
-   * 信封上的属性：
-       * 信件长度：100 字节（这是一个数值）
-       * 信件地址：内存 0x123456（这是一个指针）
-   * 信封里的内容：
-       * 一封用“中文”写的信（这就是编码，比如 UTF-16）。
+2. 结构体就像一个“标签”或“信封”
+想象一个信封：
+* 信封上的属性：
+* 信件长度：100 字节（这是一个数值）
+* 信件地址：内存 0x123456（这是一个指针）
+* 信封里的内容：
+* 一封用“中文”写的信（这就是编码，比如 UTF-16）。
 
 
-  `UNICODE_STRING`
-  结构体本身就是那个“信封”。它只负责告诉你：字符串有多长、在哪个地址。它自
-  己不包含任何文本字符，所以它不需要编码。
+比如c中常见的`UNICODE_STRING`结构体本身就是那个“信封”。它只负责告诉你：字符串有多长、在哪个地址。它自己不包含任何文本字符，所以它不需要编码。
 
-  3. 内存中的真实样子 (x64 环境)
-  如果你在内存中观察一个 UNICODE_STRING 结构体，它看起来是这样的：
-
-
+3. 内存中的真实样子 (x64 环境)
+如果你在内存中观察一个 UNICODE_STRING 结构体，它看起来是这样的：
 
   ┌──────┬─────────────┬─────────────────────┬─────────────────────────────
   ┐
@@ -142,15 +138,12 @@
   ┘
 
 
-  结论：
-  你看，这里面全是十六进制的数字（二进制值）。只有当你顺着 Buffer
-  提供的地址 0x00001122334455A0 找过去，读到的那一串数据，才需要用 UTF-16LE
-  编码去解释。
+结论：  
+你看，这里面全是十六进制的数字（二进制值）。只有当你顺着 Buffer提供的地址 0x00001122334455A0 找过去，读到的那一串数据，才需要用 UTF-16LE编码去解释。
 
 
-  一句话总结：
-  结构体是“元数据（管理数据的数据）”，它是纯二进制数值；只有它指向的缓冲区
-  才是“文本数据”，才需要编码。
+一句话总结：  
+结构体是“元数据（管理数据的数据）”，它是纯二进制数值；只有它指向的缓冲区才是“文本数据”，才需要编码。
 
 ### ASCII (American Standard Code for Information Interchange)
 
@@ -185,7 +178,7 @@
 - Latin-1 (CP1252, 西欧)：0xD6 = "Ö" (带分音符的O)。
 - 内存形态：单字节或双字节混排。
 
-  🔴 红队视角
+🔴 红队视角
 
 - 环境敏感性：如果你的木马是用 GBK编码写的中文提示信息，扔到一台美国（CP1252）的服务器上运行，弹出的信息就是乱码。
 - API 版本：MessageBoxA、CreateProcessA 中的 A 就是指 ANSI。这些 API 会根据当前系统的 CodePage 把字符串转成 Unicode 再交给内核。
@@ -211,9 +204,9 @@
 
 - API 调用：几乎所有现代 Windows API（ntdll.dll, kernel32.dll）底层只接受 UTF-16。如果你传ASCII，系统要在内部做一次 RtlAnsiStringToUnicodeString，不仅慢，还可能因为 Code Page导致转换错误。
 - 00 字节特征：
-  - ASCII: c m d -> 63 6D 64 (紧凑)
-  - UTF-16: c m d -> 63 00 6D 00 64 00 (稀疏)
-  - 检测：安全人员只要在内存 Hex 视图里看到大量的 00 间隔，就知道这是 UTF-16字符串区域。
+- ASCII: c m d -> 63 6D 64 (紧凑)
+- UTF-16: c m d -> 63 00 6D 00 64 00 (稀疏)
+- 检测：安全人员只要在内存 Hex 视图里看到大量的 00 间隔，就知道这是 UTF-16字符串区域。
 - ApiSetMap 解析：你在解析 ApiSetMap 时，NameOffset 指向的数据就是 UTF-16LE。如果你直接把它当 ASCII 读，会读到 a (0x61)，然后读到0x00，你的字符串读取函数就会以为字符串结束了，导致只能读出一个字母
 
 ---
@@ -231,9 +224,9 @@
 
 - C2 通信：你的木马回传数据给控制台（Cobalt Strike / Sliver）时，通常是 JSON 或 XML格式，这些全是 UTF-8。
 - 主要冲突：Rust 的世界是 UTF-8，Windows 的世界是 UTF-16。
-  - 你在写代码时：let name = "kernel32.dll"; (这是 UTF-8)。
-  - 你调用 API 时：LdrLoadDll 需要 buffer: *mut u16 (这是 UTF-16)。
-  - 必须转换：你必须时刻进行 UTF-8 -> UTF-16 的转换（expanding）和 UTF-16 -> UTF-8的转换（narrowing）。
+- 你在写代码时：let name = "kernel32.dll"; (这是 UTF-8)。
+- 你调用 API 时：LdrLoadDll 需要 buffer: *mut u16 (这是 UTF-16)。
+- 必须转换：你必须时刻进行 UTF-8 -> UTF-16 的转换（expanding）和 UTF-16 -> UTF-8的转换（narrowing）。
 
   ---
 
@@ -242,12 +235,12 @@
   假设我们要存储字符串 "A中"。
 
   ┌────────────┬────────────────────┬────────────────────────────────────┬─────────┐
-  │ 编码       │ 内存十六进制 (Hex) │ 解释                               │ 长度    │
+  │ 编码       │ 内存十六进制 (Hex) │ 解释                                 │ 长度    │
   ├────────────┼────────────────────┼────────────────────────────────────┼─────────┤
-  │ ASCII      │ 41 3F              │ 41('A'), '中'无法表示，变成3F('?') │ 2 bytes │
+  │ ASCII      │ 41 3F              │ 41('A'), '中'无法表示，变成3F('?')   │ 2 bytes │
   │ GBK (ANSI) │ 41 D6 D0           │ 41('A'), D6 D0('中' Code Page)     │ 3 bytes │
   │ UTF-16 LE  │ 41 00 2D 4E        │ 41 00('A'), 2D 4E('中')            │ 4 bytes │
-  │ UTF-16 BE  │ 00 41 4E 2D        │ 大端序，Windows 不用 这个          │ 4 bytes │
+  │ UTF-16 BE  │ 00 41 4E 2D        │ 大端序，Windows 不用 这个           │ 4 bytes │
   │ UTF-8      │ 41 E4 B8 AD        │ 41('A'), E4 B8 AD('中')            │ 4 bytes │
   └────────────┴────────────────────┴────────────────────────────────────┴─────────┘
 
@@ -255,42 +248,28 @@
 
 ✦ 这是一个极具实战价值的问题。在红队开发（特别是手动映射、各种注入、Shellcode 编写）中，混淆PE 文件头（静态）和 PEB（动态）里的编码格式，是导致 Payload崩溃或者被杀软静态查杀的根本原因之一。
 
-  简单总结规律：
+简单总结规律：
 
 - PE 文件头（磁盘/内存中的镜像）：90% 是 ASCII（遗留产物，为了兼容 DOS 时代）。
 - PEB（进程环境块/系统加载器）：99% 是 UTF-16 LE（NT 内核的原生语言）。
 
-  下面是详细的字段级拆解，附带 Rust 开发中的注意事项。
+下面是详细的字段级拆解，附带 Rust 开发中的注意事项。
 
   ---
 
-  第一部分：PE 结构 (Portable Executable)
-  特征：静态文件，或者手动映射到内存中的镜像。主要使用 ASCII。
+第一部分：PE 结构 (Portable Executable)  
+特征：静态文件，或者手动映射到内存中的镜像。主要使用 ASCII。
 
-  ┌───────────┬─────────┬───────┬──────────────────────────────────────────────────────┬─────
-  ──┐
-  │ 结构体... │ 字段名  │ 编... │ 长度特征                                             │
-  Ru... │
-  ├───────────┼─────────┼───────┼──────────────────────────────────────────────────────┼─────
-  ──┤
-  │ **IMAG... │ e_magic │ ASCII │ 固定 2 字节 (0x4D 0x5A -> "MZ")                      │
-  `u... │
-  │ **IMAG... │`Sig... │ ASCII │ 固定 4 字节 (0x50 0x45 00 00 -> "PE\0\0")            │
-  `u... │
-  │ **IMAG... │ Name    │ **... │ 固定 8 字节 ([u8; 8])。<br>坑：如果名字刚好 8 字...  │
-  `&... │
-  │**IMAG... │ Name    │ ASCII │ RVA 指向一个以 \0 结尾的字符串（DLL 原始文件名，...  │
-  读... │
-  │ **导出... │ `Add... │ ASCII │ RVA 数组，每个 RVA 指向一个 \0 结尾的函数名（如`... │
-  读... │
-  │**IMAG... │ Name    │ ASCII │ RVA 指向导入的 DLL 名（如 USER32.dll）。             │
-  读... │
-  │ **IMAG... │ Name    │ ASCII │ 具体导入的函数名。                                   │
-  读... │
-  │**资源... │ `Nam... │ **... │ 例外情况！资源段中的字符串通常是 Unicode。           │
-  `V... │
-  └───────────┴─────────┴───────┴──────────────────────────────────────────────────────┴─────
-  ──┘
+| 结构体/上下文                     | 字段名             | 编码类型       | 长度特征                                                                 | Rust 类型 / 读取方式                     |
+|----------------------------------|--------------------|----------------|--------------------------------------------------------------------------|------------------------------------------|
+| **IMAGE_DOS_HEADER**             | `e_magic`          | ASCII          | 固定 2 字节 (`0x4D 0x5A` → `"MZ"`)                                       | `u16`                                    |
+| **IMAGE_NT_HEADERS**             | `Signature`        | ASCII          | 固定 4 字节 (`0x50 0x45 0x00 0x00` → `"PE\0\0"`)                        | `u32`                                    |
+| **IMAGE_SECTION_HEADER**         | `Name`             | **ASCII**      | 固定 8 字节 (`[u8; 8]`)。<br>坑：如果名字刚好 8 字符，则**不以 `\0` 结尾**。 | `&[u8; 8]` 或转为 `String`（需手动处理） |
+| **IMAGE_EXPORT_DIRECTORY**       | `Name`             | ASCII          | RVA 指向一个以 `\0` 结尾的字符串（DLL 原始文件名，如 `"KERNEL32.dll"`）    | 通过 RVA 读取 `CStr` → `.to_bytes()`     |
+| **IMAGE_EXPORT_DIRECTORY**       | `AddressOfNames`   | ASCII          | RVA 数组，每个 RVA 指向一个 `\0` 结尾的函数名（如 `"CreateFileW"`）        | 通过 RVA 读取 `CStr` → `.to_string_lossy()` |
+| **IMAGE_IMPORT_DESCRIPTOR**      | `Name`             | ASCII          | RVA 指向导入的 DLL 名（如 `"USER32.dll"`），以 `\0` 结尾                  | 通过 RVA 读取 `CStr`                     |
+| **IMAGE_THUNK_DATA / IAT**       | (间接指向)         | ASCII          | 具体导入的函数名（若按名称导入），以 `\0` 结尾                            | 通过 `IMAGE_IMPORT_BY_NAME.Name` 读取    |
+| **资源段 (Resource Directory)**  | `Name`             | **Unicode**    | 例外情况！资源段中的字符串通常是 **UTF-16**（宽字符）                      | `Vec<u16>` → `OsString::from_wide()`     |
 
   🔴 红队实战警告：
   你在写 get_proc_address（获取导出函数地址）时，PE 导出表里的函数名是 ASCII。
@@ -299,59 +278,47 @@
 - 导出表里存的是 0x4C 0x6F ... (ASCII)。
 - 千万不要把这个字节流直接强转成 u16 去算哈希，除非你的哈希算法专门处理了这种情况。
 
-  ---
 
-  第二部分：PEB 结构 (Process Environment Block)
-  特征：操作系统在运行时生成的管理结构，位于内存中。主要使用 UTF-16 LE。
 
-  ┌───────────────┬──────────┬──────┬───────────────────────────────────────────┬────────────
-  ─┐
-  │ 结构体 / 位置 │ 字段名   │ ...  │ 结构特征                                  │ Rust 处理
-  │
-  ├───────────────┼──────────┼──────┼───────────────────────────────────────────┼────────────
-  ─┤
-  │ PEB_LDR_DATA    │ 无直...  │ -    │ 这是一个链表头，本身不存字符串。          │ -
-  │
-  │ **LDR_DATA_T... │ `Full... │ *... │ UNICODE_STRING 结构。包含完整路径（如 ... │ &[u16]
-  (... │
-  │ **LDR_DATA_T... │`Base... │ *... │ UNICODE_STRING 结构。只有文件名（如 `k... │ &[u16]
-  (... │
-  │ **RTL_USER_P... │`Imag... │*... │ 当前进程 EXE 的完整路径。                 │ &[u16]
-  │
-  │**RTL_USER_P... │ `Comm... │ *... │ 启动命令行参数。                          │ &[u16]
-  │
-  │ **RTL_USER_P... │`Wind... │ *... │ 进程创建时的窗口标题。                    │ &[u16]
-  │
-  │ **RTL_USER_P... │ `Envi... │ *... │ 环境变量块。这是一个巨大的`Key=Value\... │ 解析复杂
-  │
-  │ ApiSetMap     │ `Entr... │ *... │ 无 Null 结尾，纯字符数组。                │ &[u16]
-  │
-  │ ApiSetMap     │`Valu... │*... │ 无 Null 结尾，纯字符数组。                │ &[u16]
-  │
-  └───────────────┴──────────┴──────┴───────────────────────────────────────────┴────────────
-  ─┘
+第二部分：PEB 结构 (Process Environment Block)
+特征：操作系统在运行时生成的管理结构，位于内存中。主要使用 UTF-16 LE。
 
-  🔴 红队实战警告：
+
+| 结构体 / 位置                   | 字段名               | 类型                | 结构特征                                                                 | Rust 处理方式                                      |
+|--------------------------------|----------------------|---------------------|--------------------------------------------------------------------------|----------------------------------------------------|
+| `PEB_LDR_DATA`                 | （无直接字符串字段）  | —                   | 这是一个链表头结构（如 `InLoadOrderModuleList`），本身不存储任何字符串。     | —                                                  |
+| **`LDR_DATA_TABLE_ENTRY`**     | `FullDllName`        | `UNICODE_STRING*`   | 包含已加载模块的完整路径（例如：`C:\Windows\System32\kernel32.dll`）。       | `&[u16]`（通过 `Buffer` + `Length / 2` 安全切片）   |
+| **`LDR_DATA_TABLE_ENTRY`**     | `BaseDllName`        | `UNICODE_STRING*`   | 仅包含模块文件名（例如：`kernel32.dll`），不含路径。                         | `&[u16]`（注意：可能无 null 终止符，需用 `Length`）|
+| **`RTL_USER_PROCESS_PARAMETERS`** | `ImagePathName`    | `UNICODE_STRING*`   | 当前进程可执行文件的完整路径（启动时由系统传入）。                           | `&[u16]`                                           |
+| **`RTL_USER_PROCESS_PARAMETERS`** | `CommandLine`      | `UNICODE_STRING*`   | 启动命令行参数（例如：`"myapp.exe" --debug`）。                             | `&[u16]`                                           |
+| **`RTL_USER_PROCESS_PARAMETERS`** | `WindowTitle`      | `UNICODE_STRING*`   | 进程创建时指定的窗口标题（主要用于 GUI 应用）。                              | `&[u16]`                                           |
+| **`RTL_USER_PROCESS_PARAMETERS`** | `Environment`      | `*mut u16`          | 环境变量块。格式为连续的宽字符串：`Key=Value\0Key2=Value2\0...\0\0`。        | 需手动遍历解析（按 `\0` 分割条目，再按 `=` 拆分键值）|
+| `ApiSetMap` (v6)               | `NameOffset`         | `u32`（相对偏移）   | 指向虚拟 DLL 名称（如 `api-ms-win-core-heap-l1-2-0`），**无 null 结尾**。    | `&[u16]`（长度由对应 `NameLength` 字段指定）       |
+| `ApiSetMap` (v6)               | `ValueOffset`        | `u32`（相对偏移）   | 指向宿主 DLL 名称（如 `kernelbase.dll`），**无 null 结尾**。                | `&[u16]`（长度由对应 `ValueLength` 字段指定）       |
+
+🔴 红队实战警告：
 
 - UNICODE_STRING 陷阱：PEB 中的字符串大多被封装在 UNICODE_STRING 结构体中。
 
-   1     struct UNICODE_STRING {
-   2         USHORT Length;        // 字节长度（不含结尾空）
-   3         USHORT MaximumLength; // 缓冲区总大小
-   4         PWSTR  Buffer;        // 指向 UTF-16 数据的指针
-   5     };
+```c
+        struct UNICODE_STRING {
+            USHORT Length;        // 字节长度（不含结尾空）
+            USHORT MaximumLength; // 缓冲区总大小
+            PWSTR  Buffer;        // 指向 UTF-16 数据的指针
+        };
+```
 
 - 一定要用 Length：虽然 Windows 通常会在 Buffer 后面好心放一个 00
      00，但不要依赖它。规范的做法是只读取 Length 指定的字节数。
 - 大小写敏感：LDR 中的 DLL
      名称有时是大写，有时是小写（取决于加载方式）。计算哈希时最好统一转成小写（Lower
-     Case）处理。
+     Case）或大写处理。
 
   ---
 
-  第三部分：一个极度混淆的特例 —— "Forwarder String"
+第三部分：一个极度混淆的特例 —— "Forwarder String"
 
-  在导出表（PE 结构）中，有一种特殊情况叫 Forwarder（转发器）。
+在导出表（PE 结构）中，有一种特殊情况叫 Forwarder（转发器）。
 
 - 位置：当导出函数的 RVA 指向导出表自身范围内部时。
 - 内容：这代表这个函数不是当前 DLL 实现的，而是转发给别的 DLL。
@@ -365,72 +332,21 @@
    2. 解析 kernel32.dll 的导出表（ASCII），找到了 HeapAlloc。
    3. 发现 HeapAlloc 是个转发器，指向 NTDLL.RtlAllocateHeap（ASCII 字符串）。
    4. 你需要去加载 ntdll.dll。
-       - 转换时刻：你手里拿着 ASCII 的 "ntdll.dll"，但 LdrLoadDll 需要 UTF-16 的
-         "ntdll.dll"。这里必须做一次 ASCII -> UTF-16 的转换。
+   - 转换时刻：你手里拿着 ASCII 的 "ntdll.dll"，但 LdrLoadDll 需要 UTF-16 的"ntdll.dll"。这里必须做一次 ASCII -> UTF-16 的转换。
 
   ---
 
-  第四部分：Rust 代码中的速查表
 
-  在编写 puerto 这种工具时，建议定义好辅助函数，防止搞混。
-
-    1 // 1. 处理 PE 导出表函数名 (ASCII -> String/Hash)
-    2 // 来源：ImageExportDirectory -> AddressOfNames
-    3 pub fn parse_pe_ascii_name(ptr: *const u8) -> String {
-    4     let mut len = 0;
-    5     unsafe {
-    6         while*ptr.add(len) != 0 { len += 1; } // 找 \0 结尾
-    7         let slice = core::slice::from_raw_parts(ptr, len);
-    8         // 如果是纯 ASCII，直接转，不需要 lossy
-    9         String::from_utf8_lossy(slice).to_string()
-   10     }
-   11 }
-   12
-   13 // 2. 处理 PEB LDR 模块名 (UTF-16 LE -> String/Hash)
-   14 // 来源：LdrDataTableEntry -> BaseDllName
-   15 pub fn parse_peb_unicode_string(unicode_str: &UNICODE_STRING) -> String {
-   16     unsafe {
-   17         if unicode_str.Buffer.is_null() || unicode_str.Length == 0 {
-   18             return String::new();
-   19         }
-   20         let len = (unicode_str.Length / 2) as usize; // 字节转 u16 个数
-   21         let slice = core::slice::from_raw_parts(unicode_str.Buffer, len);
-   22         String::from_utf16_lossy(slice)
-   23     }
-   24 }
-   25
-   26 // 3. 比较 Hash (为了免杀，通常不比较字符串，只比较 Hash)
-   27 // 统一标准：无论来源是 ASCII 还是 UTF-16，都按 u8 逐字节处理，还是统一转成 u16 处理？
-   28 // 推荐：统一把 ASCII 扩展成 u16 (e.g., 'A' -> 0x0041) 再算 Hash。
-   29 // 这样你的 Hash 函数就能同时兼容 PE 里的名字和 PEB 里的名字。
-   30 pub fn calc_hash_u16(buffer: &[u16]) -> u32 {
-   31     let mut hash = 0x811c9dc5; // FNV-1a offset basis
-   32     for &byte in buffer {
-   33         // 注意：这里要处理大小写不敏感
-   34         let c = if byte >= b'A' as u16 && byte <= b'Z' as u16 {
-   35             byte + 32
-   36         } else {
-   37             byte
-   38         };
-   39
-   40         // 简单处理：把 u16 拆成两个 u8 还是只用低位？
-   41         // 通常红队算法里，如果确定是 ASCII 字符，只取低位算 Hash 即可。
-   42         // 或者 (hash ^ c) * prime
-   43         hash ^= c as u32;
-   44         hash = hash.wrapping_mul(0x01000193);
-   45     }
-   46     hash
-   47 }
-
-  总结
+总结
 
 - 找文件头、找导出函数 -> 盯着 ASCII (`u8`)，注意 \0 结尾。
-- 找模块基址、解析 ApiSet、伪装命令行 -> 盯着 UTF-16 (`u16`)，注意 UNICODE_STRING 的
-     Length。
+- 找模块基址、解析 ApiSet、伪装命令行 -> 盯着 UTF-16 (`u16`)，注意 UNICODE_STRING 的Length。
+
+具体pe peb字段及其关联的结构是二进制数据还是带有编码格式的数据,在pe peb内容中会详细分析
 
 ## Red Team中常用的u8 u16 raw pointer之间的转化及安全性操作(垂悬指针等问题) `&[u8]` (ASCII) 与 `&[u16]` (UTF-16)之间转换
 
-###  `&[u8]` (ASCII) 与 `&[u16]` (UTF-16)之间转换
+###  `&[u8]` (ASCII) 与 `&[u16]` (UTF-16)之间转换(Rust中不能直接转换)
 
 Rust 中，切片 `&[T]` 要求内存必须是连续且对齐的
 
@@ -442,7 +358,10 @@ Rust 中，切片 `&[T]` 要求内存必须是连续且对齐的
 let ptr = name_slice.as_ptr() as *const u16;
 let slice = from_raw_parts(ptr, len);
 ```
+
 如果你强转，CPU 会每 2 个字节读一次内存。如果你原始数据是 [0x41, 0x42,0x43, 0x44] ("ABCD")，强转后你会读到 [0x4241, 0x4443]。这和你想要模拟的[0x0041, 0x0042, 0x0043, 0x0044]完全不同。所以物理上的内存转换是必须的，除非你改变哈希计算的步长
+
+#### 不同解决方案
 
 方案一：使用“双重哈希”策略（兼容性最好）
 
@@ -455,18 +374,14 @@ let slice = from_raw_parts(ptr, len);
 由于 ASCII 本质上是高位为 0 的 UTF-16。只要你的 hash_u8在计算时，逻辑上把每个字节当成 u16 来处理（即结果与 u16版本一致），你就可以直接传入 `&[u8]`
 
 
-
-
-
-
-
-
 方案二:重构哈希函数为“流式”计算（最地道，推荐）  
 
 在红队编程中，为了灵活性，通常不会传递 `fn(&[u16]) -> u32`这种死板的函数指针。更好的做法是让哈希函数支持增量更新
 
 ```rust
 pub fn fnv1a_generic<I>(iter: I) -> u32
+// IntoIterator是一个trait,这里代表I是可以转换为迭代器的类型,
+// Item,关联类型,代表迭代时每个元素的类型必须是u16
  where I: IntoIterator<Item = u16>
  {
     let mut hash = 0x811c9dc5;
@@ -476,13 +391,14 @@ pub fn fnv1a_generic<I>(iter: I) -> u32
       hash
  }
 ```
+
 在 `get_proc_address` 中调用:  
+
 // 无需创建数组，直接传递迭代器  
 let func_hash = fnv1a_generic(name_slice.iter().map(|&b| b as u16));
 
 原理：迭代器是延迟计算的（Lazy）。它会逐个取出 u8，强转为u16，然后立即参与哈希运算。全程不需要存储中间的 `u16` 数组  
 优点：完美解决签名问题，且内存占用为 0
-
 
 
 方案三(最直接,无堆分配):  
@@ -509,11 +425,75 @@ let func_hash = (hash_func.unwrap())(&buffer[..len]);
 
 ## ffi::c_void *mut c_void *const c_void
 
-## rust种引用和指针的区别
+在 Rust FFI（外部函数接口）中:
+
+| 表达式 | 类型层级 | C 语言等价 | 用途 | 安全性/使用场景 |
+|--------|----------|------------|------|-----------------|
+| `ffi::c_void` | 类型本身 | `void`（抽象类型） | 作为指针的目标类型占位符 | ❌ 不能实例化（零大小、不透明） |
+| `*const c_void` | 不可变原始指针 | `const void*` | 传递只读内存地址（如 `memcmp` 参数） | ✅ 可安全创建；解引用需 `unsafe` |
+| `*mut c_void` | 可变原始指针 | `void*` | 传递可写内存地址（如 `memcpy` 目标） | ✅ 可安全创建；解引用/写入需 `unsafe` |
+
+相互之间的转换:
+
+| 项目 | 说明 |
+|------|------|
+| 指针转换 | `*mut T` → `*mut c_void`：安全（`as` 转换）<br>`*const c_void` → `*mut c_void`：需 `unsafe`（破坏不可变性） |
+| 解引用 | 所有原始指针解引用必须在 `unsafe` 块中进行 |
+| 空指针 | `std::ptr::null()` → `*const c_void`<br>`std::ptr::null_mut()` → `*mut c_void` |
+| Windows HANDLE | 在 `windows-rs` 等 crate 中，`HANDLE` 常定义为 `*mut c_void`（如 `NtAllocateVirtualMemory` 的 `BaseAddress`） |
+| 为什么不用 `()` | `()` 是 Rust 元组类型，有明确内存布局（0 字节但可实例化）；`c_void` 是 FFI 专用不透明类型，语义更准确 |
+
+
+c_void：FFI 中的“类型占位符”，永远不直接使用值。
+
+`*const c_void：安全传递只读内存地址（C 的 const void*）。
+`
+`*mut c_void：安全传递可写内存地址（C 的 void*）`，是 Windows/Linux 系统 API 中“通用指针”的标准表示。
+
+## rust中引用和指针的区别
+
+引用是指针吗?不是
+
+在 Rust 中，引用（reference）和原始指针（raw pointer）有本质区别；从语言设计层面看：引用 ≠ 指针，尽管底层实现上引用通常编译为指针（内存地址）。
+
+| 维度 | 引用 (`&T`, `&mut T`) | 原始指针 (`*const T`, `*mut T`) |
+|------|------------------------|----------------------------------|
+| 语言层级 | 高级安全抽象（所有权系统核心） | 低级内存操作工具 |
+| 空值 | ❌ 永不为 null（编译器保证） | ✅ 可为 null（需手动检查） |
+| 悬垂 | ❌ 编译器通过生命周期检查杜绝 | ✅ 可能悬垂（需开发者负责） |
+| 别名规则 | ✅ 严格：`&mut T` 独占，`&T` 可共享 | ❌ 无限制（可任意别名） |
+| 解引用 | ✅ 安全（无需 `unsafe`） | ❌ 必须 `unsafe` 块 |
+| 指针运算 | ❌ 禁止 | ✅ 允许（如 `ptr.offset(1)`） |
+| 生命周期 | ✅ 有显式/隐式生命周期参数 | ❌ 无（但使用时需注意） |
+| 创建 | ✅ 安全（`&x`） | ✅ 安全（`&x as *const _`） |
+| 典型场景 | 日常安全代码、函数参数传递 | FFI、OS 内核、自定义分配器、绕过借用检查 |
+
+引用是指针吗？
+
+| 层面 | 回答 |
+|------|------|
+| 机器码层面 | ✅ 是。引用编译后通常是一个内存地址（与指针二进制表示相同） |
+| Rust 语言设计层面 | ❌ 不是。引用是带有编译时安全契约（生命周期、借用规则）的独立类型，刻意与“裸指针”语义解耦 |
+| 开发者心智模型 | 🚫 不应视为指针。将引用理解为“安全借用的句柄”更符合 Rust 哲学 |
+
+Rust 创始人 Graydon Hoare 明确表示：  
+“References are not pointers. They are a safe abstraction over pointers.”
+
+误区：Option<&T> 内部用 null 优化，所以引用可以是 null  
+正解：Option<&T> 是安全抽象，引用本身永不为 null，null 仅作为 None 的内部表示（编译器保证使用者无法接触）
+
+误区：&mut T 和 *mut T 都是“可变”，可以互换  
+正解：&mut T 有独占性保证（无数据竞争），*mut T 无任何保证，混用极易导致 UB
+
+误区：原始指针 = 不安全 = 应避免  
+正解：原始指针是必要工具（如实现 Vec、与 C 交互），关键在于：创建安全，使用需 unsafe 且开发者自证安全
+
+引用是 Rust 内存安全的基石，原始指针是 突破安全边界的工具。
+理解二者的界限，是写出既安全又高效 Rust 代码的关键。
 
 # 前言
 
-## 为啥要定义这么多数据结构(types.rs中)
+## dinvk等项目操作pe peb的原理
 
 在对pe peb等属于windows用户态或内核的各种数据结构进行操作时(比如获取peb结构\pe结构,操作结构中的各个字段),利用了自定义的各种数据结构(types.rs).此时你并没有“创建”这些结构，你只是在画一张“地图”来解释已经存在的地形
 
@@ -538,104 +518,110 @@ let func_hash = (hash_func.unwrap())(&buffer[..len]);
 
 ```rust
 pub struct PEB {
-    pub InheritedAddressSpace: u8,
-    pub ReadImageFileExecOptions: u8,
-    pub BeingDebugged: u8,
-    pub Anonymous1: PEB_0,
-    pub Mutant: HANDLE,
-    pub ImageBaseAddress: *mut c_void,
-    pub Ldr: *mut PEB_LDR_DATA,
-    pub ProcessParameters: *mut RTL_USER_PROCESS_PARAMETERS,
-    pub SubSystemData: *mut c_void,
-    pub ProcessHeap: *mut c_void,
-    pub FastPebLock: *mut RTL_CRITICAL_SECTION,
-    pub AtlThunkSListPtr: *mut SLIST_HEADER,
-    pub IFEOKey: *mut c_void,
-    pub Anonymous2: PEB_1,
-    pub Anonymous3: PEB_2,
-    pub SystemReserved: u32,
-    pub AtlThunkSListPtr32: u32,
-    pub ApiSetMap: *mut API_SET_NAMESPACE,
-    pub TlsExpansionCounter: u32,
-    pub TlsBitmap: *mut RTL_BITMAP,
-    pub TlsBitmapBits: [u32; 2],
-    pub ReadOnlySharedMemoryBase: *mut c_void,
-    pub SharedData: *mut SILO_USER_SHARED_DATA,
-    pub ReadOnlyStaticServerData: *mut c_void,
-    pub AnsiCodePageData: *mut c_void,
-    pub OemCodePageData: *mut c_void,
-    pub UnicodeCaseTableData: *mut c_void,
-    pub NumberOfProcessors: u32,
-    pub NtGlobalFlag: u32,
-    pub CriticalSectionTimeout: LARGE_INTEGER,
-    pub HeapSegmentReserve: usize,
-    pub HeapSegmentCommit: usize,
-    pub HeapDeCommitTotalFreeThreshold: usize,
-    pub HeapDeCommitFreeBlockThreshold: usize,
-    pub NumberOfHeaps: u32,
-    pub MaximumNumberOfHeaps: u32,
-    pub ProcessHeaps: *mut c_void,
-    pub GdiSharedHandleTable: *mut c_void,
-    pub ProcessStarterHelper: *mut c_void,
-    pub GdiDCAttributeList: u32,
-    pub LoaderLock: *mut RTL_CRITICAL_SECTION,
-    pub OSMajorVersion: u32,
-    pub OSMinorVersion: u32,
-    pub OSBuildNumber: u16,
-    pub OSCSDVersion: u16,
-    pub OSPlatformId: u32,
-    pub ImageSubsystem: u32,
-    pub ImageSubsystemMajorVersion: u32,
-    pub ImageSubsystemMinorVersion: u32,
-    pub ActiveProcessAffinityMask: usize,
-    pub GdiHandleBuffer: GDI_HANDLE_BUFFER,
-    pub PostProcessInitRoutine: PPS_POST_PROCESS_INIT_ROUTINE,
-    pub TlsExpansionBitmap: *mut RTL_BITMAP,
-    pub TlsExpansionBitmapBits: [u32; 32],
-    pub SessionId: u32,
-    pub AppCompatFlags: ULARGE_INTEGER,
-    pub AppCompatFlagsUser: ULARGE_INTEGER,
-    pub pShimData: *mut c_void,
-    pub AppCompatInfo: *mut c_void,
-    pub CSDVersion: UNICODE_STRING,
-    pub ActivationContextData: *mut ACTIVATION_CONTEXT_DATA,
-    pub ProcessAssemblyStorageMap: *mut ASSEMBLY_STORAGE_MAP,
-    pub SystemDefaultActivationContextData: *mut ACTIVATION_CONTEXT_DATA,
-    pub SystemAssemblyStorageMap: *mut ASSEMBLY_STORAGE_MAP,
-    pub MinimumStackCommit: usize,
-    pub SparePointers: *mut c_void,
-    pub PatchLoaderData: *mut c_void,
-    pub ChpeV2ProcessInfo: *mut c_void,
-    pub Anonymous4: PEB_3,
-    pub SpareUlongs: [u32; 2],
-    pub ActiveCodePage: u16,
-    pub OemCodePage: u16,
-    pub UseCaseMapping: u16,
-    pub UnusedNlsField: u16,
-    pub WerRegistrationData: *mut WER_PEB_HEADER_BLOCK,
-    pub WerShipAssertPtr: *mut c_void,
-    pub Anonymous5: PEB_4,
-    pub pImageHeaderHash: *mut c_void,
-    pub Anonymous6: PEB_5,
-    pub CsrServerReadOnlySharedMemoryBase: u64,
-    pub TppWorkerpListLock: *mut RTL_CRITICAL_SECTION,
-    pub TppWorkerpList: LIST_ENTRY,
-    pub WaitOnAddressHashTable: [*mut c_void; 128],
-    pub TelemetryCoverageHeader: *mut TELEMETRY_COVERAGE_HEADER,
-    pub CloudFileFlags: u32,
-    pub CloudFileDiagFlags: u32,
-    pub PlaceholderCompatibilityMode: i8,
-    pub PlaceholderCompatibilityModeReserved: [i8; 7],
-    pub LeapSecondData: *mut c_void, // PLEAP_SECOND_DATA
-    pub Anonymous7: PEB_6,
-    pub NtGlobalFlag2: u32,
-    pub ExtendedFeatureDisableMask: u64,
+    pub InheritedAddressSpace: u8, // 类型: u8 (布尔标志) - 是否从父进程继承地址空间 (0=否, 非0=是)
+    pub ReadImageFileExecOptions: u8, // 类型: u8 (布尔标志) - 是否从映像文件读取执行选项
+    pub BeingDebugged: u8, // 类型: u8 (布尔标志) - 进程是否被调试器附加 (1=是)
+    pub Anonymous1: PEB_0, // 类型: PEB_0 (联合体) - 包含BitField/Reserved等字段 (具体结构见PEB_0定义)
+    pub Mutant: HANDLE, // 类型: HANDLE (*mut c_void) - 进程互斥体句柄 (通常为NULL表示主进程)
+    pub ImageBaseAddress: *mut c_void, // 类型: *mut c_void - 指向当前进程EXE映像基地址 (IMAGE_DOS_HEADER起始)
+    pub Ldr: *mut PEB_LDR_DATA, // 类型: *mut PEB_LDR_DATA - 指向PEB_LDR_DATA结构 (模块加载链表头)
+    pub ProcessParameters: *mut RTL_USER_PROCESS_PARAMETERS, // 类型: *mut RTL_USER_PROCESS_PARAMETERS - 指向进程启动参数结构 (含ImagePathName/CommandLine等)
+    pub SubSystemData: *mut c_void, // 类型: *mut c_void - 子系统专用数据 (通常为NULL)
+    pub ProcessHeap: *mut c_void, // 类型: *mut c_void - 指向进程默认堆 (HEAP结构)
+    pub FastPebLock: *mut RTL_CRITICAL_SECTION, // 类型: *mut RTL_CRITICAL_SECTION - 指向PEB临界区锁
+    pub AtlThunkSListPtr: *mut SLIST_HEADER, // 类型: *mut SLIST_HEADER - ATL单向链表头指针
+    pub IFEOKey: *mut c_void, // 类型: *mut c_void - 指向Image File Execution Options注册表键句柄
+    pub Anonymous2: PEB_1, // 类型: PEB_1 (联合体) - 包含CrossProcessFlags/Reserved等字段
+    pub Anonymous3: PEB_2, // 类型: PEB_2 (联合体) - 包含KernelCallbackTable/ReservedForWin32等字段
+    pub SystemReserved: u32, // 类型: u32 - 系统保留字段
+    pub AtlThunkSListPtr32: u32, // 类型: u32 - 32位ATL thunk链表指针 (WoW64环境使用)
+    pub ApiSetMap: *mut API_SET_NAMESPACE, // 类型: *mut API_SET_NAMESPACE - 指向ApiSet映射表 (解析api-ms-*.dll到真实DLL)
+    pub TlsExpansionCounter: u32, // 类型: u32 - TLS扩展索引计数器
+    pub TlsBitmap: *mut RTL_BITMAP, // 类型: *mut RTL_BITMAP - 指向TLS位图结构 (管理TLS槽位分配)
+    pub TlsBitmapBits: [u32; 2], // 类型: [u32; 2] - TLS位图缓存 (前64个槽位状态)
+    pub ReadOnlySharedMemoryBase: *mut c_void, // 类型: *mut c_void - 指向只读共享内存基址 (KUSER_SHARED_DATA映射)
+    pub SharedData: *mut SILO_USER_SHARED_DATA, // 类型: *mut SILO_USER_SHARED_DATA - 指向共享用户数据 (KUSER_SHARED_DATA别名)
+    pub ReadOnlyStaticServerData: *mut c_void, // 类型: *mut c_void - 指向只读静态服务器数据数组
+    pub AnsiCodePageData: *mut c_void, // 类型: *mut c_void - 指向ANSI代码页数据 (NLS)
+    pub OemCodePageData: *mut c_void, // 类型: *mut c_void - 指向OEM代码页数据 (NLS)
+    pub UnicodeCaseTableData: *mut c_void, // 类型: *mut c_void - 指向Unicode大小写转换表
+    pub NumberOfProcessors: u32, // 类型: u32 - 系统CPU核心数
+    pub NtGlobalFlag: u32, // 类型: u32 - 全局标志 (影响堆行为/调试等，如FLG_HEAP_ENABLE_TAIL_CHECK)
+    pub CriticalSectionTimeout: LARGE_INTEGER, // 类型: LARGE_INTEGER - 临界区超时时间 (100ns单位)
+    pub HeapSegmentReserve: usize, // 类型: usize - 堆段预留大小 (字节)
+    pub HeapSegmentCommit: usize, // 类型: usize - 堆段提交大小 (字节)
+    pub HeapDeCommitTotalFreeThreshold: usize, // 类型: usize - 堆反提交总空闲阈值
+    pub HeapDeCommitFreeBlockThreshold: usize, // 类型: usize - 堆反提交空闲块阈值
+    pub NumberOfHeaps: u32, // 类型: u32 - 进程堆数量
+    pub MaximumNumberOfHeaps: u32, // 类型: u32 - 最大堆数量
+    pub ProcessHeaps: *mut c_void, // 类型: *mut c_void - 指向堆句柄数组 (HEAP*)
+    pub GdiSharedHandleTable: *mut c_void, // 类型: *mut c_void - 指向GDI共享句柄表
+    pub ProcessStarterHelper: *mut c_void, // 类型: *mut c_void - 进程启动辅助函数指针
+    pub GdiDCAttributeList: u32, // 类型: u32 - GDI DC属性列表大小
+    pub LoaderLock: *mut RTL_CRITICAL_SECTION, // 类型: *mut RTL_CRITICAL_SECTION - 指向加载器锁
+    pub OSMajorVersion: u32, // 类型: u32 - 操作系统主版本号 (如10)
+    pub OSMinorVersion: u32, // 类型: u32 - 操作系统次版本号
+    pub OSBuildNumber: u16, // 类型: u16 - 系统构建号 (如19041)
+    pub OSCSDVersion: u16, // 类型: u16 - CSD版本 (如"Service Pack 1"的内部编号)
+    pub OSPlatformId: u32, // 类型: u32 - 平台ID (VER_PLATFORM_WIN32_NT=2)
+    pub ImageSubsystem: u32, // 类型: u32 - 映像子系统 (如IMAGE_SUBSYSTEM_WINDOWS_GUI)
+    pub ImageSubsystemMajorVersion: u32, // 类型: u32 - 子系统主版本
+    pub ImageSubsystemMinorVersion: u32, // 类型: u32 - 子系统次版本
+    pub ActiveProcessAffinityMask: usize, // 类型: usize - 进程CPU亲和性掩码
+    pub GdiHandleBuffer: GDI_HANDLE_BUFFER, // 类型: GDI_HANDLE_BUFFER ([u32; 60]) - GDI句柄缓存数组
+    pub PostProcessInitRoutine: PPS_POST_PROCESS_INIT_ROUTINE, // 类型: 函数指针 - 进程初始化后回调函数
+    pub TlsExpansionBitmap: *mut RTL_BITMAP, // 类型: *mut RTL_BITMAP - 指向TLS扩展位图
+    pub TlsExpansionBitmapBits: [u32; 32], // 类型: [u32; 32] - TLS扩展位图缓存 (1024个槽位状态)
+    pub SessionId: u32, // 类型: u32 - 会话ID (如控制台会话=1)
+    pub AppCompatFlags: ULARGE_INTEGER, // 类型: ULARGE_INTEGER - 应用程序兼容性标志 (全局)
+    pub AppCompatFlagsUser: ULARGE_INTEGER, // 类型: ULARGE_INTEGER - 应用程序兼容性标志 (用户)
+    pub pShimData: *mut c_void, // 类型: *mut c_void - Shim数据库数据指针
+    pub AppCompatInfo: *mut c_void, // 类型: *mut c_void - 应用程序兼容性信息
+    pub CSDVersion: UNICODE_STRING, // 类型: UNICODE_STRING - 指向CSD版本字符串 (如"Service Pack 1")
+    pub ActivationContextData: *mut ACTIVATION_CONTEXT_DATA, // 类型: *mut ACTIVATION_CONTEXT_DATA - 指向SxS激活上下文数据
+    pub ProcessAssemblyStorageMap: *mut ASSEMBLY_STORAGE_MAP, // 类型: *mut ASSEMBLY_STORAGE_MAP - 指向程序集存储映射
+    pub SystemDefaultActivationContextData: *mut ACTIVATION_CONTEXT_DATA, // 类型: *mut ACTIVATION_CONTEXT_DATA - 系统默认激活上下文
+    pub SystemAssemblyStorageMap: *mut ASSEMBLY_STORAGE_MAP, // 类型: *mut ASSEMBLY_STORAGE_MAP - 系统程序集存储映射
+    pub MinimumStackCommit: usize, // 类型: usize - 最小栈提交大小
+    pub SparePointers: *mut c_void, // 类型: *mut c_void - 保留指针 (Windows 8+ 用于FlsBitmap)
+    pub PatchLoaderData: *mut c_void, // 类型: *mut c_void - 热补丁加载数据
+    pub ChpeV2ProcessInfo: *mut c_void, // 类型: *mut c_void - CHPEv2进程信息 (ARM64EC相关)
+    pub Anonymous4: PEB_3, // 类型: PEB_3 (联合体) - 包含AppCompatInfo/Reserved等字段
+    pub SpareUlongs: [u32; 2], // 类型: [u32; 2] - 保留ULONG数组
+    pub ActiveCodePage: u16, // 类型: u16 - 活动ANSI代码页 (如936=GBK)
+    pub OemCodePage: u16, // 类型: u16 - OEM代码页 (如437=US)
+    pub UseCaseMapping: u16, // 类型: u16 - 是否启用大小写映射 (NLS)
+    pub UnusedNlsField: u16, // 类型: u16 - 未使用的NLS字段
+    pub WerRegistrationData: *mut WER_PEB_HEADER_BLOCK, // 类型: *mut WER_PEB_HEADER_BLOCK - 指向Windows错误报告注册数据
+    pub WerShipAssertPtr: *mut c_void, // 类型: *mut c_void - WER断言处理函数指针
+    pub Anonymous5: PEB_4, // 类型: PEB_4 (联合体) - 包含pContextData/Reserved等字段
+    pub pImageHeaderHash: *mut c_void, // 类型: *mut c_void - 映像头哈希指针 (用于完整性验证)
+    pub Anonymous6: PEB_5, // 类型: PEB_5 (联合体) - 包含TracingFlags/Reserved等字段
+    pub CsrServerReadOnlySharedMemoryBase: u64, // 类型: u64 - CSR服务器只读共享内存基址 (跨会话)
+    pub TppWorkerpListLock: *mut RTL_CRITICAL_SECTION, // 类型: *mut RTL_CRITICAL_SECTION - 线程池工作者列表锁
+    pub TppWorkerpList: LIST_ENTRY, // 类型: LIST_ENTRY - 线程池工作者链表头
+    pub WaitOnAddressHashTable: [*mut c_void; 128], // 类型: [*mut c_void; 128] - WaitOnAddress哈希表 (128桶)
+    pub TelemetryCoverageHeader: *mut TELEMETRY_COVERAGE_HEADER, // 类型: *mut TELEMETRY_COVERAGE_HEADER - 遥测覆盖率头指针
+    pub CloudFileFlags: u32, // 类型: u32 - 云文件标志 (OneDrive等)
+    pub CloudFileDiagFlags: u32, // 类型: u32 - 云文件诊断标志
+    pub PlaceholderCompatibilityMode: i8, // 类型: i8 - 占位符兼容模式
+    pub PlaceholderCompatibilityModeReserved: [i8; 7], // 类型: [i8; 7] - 保留字节
+    pub LeapSecondData: *mut c_void, // 类型: *mut c_void - 指向闰秒数据 (PLEAP_SECOND_DATA)
+    pub Anonymous7: PEB_6, // 类型: PEB_6 (联合体) - 包含LeapSecondFlags/Reserved等字段
+    pub NtGlobalFlag2: u32, // 类型: u32 - 扩展全局标志 (Windows 10 19H1+)
+    pub ExtendedFeatureDisableMask: u64, // 类型: u64 - 扩展特性禁用掩码 (如禁用AVX512)
 }
+
 ```
 
-- 获取 PEB,x64: gs:[0x60],x86: fs:[0x30]
+1. 安全提示：所有指针字段解引用均需 unsafe，且需验证有效性（避免悬垂指针导致 UB）
+2. 版本差异：部分字段在 Windows 不同版本中含义可能变化（如 SparePointers 在 Win8+ 用于 FLS），注释已标注典型用途。
+3. HANDLE 本质是 *mut c_void，但语义上为句柄（如 Mutant）
 
-### 一个可执行文件产生多个进程时PEB是怎么样的?
+
+- 获取 PE,x64: gs:[0x60],x86: fs:[0x30]
+
+### 一个可执行文件产生多个进程的PEB情况?
 
 一个可执行文件产生多个进程,但这不改变“每个进程有一个 PEB”的事实。
 
@@ -649,49 +635,32 @@ pub struct PEB {
 
 ## ApiSetMap
 
+ApiSetMap是peb中的一个字段:peb->ApiSetMap
+
+`pub ApiSetMap: *mut API_SET_NAMESPACE`
+
 请使用windbg(notepad示例)理解ApiSetMap相关结构体的定义,在windbg文件夹中有
 
 在 PEB 结构体中，ApiSetMap 字段被定义为 PVOID（即void*），因为它是一个不透明指针，指向的结构体随着Windows 版本变化（Win7,Win8, Win10 结构体都不一样）。
 
 因为在PEB中,ApiSetMap被定义为一个指针,要找到它真正指向的结构体，你需要去查找 Loader (Ldr) 相关的头文件，而不是 PEB 的头文件。
 
-在phnt的github仓库中,有该结构体的详细定义(ntpebteb.h文件中)
-
-Google 搜索：site:geoffchappell.com "API Set Schema"
+1. 在phnt的github仓库中,有该结构体的详细定义(ntpebteb.h文件中)
+2. Google 搜索：site:geoffchappell.com "API Set Schema"
 
 目前主流环境（Win10/11）使用的是 Schema Version 6。所有的Offset（偏移量）都是相对于 ApiSetMap 结构体起始地址的字节偏移
 
-### peb.apisetmap作用
-
-主要是API_SET_NAMESPACE API_SET_NAMESPACE_ENTRY API_SET_VALUE_ENTRY  
-
-API_SET_NAMESPACE:  
-Count字段,是一个u32数字,代表虚拟dll的数量,每个虚拟dll都有一个API_SET_NAMESPACE_ENTRY结构  
-EntryOffset字段,是一个RVA,和基址共同组成指向第一个API_SET_NAMESPACE_ENTRY数组的指针,即Base + EntryOffset = API_SET_NAMESPACE_ENTRY 数组的起始地址.  
-指向数据的类型：`[API_SET_NAMESPACE_ENTRY; Count]` (结构体数组)
-
-API_SET_NAMESPACE_ENTRY(是数组的形式):  
-NameOffset字段,RVA,代表虚拟 DLL 名称偏移.  
-指向数据的类型：`[u16; NameLength/2]` (UTF-16 字符数组)
-
-ValueCount字段,表示这个虚拟 DLL 有多少条重定向规则（通常是1）  
-
-ValueOffset字段,是一个RVA,和基址共同组成一个指针,指针指向的是 `API_SET_VALUE_ENTRY` 数组的起始地址.  
-指向数据的类型：`[API_SET_VALUE_ENTRY; ValueCount]` (结构体数组)
+该字段有多个扩展结构,主要是API_SET_NAMESPACE;API_SET_NAMESPACE_ENTRY;API_SET_VALUE_ENTRY  
 
 
-API_SET_VALUE_ENTRY(是数组的形式):  
-NameOffset字段,是一个RVA,和基址共同组成一个指针,该指针指向的是一个utf-16类型的字符串  
-指向数据的类型：`[u16; NameLength/2]` (UTF-16 字符数组)
+**常规查询流程**
+1. 通过 Count 遍历所有 API_SET_NAMESPACE_ENTRY
+2. 比对 NameOffset 指向的虚拟 DLL 名称
+3. 通过 ValueCount 确定需遍历几个 API_SET_VALUE_ENTRY
+4. 从 API_SET_VALUE_ENTRY.ValueOffset 读取宿主 DLL 真实名称
+5. (可选)NameOffset 用于处理别名重定向
 
-NameLength字段,代表名称NameOffset指向的字符串的长度(字节数)
-
-ValueOffset字段,是一个RVA,和基址共同组成一个指针,指针指向的是目标 DLL 名称字符串
-指向数据的类型：`[u16; ValueLength/2]` (UTF-16 字符数组)
-
-ValueLength字段,目标 DLL 名称的字节长度
-
- 总结图谱
+总结图谱
 
   为了让你在写代码时脑子像 CPU 一样清晰，请看这张数据流向图：
 
@@ -730,24 +699,36 @@ ApiSetMap 是 Windows 用户层的“DNS服务器”,有四个数据结构组成
 简单的 Key-Value 做不到, ApiSetMap 的结构逻辑（一对多 + 条件判断）：
 
 1. 第一层（Namespace Entry 数组）：
-       *你在数组里找到了 `api-ms-win-core-memory-l1-1-0.dll` 这一项。
-       * 这项数据告诉你：“想知道我到底是谁？去看我的 Value Entry 数组，我有 2 个可能的身份。”
+*你在数组里找到了 `api-ms-win-core-memory-l1-1-0.dll` 这一项。
+* 这项数据告诉你：“想知道我到底是谁？去看我的 Value Entry 数组，我有 2 个可能的身份。”
 
-   1. 第二层（Value Entry 数组）：
-       - Value Entry [0]:
-           - 条件 (Importing Name): "OldLegacyApp.exe"
-           - 结果 (Host Name): "kernel32.dll"
-           - 含义：如果是 OldLegacyApp.exe 问我，我就伪装成 kernel32.dll。
-       - Value Entry [1]:
-           - 条件 (Importing Name): NULL (无条件/默认)
-           - 结果 (Host Name): "kernelbase.dll"
-           - 含义：如果是其他任何人问我，我就指向 kernelbase.dll。
+2. 第二层（Value Entry 数组）：
+- Value Entry [0]:
+- 条件 (Importing Name): "OldLegacyApp.exe"
+- 结果 (Host Name): "kernel32.dll"
+- 含义：如果是 OldLegacyApp.exe 问我，我就伪装成 kernel32.dll。
+- Value Entry [1]:
+- 条件 (Importing Name): NULL (无条件/默认)
+- 结果 (Host Name): "kernelbase.dll"
+- 含义：如果是其他任何人问我，我就指向 kernelbase.dll。
 
 之所以要定义这么多结构体，是因为这不是一个静态的“别名表”，而是一个带有条件判断逻辑的动态路由表。
 
 - NAMESPACE 是数据库入口。
 - NAMESPACE_ENTRY 是所有的虚拟 Key。
 - VALUE_ENTRY 是带有if-else 条件的物理 Value。
+
+
+**核心记忆点**
+
+| 概念 | 指向内容 | 决定因素 |
+|------|----------|----------|
+| 虚拟 DLL | `API_SET_NAMESPACE_ENTRY.NameOffset` | 开发者代码中写的 DLL 名 |
+| 宿主 DLL | `API_SET_VALUE_ENTRY.ValueOffset` | 系统实际加载的 DLL |
+| 数量 | `API_SET_NAMESPACE_ENTRY.ValueCount` | 一个虚拟 DLL 可映射多个宿主 DLL（fallback 机制） |
+| 字符串长度 | `*.Length` 字段 | 字节长度（UTF-16LE → 长度=字符数×2） |
+
+
 
 ### 结构体定义
 
@@ -776,13 +757,127 @@ pub struct API_SET_NAMESPACE {
     pub Version: u32,// 协议版本号(Windows 10/11 使用的是 6),如果不是6其结构体和本文件中的定义是不同的
     pub Size: u32,  // 总大小(整个 ApiSetSchema 数据块占用的字节数。很少用到)
     pub Flags: u32, // 标志位(通常为 0)
-    pub Count: u32, // 虚拟 DLL 的数量(表示 API_SET_NAMESPACE_ENTRY数组中元素的个数)你需要用它来控制遍历循环的边界
+    pub Count: u32, // 虚拟 DLL 的数量(表示 API_SET_NAMESPACE_ENTRY数组中元素的个数)你需要用它来控制遍历循环的边界.
     pub EntryOffset: u32,// 命名空间条目数组的偏移(指向 API_SET_NAMESPACE_ENTRY数组相对头部的起始偏移,也就是RVA)
     pub HashOffset: u32,  // 哈希条目数组的偏移(指向 API_SET_HASH_ENTRY数组的起始偏移)
     pub HashFactor: u32   // 哈希乘数(计算 API Set名称哈希时使用的乘数)计算目标名称哈希时需要乘以这个值
 }
 
 ```
+
+```rust
+#[repr(C)]
+pub struct API_SET_NAMESPACE {
+    /// 【标量字段】类型: u32  
+    /// 含义: ApiSetSchema 版本号（关键解析依据）  
+    /// 指向数据: 无（纯数值）  
+    /// 常见值:  
+    ///   - 2 = Windows 7  
+    ///   - 4 = Windows 8  
+    ///   - 6 = Windows 8.1 / Windows 10 (1507–1809)  
+    ///   - 10 = Windows 10 (1903+)  
+    ///   - 12 = Windows 11 (22H2+)  
+    /// ⚠️ 解析前必须校验！不同版本内存布局差异极大
+    pub Version: u32,
+
+    /// 【标量字段】类型: u32  
+    /// 含义: 整个 ApiSetMap 内存区域的总字节数（含头+条目+字符串+哈希表）  
+    /// 指向数据: 无（纯数值）  
+    /// 用途: 边界检查（验证所有偏移量 < Size）
+    pub Size: u32,
+
+    /// 【标量字段】类型: u32  
+    /// 含义: 标志位集合  
+    /// 指向数据: 无（纯数值）  
+    /// 位定义:  
+    ///   - Bit 0: 1 = 启用哈希表加速（HashOffset 有效）  
+    ///   - 其他位: 保留（Win10 通常为 0x00000001）
+    pub Flags: u32,
+
+    /// 【标量字段】类型: u32  
+    /// 含义: 虚拟 DLL 条目总数（即 API_SET_NAMESPACE_ENTRY 数组长度）  
+    /// 指向数据: 无（纯数值）  
+    /// 典型值: Win10 约 200–300（含 api-ms-* / ext-ms-*）
+    pub Count: u32,
+
+    /// 【偏移量字段】类型: u32  
+    /// 含义: 从本结构体起始地址到 API_SET_NAMESPACE_ENTRY 数组的**字节偏移**  
+    /// 指向数据类型: `[API_SET_NAMESPACE_ENTRY; Count]`（连续内存数组）  
+    /// 计算示例:  
+    ///   `let entries = unsafe { (base_ptr as usize + header.EntryOffset) as *const API_SET_NAMESPACE_ENTRY };`  
+    /// ⚠️ 所有偏移均**相对于 ApiSetMap 基址**（非条目自身地址）
+    pub EntryOffset: u32,
+
+    /// 【偏移量字段】类型: u32  
+    /// 含义: 从本结构体起始地址到哈希桶数组的**字节偏移**（Flags & 1 有效时使用）  
+    /// 指向数据类型: `[u32]`（动态长度数组）  
+    /// 数据语义:  
+    ///   - 每个 u32 元素 = API_SET_NAMESPACE_ENTRY 数组的**索引**（0 到 Count-1）  
+    ///   - 无效桶值 = 0xFFFFFFFF  
+    ///   - 桶数量 = 系统预分配（通常为质数，> Count）  
+    /// 哈希查找流程:  
+    ///   1. 计算虚拟 DLL 名哈希（去掉 ".dll" 后缀）  
+    ///   2. `bucket_idx = ((hash * HashFactor) >> 32) % bucket_count`  
+    ///   3. 从哈希表取索引 → 定位 Entry
+    pub HashOffset: u32,
+
+    /// 【标量字段】类型: u32  
+    /// 含义: 哈希计算乘法因子（使哈希值均匀分布到桶）  
+    /// 指向数据: 无（纯数值）  
+    /// 典型值: 0x9E3779B9（黄金比例变体）  
+    /// 用途: 与字符串哈希值相乘后取高32位，再模桶数得桶索引
+    pub HashFactor: u32,
+}
+```
+
+API_SET_NAMESPACE 是 Windows ApiSetSchema（API 集命名空间）的根描述符，位于进程 PEB 的 ApiSetMap 字段（x64 偏移 0x68）。
+
+核心作用：将虚拟 DLL（如 api-ms-win-core-heap-l1-1-0.dll）动态映射到真实宿主 DLL（如 kernelbase.dll），实现系统 API 的模块化解耦与安全更新。
+
+**设计价值：**
+1. 允许微软拆分 kernel32.dll 等巨型系统 DLL 为逻辑虚拟 DLL
+2. 更新宿主 DLL 时无需修改调用方二进制（虚拟 DLL 名称保持稳定）
+3. 支持沙箱/容器环境重定向 API（如 ext-ms-* 用于 OneCore）
+
+**字段深度解析（基于 Win10+ Version 6）**
+
+| 字段 | 详细说明 | 实战注意事项 |
+|------|----------|--------------|
+| `Version` | Schema 版本号：<br>• `2` = Win7<br>• `4` = Win8<br>• `6` = Win8.1 / Win10 早期<br>• `10` = Win10 19H1+<br>• `12` = Win11 22H2+ | 必须先校验！ 不同版本内存布局差异极大（如 Win10 19H1+ 增加 `HostOffset` 字段）。解析前需 `if header.Version != 6 { return Err(...) }` |
+| `Size` | 整个 ApiSetMap 内存块大小（单位：字节），包含：<br>• 头部 (28B)<br>• Entry 数组 (Count × 24B)<br>• ValueEntry 数组<br>• 所有字符串数据区<br>• 哈希表 | 用于边界检查：`if offset >= header.Size { panic!("越界!") }` |
+| `Flags` | 位标志：<br>• `bit 0` = `1`：启用哈希表（`HashOffset` 有效）<br>• 其他位保留 | 多数 Win10 系统此值为 `1`（启用哈希加速） |
+| `Count` | 虚拟 DLL 条目总数（即 `API_SET_NAMESPACE_ENTRY` 数组长度） | 典型值：Win10 约 200~300 个（含 `api-ms-*`, `ext-ms-*`） |
+| `EntryOffset` | 相对偏移：从 `API_SET_NAMESPACE` 起始地址 → `API_SET_NAMESPACE_ENTRY` 数组首地址 | 关键！ 所有偏移均相对于 `ApiSetMap` 基址（非条目自身）。计算：`let entries = (base as usize + header.EntryOffset) as *const API_SET_NAMESPACE_ENTRY;` |
+| `HashOffset` | 相对偏移：到哈希桶数组（`u32` 数组，每个元素是 Entry 索引） | 哈希查找流程：<br>1. 计算虚拟 DLL 名哈希（去掉 `.dll` 后缀）<br>2. `bucket = ((hash * HashFactor) >> 32) % bucket_count`<br>3. 从哈希表取索引 → 定位 Entry |
+| `HashFactor` | 预计算的乘法哈希因子（使哈希值均匀分布） | 通常为质数（如 `0x9E3779B9` 变体），无需修改，直接用于计算 |
+
+重要字段:  
+Count字段,是一个u32数字,代表虚拟dll的数量,每个虚拟dll都有一个API_SET_NAMESPACE_ENTRY结构  
+EntryOffset字段,是一个RVA,和基址共同组成指向第一个API_SET_NAMESPACE_ENTRY数组的指针,即Base + EntryOffset = API_SET_NAMESPACE_ENTRY 数组的起始地址.  
+指向数据的类型：`[API_SET_NAMESPACE_ENTRY; Count]` (结构体数组)
+
+**内存布局全景（以 Version 6 为例）**
+
+[API_SET_NAMESPACE] (28 bytes)
+│
+├─ EntryOffset → [API_SET_NAMESPACE_ENTRY × Count] 
+│                 │
+│                 ├─ NameOffset → "api-ms-win-core-heap-l1-1-0" (无\0, Unicode)
+│                 └─ ValueOffset → [API_SET_VALUE_ENTRY × ValueCount]
+│                                    │
+│                                    └─ ValueOffset → "kernelbase.dll" (无\0, Unicode)
+│
+├─ HashOffset → [u32 哈希桶数组] (用于 O(1) 查找)
+│
+└─ (字符串数据区连续存储所有 Name/Value)
+
+**版本兼容性**
+1. Win11 22H2+ (Version=12) 新增 HostOffset 字段（支持主机重定向），硬编码解析 Version 6 会导致崩溃
+
+**用途**
+1. 解析 IAT 中的 api-ms-win-*.dll → 真实 DLL（绕过 IAT Hook）
+2. Reflective Loader 中手动解析导入表
+3. 检测 EDR 注入的虚拟 DLL（如异常 ext-ms-* 条目）
 
 #### API_SET_NAMESPACE_ENTRY (虚拟模块条目)
 
@@ -799,7 +894,7 @@ pub struct API_SET_NAMESPACE {
 #[derive(Clone, Copy)]
 pub struct API_SET_NAMESPACE_ENTRY {
  pub Flags: u32,   //属性标志(0 表示正常，1 表示 Sealed（密封）。通常解析时忽略)
- pub NameOffset: u32,  // 虚拟 DLL名称字符串偏移(指向该虚拟 DLL 名称的 Unicode 字符串),注意: 这里的字符串没有 Null 结尾 (\0)，必须结合 NameLength 读取
+ pub NameOffset: u32,  // 虚拟 DLL名称字符串偏移(指向该虚拟 DLL 名称的 Unicode 字符串,（如 "api-ms-win-core-heap-l1-1-0"）),注意: 这里的字符串没有 Null 结尾 (\0)，必须结合 NameLength 读取
  pub NameLength: u32,//  虚拟 DLL名称字节长度(该名称的字节数,不是字符数),因为是 Unicode (UTF-16)，所以字符数 = NameLength / 2
  pub HashedLength: u32,  // 用于哈希计算的长度(API Set 名称通常包含后缀（如 -1-0），但哈希计算可能只取前缀。此字段指明算哈希时取多少字节)
  pub ValueOffset: u32,// 指向 API_SET_VALUE_ENTRY 数组的偏移(指向 API_SET_VALUE_ENTRY 数组的起始位置。这个数组包含该虚拟 DLL 对应的真实宿主 DLL 信息)
@@ -807,22 +902,34 @@ pub struct API_SET_NAMESPACE_ENTRY {
 }
 ```
 
- 在该项目中module.rs文件中,// Base pointer for the namespace entry array
-          let ns_entry = ((*map).EntryOffset as usize + map as usize) as *const
+API_SET_NAMESPACE_ENTRY(是数组的形式):  
+NameOffset字段,RVA,代表虚拟 DLL 名称偏移.  
+指向数据的类型：`[u16; NameLength/2]` (UTF-16 字符数组)
+
+ValueCount字段,表示这个虚拟 DLL 有多少条重定向规则（通常是1）  
+
+ValueOffset字段,是一个RVA,和基址共同组成一个指针,指针指向的是 `API_SET_VALUE_ENTRY` 数组的起始地址.  
+指向数据的类型：`[API_SET_VALUE_ENTRY; ValueCount]` (结构体数组)
+
+
+在该项目中module.rs文件中,
+```rust
+// Base pointer for the namespace entry array
+let ns_entry = ((*map).EntryOffset as usize + map as usize) as *const
   API_SET_NAMESPACE_ENTRY;
-          let ns_entries = from_raw_parts(ns_entry, (*map).Count as usize);
-  这里将所有API_SET_NAMESPACE_ENTRY结构体组成了一个slice,那后续中  for entry in
-  ns_entries是如何区分出每个entry呢?
+
+let ns_entries = from_raw_parts(ns_entry, (*map).Count as usize);
+```
+
+这里将所有API_SET_NAMESPACE_ENTRY结构体组成了一个slice,那后续中  for entry in ns_entries是如何区分出每个entry呢?
 
 ✦ 这是一个非常好的问题，触及了 Rust（以及 C/C++）底层内存操作的核心机制。
 
-  简单直接的回答是：`ns_entries` 这个 slice
-  携带了类型信息（`API_SET_NAMESPACE_ENTRY`），编译器知道这个结构体的大小（Size
-  ），因此可以通过简单的“指针运算”计算出下一个元素的内存地址。
+简单直接的回答是：`ns_entries` 这个 slice携带了类型信息（`API_SET_NAMESPACE_ENTRY`），编译器知道这个结构体的大小（Size），因此可以通过简单的“指针运算”计算出下一个元素的内存地址。
 
-  具体原理如下：
+具体原理如下：
 
-  1. 连续的内存布局 (Contiguous Memory)
+1. 连续的内存布局 (Contiguous Memory)   
   slice::from_raw_parts 函数的作用是告诉 Rust 编译器：“从 ns_entry
   这个内存地址开始，往后的一段连续内存中，存放了 Count 个
   API_SET_NAMESPACE_ENTRY 类型的结构体。”
@@ -900,6 +1007,27 @@ pub struct API_SET_VALUE_ENTRY {
  pub ValueLength: u32 // 目标 DLL 名称字节长度,用于读取最终的 DLL 名称
 }
 ```
+
+```rust
+pub struct API_SET_VALUE_ENTRY {
+    pub Flags: u32,        // 位0: 1=使用NameOffset（别名），0=仅用ValueOffset
+    pub NameOffset: u32,   // → 宿主 DLL **别名**字符串偏移（如 "api-ms-win-core-heap-l2-1-0"）
+    pub NameLength: u32,   // 别名字节长度
+    pub ValueOffset: u32,  // → **宿主 DLL 真实名称**字符串偏移（如 "kernelbase.dll"）❗
+    pub ValueLength: u32,  // **宿主 DLL 名称字符串的字节长度**（非数量！）❗
+}
+```
+
+API_SET_VALUE_ENTRY(是数组的形式):  
+NameOffset字段,是一个RVA,和基址共同组成一个指针,该指针指向的是一个utf-16类型的字符串  
+指向数据的类型：`[u16; NameLength/2]` (UTF-16 字符数组)
+
+NameLength字段,代表名称NameOffset指向的字符串的长度(字节数)
+
+ValueOffset字段,是一个RVA,和基址共同组成一个指针,指针指向的是目标 DLL 名称字符串
+指向数据的类型：`[u16; ValueLength/2]` (UTF-16 字符数组)
+
+ValueLength字段,目标 DLL 名称的字节长度
 
 #### API_SET_HASH_ENTRY (哈希索引条目)
 
@@ -981,6 +1109,62 @@ EDR（端点检测与响应系统）通常会 Hook 两个层面的 API：
 这四个结构体都是数组吗?
 这四个结构体之间的联系?请聚个简单的例子说明为啥需要这么多结构体表示映射关系?之所以需要这么多结构体的逻辑是什么?
 现在ai那么厉害,还有如openclaw的这种流行项目,我学习这些东西真的有用吗?会过时吗?会被ai替代吗?
+
+### 如果虚拟dll在ApiSetMap中找不到呢
+
+| 场景 | 系统行为 | 原因 |
+|------|----------|------|
+| 虚拟 DLL 在 ApiSetMap 中无映射条目 | ❌ 加载失败（`STATUS_DLL_NOT_FOUND`） | Windows 加载器严格依赖 ApiSetMap 解析虚拟 DLL |
+| 宿主 DLL 文件本身缺失/损坏 | ❌ 加载失败（`STATUS_DLL_INIT_FAILED`） | ApiSetMap 仅做名称映射，不验证文件存在性 |
+| 程序直接使用真实 DLL 名（如 `kernel32.dll`） | ✅ 正常加载 | 不经过 ApiSetMap，走常规加载路径（KnownDLLs/系统目录） |
+
+
+flowchart TD
+    A[LoadLibraryW<br/>“api-ms-win-core-heap-l1-1-0.dll”] --> B{是否为虚拟 DLL？<br/>（前缀 api-ms-/ext-ms-）}  
+    B -->|是| C[查询 ApiSetMap]  
+    B -->|否| D[直接按原名加载<br/>（KnownDLLs/系统目录）]  
+    C --> E{ApiSetMap 中存在映射？}  
+    E -->|是| F[替换为宿主 DLL 名<br/>“kernelbase.dll”]  
+    E -->|否| G[返回 STATUS_DLL_NOT_FOUND<br/>❌ 进程崩溃/报错]  
+    F --> H[按“kernelbase.dll”加载]  
+    H --> I{kernelbase.dll 文件存在？}  
+    I -->|是| J[✅ 加载成功]  
+    I -->|否| K[返回 STATUS_DLL_NOT_FOUND<br/>❌ 文件系统层失败]  
+
+**场景 1：ApiSetMap 被篡改/损坏（EDR 拦截、内存破坏）**  
+现象：api-ms-win-core-heap-l1-1-0 映射条目被删除或指向恶意 DLL
+后果：  
+条目缺失 → 进程启动即崩溃（常见于恶意软件破坏系统）  
+条目被篡改 → 加载到 EDR 注入的 Hook DLL  
+
+**场景 2：跨 Windows 版本兼容性问题**
+现象：Win7 程序在 Win11 运行，ApiSetMap 中无旧版虚拟 DLL 条目
+真相：  
+Windows 向后兼容设计：新版 ApiSetMap 保留旧版虚拟 DLL 映射（如 Win11 仍含 Win8 的 api-ms-win-core-heap-l1-1-0）
+→ 极少因版本缺失导致失败（微软维护映射表完整性）  
+例外：  
+某些 ext-ms-*（扩展 API 集）在特定 SKU（如 Server Core）中可能缺失 → 需检查 ValueCount == 0
+
+**场景 3：程序直接调用真实 DLL（最常见！）**  
+关键认知：  
+ApiSetMap 仅作用于“虚拟 DLL 名”（api-ms-* / ext-ms-*）
+→ kernel32.dll、user32.dll、ntdll.dll 等真实 DLL 名永不经过 ApiSetMap  
+验证方法：  
+用 Dependency Walker 或 dumpbin /imports 检查 EXE 导入表：  
+若显示 api-ms-win-core-heap-l1-1-0.dll → 依赖 ApiSetMap  
+若显示 kernelbase.dll → 直接加载，与 ApiSetMap 无关  
+
+| 问题类型 | 根本原因 | 解决方案 |
+|----------|----------|----------|
+| “虚拟 DLL 解析失败” | ApiSetMap 条目缺失/损坏 | 1. 检查系统完整性（sfc /scannow）<br>2. Red Team：使用硬编码回退表 |
+| “宿主 DLL 加载失败” | 文件被删除/权限问题/路径劫持 | 1. 检查 `%SystemRoot%\System32\kernelbase.dll`<br>2. 检查 KnownDLLs 注册表项 |
+| “为何我的程序不查 ApiSetMap？” | 导入表直接使用真实 DLL 名 | 正常行为！ApiSetMap 仅处理虚拟 DLL |
+
+🌟 终极心法：  
+ApiSetMap 是“名称翻译器”，不是“DLL 存储库”。  
+它只回答：“api-ms-win-core-heap-l1-1-0 应该去加载哪个真实 DLL？”  
+它不保证：“kernelbase.dll 文件一定存在且可加载”  
+理解这一边界，是避免在内存加载、反射式 DLL 注入等场景中踩坑的核心。  
 
 ## LDR
 
