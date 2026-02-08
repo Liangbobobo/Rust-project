@@ -1,3 +1,4 @@
+// 免杀注意:
 // 禁用#[derive(Debug)]
 // 禁用result<>,改用option<*mut c_void>
 
@@ -7,9 +8,12 @@
 //   优化建议： 可以在访问 Ldr 时加入微小的指针运算混淆，或者使用
 //   core::ptr::read_volatile 防止编译器生成过于规律的汇编模式。
 
+// 语法注意:
 // 哈希函数的多样化： 不要只传一个固定的
+// 使用cast
 
-use core::ptr::addr_of;
+
+
 use core::slice;
 // 导出表的函数名是 ASCII (char / i8) 编码
 // win64架构下,usize u64 *mut c_void都是8字节,在寄存器种的表示完全相同
@@ -49,12 +53,14 @@ pub fn get_ntdll_address()->*mut c_void {
 
     // add是&u64,是对数据的引用,是内存地址,不是数据本身
     // 必须解引用才能得到真实数据
-    *addr as *mut c_void
+    // cast()是定义在raw pointer上的方法,这里不能直接用
+    
+    (*addr) as *mut c_void
 }
 
 
 
-/// 获取模块基址
+/// 获取模块基址(使用)
 ///
 ///
 /// 使用Option(定义在core中)不需要引入std
@@ -141,8 +147,11 @@ pub fn retrieve_module_add(
                     break;
                 }
             }
+
+            // Moves to the next node in the list of modules
             InMemoryOrderModuleList_flink = (*InMemoryOrderModuleList_flink).Flink;
 
+            // Break out of loop if all of the nodes have been checked
             if InMemoryOrderModuleList_flink == head_node {
                 // 需要增加debug时的错误提示,使用debug_log!
                 break;
@@ -161,6 +170,8 @@ pub fn retrieve_module_add(
 /// 通过ordinal找到的地址不需要做是否为转发地址的判断
 ///
 /// 通过hash值找到的地址需要判断是否为转发地址,并进一步在get_forwarded_address中处理
+/// 
+/// peb通过ldr字段,维护着一个描述进程已加载模块的双向链表( PEB -> Ldr -> 模块链表 -> 导出基址 (DllBase))
 pub fn get_proc_address(
     h_module: Option<HMODULE>,
     function: hash_type,
