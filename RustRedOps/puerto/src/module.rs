@@ -333,6 +333,7 @@ pub fn get_forwarded_address(
             let cstr = CStr::from_ptr(address as *const i8);
 
             // 该转换是否有副作用?
+            // 关于to_bytes()函数签名中的const在rust grammer.md中
             let byte = cstr.to_bytes();
 
             // 导出转发（Forwarder） 在内存中的原始数据格式是固定的(如api-ms-win-core-file-l1-1-0.CreateFileW),所以必须先通过. 分割一下
@@ -349,15 +350,19 @@ pub fn get_forwarded_address(
 
             // 去掉最右侧的 - 连字符
             if dll_name_bytes.starts_with(obfstr!("api-ms").as_bytes()) || dll_name_bytes.starts_with(obfstr!("ext-ms").as_bytes()) {
-                // 从右开始找 - (ascii 45)位置
+                // 从右开始找 - (ascii 45)位置,使用rposition()
                 let module_resolved =
                     if let Some(last_index) = dll_name_bytes.iter().rposition(|&b| b == b'-') {
-                        resolve_api_set_map(module, &dll_name_bytes[..last_index])
-                    } else {
-                        resolve_api_set_map(module, dll_name_bytes)
 
-                        
+                         resolve_api_set_map(module, &dll_name_bytes[..last_index])
+                       
                     };
+                    }else {
+                      // 不是虚拟dll的情况
+                      // 这里将&[u8]转为*mut c_void
+                      // 这里是否有指针的安全问题
+                        return Some(dll_name_bytes.as_ptr() as *mut c_void);
+                    }
 
                     // 使用resolve_api_set_map的返回值,进一步处理
                     if let Some(modules) =module_resolved  {
@@ -374,12 +379,7 @@ pub fn get_forwarded_address(
 
                         }
                     }
-            } else {
-                      // 不是虚拟dll的情况
-                      // 这里将&[u8]转为*mut c_void
-                      // 这里是否有指针的安全问题
-                        return Some(dll_name_bytes.as_ptr() as *mut c_void);
-                    };
+            } ;
 
             
         }
