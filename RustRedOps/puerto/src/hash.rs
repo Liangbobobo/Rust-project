@@ -27,6 +27,8 @@
 
 // 为了兼容 Windows的不区分大小写特性，我们在哈希过程中直接进行“位运算转换（Case Folding）”，而不产生新字符串。
 
+
+// 在 hash.rs 中增加一个处理模块名的逻辑，使其在哈希时自动忽略 .DLL后缀（类似于你做的大小写折叠）
 /// 直接传入&[u16]给hash函数
 pub fn fnv1a_utf16(data: &[u16]) -> u32 {
     const FNV_OFFSET_BASIS: u32 = 0x3D91_4AB7; // 你自定义的种子
@@ -48,6 +50,29 @@ pub fn fnv1a_utf16(data: &[u16]) -> u32 {
         for &byte in &bytes {
             // 如果是 ASCII 字符，第二个字节通常是 0，可以根据需求决定是否忽略
             // 这里为了通用性，对两个字节都进行哈希
+            hash ^= byte as u32;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+    hash
+}
+
+/// 针对 &[u8] 的 fnv1a 哈希，模拟将其视为 UTF-16 字节流进行哈希
+/// 这在处理 ASCII 字符串（如转发字符串中的模块名）并与 PEB 中的 UTF-16 哈希对比时非常有用
+pub fn fnv1a_utf16_from_u8(data: &[u8]) -> u32 {
+    const FNV_OFFSET_BASIS: u32 = 0x3D91_4AB7;
+    const FNV_PRIME: u32 = 0xAD37_79B9;
+
+    let mut hash = FNV_OFFSET_BASIS;
+
+    for &val in data {
+        // Case Folding: a-z -> A-Z
+        let chr = if val >= 97 && val <= 122 { val - 32 } else { val };
+
+        // 模拟 UTF-16: 第一个字节是 ASCII，第二个字节是 0
+        let bytes = [chr, 0u8];
+
+        for &byte in &bytes {
             hash ^= byte as u32;
             hash = hash.wrapping_mul(FNV_PRIME);
         }

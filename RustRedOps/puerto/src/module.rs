@@ -14,13 +14,13 @@
 
 
 
-use core::slice;
+
 // 导出表的函数名是 ASCII (char / i8) 编码
 // win64架构下,usize u64 *mut c_void都是8字节,在寄存器种的表示完全相同
 use core::{ffi::CStr, ffi::c_void, ptr::null_mut, slice::from_raw_parts};
 
 use obfstr::obfstr;
-use crate::hash::fnv1a_utf16;
+use crate::hash::{fnv1a_utf16, fnv1a_utf16_from_u8};
 use crate::helper::PE;
 use crate::types::{
     API_SET_NAMESPACE_ENTRY,API_SET_VALUE_ENTRY, HMODULE, IMAGE_EXPORT_DIRECTORY, LDR_DATA_TABLE_ENTRY,
@@ -237,8 +237,7 @@ pub fn get_proc_address(
         );
 
         // 如果传入的function是ordinal,返回对应的函数的地址
-        if let Some(ordinals) = function
-            && ordinals <= 0xFFFF
+        if let Some(ordinals) = function.filter(|&o| o <= 0xFFFF)
         {
             // 保留低16位
             // 任何和1的与运算,都会保留原值(任何和0的与运算都会变为0)
@@ -246,7 +245,7 @@ pub fn get_proc_address(
             let ordinals = ordinals & 0xFFFF;
 
             // export.base+(*export_dir).NumberOfFunctions)判断(不是(*export_dir).NumberOfNames)是否在addressoffunctions指向的数组中
-            if ordinals <= (*export_dir).Base
+            if ordinals < (*export_dir).Base
                 || ordinals >= (*export_dir).Base + (*export_dir).NumberOfFunctions
             {
                 return None;
@@ -320,7 +319,7 @@ pub fn get_forwarded_address(
     address: *mut c_void,
     export_dir: *const IMAGE_EXPORT_DIRECTORY,
     export_size: usize,
-    hash: fn(&[u16]) -> u32,
+    _hash: fn(&[u16]) -> u32,
 ) -> Option<*mut c_void> {
     // 如果不是转发函数,EAT里的RVA应指向.text中代码段的位置,是真正的机器码.如果EAT指向导出目录,自己的内存范围,则是一个转发函数
     // 此时address指向的是一个指针(该指针指向的是ascii字符串),这个字符串的格式是 moudle.function.之后再通过module查找函数地址
@@ -333,13 +332,13 @@ pub fn get_forwarded_address(
             let cstr = CStr::from_ptr(address as *const i8);
 
             // 该转换是否有副作用?
-            // 关于to_bytes()函数签名中的const在rust grammer.md中
+            // 关于to_bytes()函数签名中的const在rust grammer.md中有说明
             let byte = cstr.to_bytes();
 
             // 导出转发（Forwarder） 在内存中的原始数据格式是固定的(如api-ms-win-core-file-l1-1-0.CreateFileW),所以必须先通过. 分割一下
-            // 使用if-let else将其内部变量拿出来用
+            // let-else语法(1.65以后),失败执行else块,且必须在else退出(return/break / continue（如果在循环里）/ panic!/调用返回类型为 ! (Never) 的函数（如 process::exit）)
             let Some(dot_index) = byte.iter().position(|&b| b == b'.') else {
-                debug_log!("[-] Invalid forwarder format: missing dot");
+                debug_log!("[-] Invalid forwarder format: missing dot(get_forward_address中)");
 
                 return None;
             };
@@ -353,39 +352,42 @@ pub fn get_forwarded_address(
                 // 从右开始找 - (ascii 45)位置,使用rposition()
                 let module_resolved =
                     if let Some(last_index) = dll_name_bytes.iter().rposition(|&b| b == b'-') {
-
                          resolve_api_set_map(module, &dll_name_bytes[..last_index])
-                       
+                    } 
+                    // 不是api-ms或ext-ms开头的情况,仍然去resolve_api_set_map解析
+                    else {
+                        resolve_api_set_map(module, dll_name_bytes)
                     };
-                    }else {
-                      // 不是虚拟dll的情况
-                      // 这里将&[u8]转为*mut c_void
-                      // 这里是否有指针的安全问题
-                        return Some(dll_name_bytes.as_ptr() as *mut c_void);
-                    }
 
-                    // 使用resolve_api_set_map的返回值,进一步处理
-                    if let Some(modules) =module_resolved  {
-                        for module in modules{
-                    // 尝试获取目标模块在内存中的基地址?    
-                            
-                            // 这里的slice::from_ref将u16转为&[u16]
-                            let dll_hash =fnv1a_utf16(slice::from_ref(&*module)) ;
-              // 如果目标模块尚未加载到当前进程内存中，则手动调用 加载它,如何不通过LoadLibrary,避免被hook?
-                            let mut addr =retrieve_module_add(Some(dll_hash), Some(fnv1a_utf16));
+                // 使用resolve_api_set_map的返回值,进一步处理
+                if let Some(real_dll_u16) = module_resolved {
+                    // 这里的 real_dll_u16 是 &[u16]，需要用它去找到基址，再找函数地址
+                    // 注意：这里需要计算 hash
+                    let dll_hash = fnv1a_utf16(real_dll_u16);
 
-                            
+                    let h_module = retrieve_module_add(Some(dll_hash), Some(fnv1a_utf16))?;
 
+                    let func_hash = fnv1a_utf16_from_u8(func_name_bytes);
 
-                        }
-                    }
-            } ;
+                    return get_proc_address(Some(h_module), Some(func_hash), Some(fnv1a_utf16));
+                }
+                return None;
+            }
+             else {
+                // 不是虚拟dll的情况 (普通转发，如 NTDLL.RtlAllocateHeap)
 
-            
+                let dll_hash = fnv1a_utf16_from_u8(dll_name_bytes);
+
+                let h_module = retrieve_module_add(Some(dll_hash), Some(fnv1a_utf16))?;
+
+                let func_hash = fnv1a_utf16_from_u8(func_name_bytes);
+
+                return get_proc_address(Some(h_module), Some(func_hash), Some(fnv1a_utf16));
+            }
         }
     }
 
-    todo!()
+    Some(address)
 }
 
 /// peb.ApiSetMap
@@ -447,49 +449,93 @@ fn resolve_api_set_map<'a>(
                 return Some(dll)
             }
 
-            // 如果有多于1个的映射值,需要根据host_name过滤(如某些api再不同宿主下会重定向到不同的dll)
-            // 对多个宿主
-            for val in values{
+            // 如果有多于 1 个的映射值，需要根据 host_name 过滤
+            let mut default_val = None;
 
-                let name = from_raw_parts((map as usize+val.NameOffset as usize)as *const u16, 
-        val.NameLength as usize/2) ;
+            for val in values {
+                if val.NameLength > 0 {
+                    // 1. 解析当前条目指定的宿主名
+                    let entry_name = from_raw_parts(
+                        (map as usize + val.NameOffset as usize) as *const u16,
+                        val.NameLength as usize / 2,
+                    );
 
-                let host_name_u8 = CStr::from_ptr(host_name).to_bytes();
+                    let host_bytes = CStr::from_ptr(host_name).to_bytes();
 
-                let name_eq_host_name_u8 = name.iter()
-                .zip(host_name_u8.iter())
-                .all(|(&name,&host_name_u8)|name== host_name_u8 as u16);
+                    // 2. 检查是否匹配当前宿主 (大小写不敏感)
+                    let is_match = entry_name.len() == host_bytes.len() && entry_name.iter().zip(host_bytes.iter()).all(|(&n, &h)| {
+                        let n_up = if n >= 97 && n <= 122 { n - 32 } else { n };
+                        let h_up = if h >= 97 && h <= 122 { (h - 32) as u16 } else { h as u16 };
+                        n_up == h_up
+                    });
 
-                if !name_eq_host_name_u8 {
-                    let dll = from_raw_parts((map as usize+ (&values[0]).ValueOffset as usize) as *const u16, (&values[0]).ValueLength as usize /2);
-
-                    if !dll.is_empty() {
-                        return Some(dll);
+                    if is_match {
+                        // 找到特定宿主匹配，返回当前条目对应的物理 DLL
+                        return Some(from_raw_parts(
+                            (map as usize + val.ValueOffset as usize) as *const u16,
+                            val.ValueLength as usize / 2,
+                        ));
                     }
+                } else {
+                    // 记录默认重定向条目 (NameLength 为 0)
+                    default_val = Some(val);
                 }
-
-                
-
-
             }
 
+            // 如果没有特定匹配，返回默认条目
+            if let Some(v) = default_val {
+                return Some(from_raw_parts(
+                    (map as usize + v.ValueOffset as usize) as *const u16,
+                    v.ValueLength as usize / 2,
+                ));
+            }
         }
-
-        
-        
-
-         }
     }
 
-    todo!()
+    None
+
 }
 
-
-
-
+}
 
 
 
 // u[8] u[16]等不同编码方式之间的转换需要自己实现方便使用
 
 // 测试代码需要补充
+
+/* 
+=========================================
+          核心函数实现逻辑总结
+=========================================
+
+1. get_ntdll_address()
+   - 目的：高效、线程安全地获取 ntdll.dll 的内存基地址。
+   - 逻辑：利用 spin::Once 确保哈希查找只执行一次并缓存结果。它是库获取底层 NT 函数的基石。
+
+2. retrieve_module_add(module_hash, hash_func)
+   - 目的：在不调用 GetModuleHandle 的情况下，定位内存中已加载的 DLL 基址。
+   - 逻辑：从 GS:[0x60] 读取 PEB，通过 Ldr 字段进入模块链表。Puerto 使用 fnv1a_utf16 直接在原始 UTF-16 字节流上哈希并比对，实现了零内存分配。
+
+3. get_proc_address(h_module, function_hash, hash_func)
+   - 目的：手动从模块导出表（EAT）中提取函数地址，规避 IAT 监控。
+   - 逻辑：解析 IMAGE_EXPORT_DIRECTORY，通过名称表索引获取序数，再通过序数在地址表中查到 RVA。
+   - 关键：内置了转发检查。若地址落在导出表范围内，则自动进入转发解析流程。
+
+4. get_forwarded_address(...)
+   - 目的：解析转发导出（如 KERNEL32 指向 NTDLL 的函数）。
+   - 逻辑：处理形如 "DLLNAME.FunctionName" 的字符串。
+   - Puerto 增强：
+     - API Set (api-ms-...): 调用专用的 resolve_api_set_map 将虚拟名映射为真实物理 DLL。
+     - 普通转发: 直接计算 DLL 名字哈希并递归查找。
+
+5. resolve_api_set_map(host_name, contract_name)
+   - 目的：解析 Windows 7+ 的虚拟 DLL（API Sets）映射。
+   - 逻辑：查询 PEB 中的 ApiSetMap 结构，遍历命名空间条目。
+   - Puerto 核心优化：
+     - 特定宿主过滤：优先匹配为当前调用模块（host_name）准备的重定向规则。
+     - 默认回退：若无特定匹配，返回该契约的默认实现。
+     - 极致隐蔽：全过程不产生 String 对象，在切片上完成大小写不敏感的位运算匹配。
+
+=========================================
+*/
