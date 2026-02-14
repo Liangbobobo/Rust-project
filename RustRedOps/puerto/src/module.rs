@@ -68,7 +68,11 @@ pub fn get_ntdll_address()->*mut c_void {
 /// 已经对返回的指针是否可用做检查且有对应的debug时提示(release会删掉),但是不能保证指针指向的内容一定是PE结构中对应的字段
 ///
 /// 返回的虽然是option,但里面的内容仍然可能为空?
-/// 该函数还待优化
+/// 
+/// 模块查找路径：
+/// 
+/// GS:[60h] (指针) -> PEB -> Ldr (指针) -> LDR_DATA -> InMemoryOrderLinks(链表) -> LDR_ENTRY -> BaseDllName (UTF16) -> Puerto 哈希比较 -> 返回DllBase
+/// 
 #[inline(always)]
 pub fn retrieve_module_add(
     module: hash_type, // 传入对应的模块的hash值
@@ -187,7 +191,6 @@ pub fn get_proc_address(
 
     // initializes a new pe struct
     let pe = PE::parse(h_module);
-
     // 将传入的h_module转为usize方便后续计算
     // 在win64下这是u64
     let h_module = h_module as usize;
@@ -314,6 +317,9 @@ pub fn get_proc_address(
     return Some(null_mut());
 }
 
+/// API Set 转发路径：
+/// 
+///  get_proc_address -> 发现地址在导出表范围内 -> 转发字符串 ("api-ms-win....dll") -> resolve_api_set_map -> 查找 ApiSetMap 数组 -> 前缀匹配 合约名 ->宿主过滤 (Host Name) -> 找到真实物理 DLL 哈希 -> 递归查找 -> 最终地址
 pub fn get_forwarded_address(
     module: *const i8,
     address: *mut c_void,

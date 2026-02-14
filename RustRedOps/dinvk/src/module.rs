@@ -40,7 +40,9 @@ pub fn get_ntdll_address() -> *mut c_void {
 /// // Retrieving module address via string and hash
 /// let base = get_module_address("ntdll.dll", None);
 /// let base = get_module_address(2788516083u32, Some(murmur3));
-/// ```
+/// 
+/// 
+/// 
 pub fn get_module_address<T>(
     module: T,
     hash: Option<fn(&str) -> u32>
