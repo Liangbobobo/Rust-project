@@ -97,7 +97,7 @@ impl <'a> Exports<'a> {
             // OptionalHeader.DataDirectory 是一个拥有 16 个元素的数组。数组的类型是IMAGE_DATA_DIRECTORY
             // 只有转为*const IMAGE_EXPORT_DIRECTORY类型才能以这种类型的指针才能使用
             Some((self.pe.base as usize + dir.VirtualAddress as usize) as *const IMAGE_EXPORT_DIRECTORY)
-            // todo!()
+          
         }
 
     }

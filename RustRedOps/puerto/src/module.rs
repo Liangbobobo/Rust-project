@@ -227,13 +227,14 @@ pub fn get_proc_address(
 
         // AddressOfNameOrdinals([u16]类型)
         // ordinals[i] 是 names[i]对应的函数在 functions 数组中的索引
-        //
+        // 它就是一个简单的 u16 数字数组，里面的数字直接拿来当做functions 数组的下标使用
         let ordinals = from_raw_parts(
             (h_module + (*export_dir).AddressOfNameOrdinals as usize) as *const u16,
             (*export_dir).NumberOfNames as usize,
         );
 
         // AddressOfFunctions([u32])
+        // 内存处数据类型是u32(RVA)数组;加上基址后指向的是机器码(Opcode),在rust中类型是*const i8或*const u8
         let functions = from_raw_parts(
             (h_module + (*export_dir).AddressOfFunctions as usize) as *const u32,
             (*export_dir).NumberOfFunctions as usize,

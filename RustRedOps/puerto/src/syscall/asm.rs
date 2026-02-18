@@ -5,12 +5,12 @@
 // 将双引号内的字符串直接交给汇编器,与asm!宏不同,global_asm!是一个完整\独立的函数或符号,可以像普通c函数一样被链接和调用
 core::arch::global_asm!("
 
-; 汇编指令(Directive),用于声明全局符号,其他rust模块可以使用
-.global do_syscall
 
-; 指定接下来的代码应该存放在二进制文件的哪个“分分区”里
-; 这是二进制文件中存放可执行机器指令的标准段名称
-.section .text
+.global do_syscall ; 汇编指令(Directive),用于声明全局符号,其他rust模块可以使用
+
+
+
+.section .text ; 指定接下来的代码应该存放在二进制文件的哪个“分分区”里,这是二进制文件中存放可执行机器指令的标准段名称
 
 ; : 表示这是一个标签,标记了do_syscall函数在内存中的起始地址
 do_syscall:
@@ -20,7 +20,6 @@ do_syscall:
     ; r12 为了免杀性,必须更换(不能用r11)
     mov [rsp - 0x8],  rsi
     mov [rsp - 0x10], rdi
-    ; mov [rsp - 0x18], r12
     mov [rsp - 0x18], r15
 
     ; ssn与跳转地址准备(进行系统调用需要的前三个参数)
