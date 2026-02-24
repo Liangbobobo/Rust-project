@@ -16,7 +16,6 @@
       - [A. 为什么这种技术被称为“无感 Hook” (Stealthy)?](#a-为什么这种技术被称为无感-hook-stealthy)
       - [B. EDR 如何感知/检测这种操作？](#b-edr-如何感知检测这种操作)
     - [总结](#总结-1)
-- [在 `dinvk` 这个项目中，为了不被发现，它必须配合 Syscalls (绕过 API 监控) 使用，并且赌 EDR 没有进行高频的线程寄存器扫描。这是一种高级的红队对抗技术](#在-dinvk-这个项目中为了不被发现它必须配合-syscalls-绕过-api-监控-使用并且赌-edr-没有进行高频的线程寄存器扫描这是一种高级的红队对抗技术)
   - [背景知识](#背景知识)
   - [Dr7 寄存器总览](#dr7-寄存器总览)
     - [1. 寄存器位图结构 (Bit Layout)](#1-寄存器位图结构-bit-layout)
@@ -26,8 +25,8 @@
       - [1. RW0 (Bit 16-17) - Read/Write Control (触发条件)](#1-rw0-bit-16-17---readwrite-control-触发条件)
       - [2. LEN0 (Bit 18-19) - Length Control (监控长度)](#2-len0-bit-18-19---length-control-监控长度)
     - [三、 结合 breakpoint.rs 的实战解读](#三-结合-breakpointrs-的实战解读)
-  - [源码](#源码)
-    - [use core::ffi::c\_void](#use-coreffic_void)
+- [源码](#源码)
+  - [use core::ffi::c\_void](#use-coreffic_void)
   - [关于启用硬件端点时,调用NtGetContextThread的工作原理](#关于启用硬件端点时调用ntgetcontextthread的工作原理)
     - [系统调用 (Syscall)：CPU 从用户模式（Ring 3）切换到内核模式（Ring 0）](#系统调用-syscallcpu-从用户模式ring-3切换到内核模式ring-0)
     - [查找线程对象：内核根据 ThreadHandle 找到对应的内核线程对象（KTHREAD/ETHREAD）](#查找线程对象内核根据-threadhandle-找到对应的内核线程对象kthreadethread)
@@ -40,8 +39,19 @@
       - [设置硬件断点 (Hardware Breakpoints)](#设置硬件断点-hardware-breakpoints)
     - [使用流程总结](#使用流程总结)
     - [总结](#总结-2)
-- [`NtGetContextThread` 是一个赋予程序强大“内省”（Introspection）能力的底层系统函数。它允许代码捕获并保存 CPU 在某一时刻的完整状态快照。在合法开发中，它是编写调试器（Debugger）和性能分析工具的基础。而在安全开发（无论是攻击还是防御）中，它被用于实现高级的代码钩子（Hook）、进程注入、反调试和反分析技术，是理解现代用户态恶意软件规避技术的关键组件之一](#ntgetcontextthread-是一个赋予程序强大内省introspection能力的底层系统函数它允许代码捕获并保存-cpu-在某一时刻的完整状态快照在合法开发中它是编写调试器debugger和性能分析工具的基础而在安全开发无论是攻击还是防御中它被用于实现高级的代码钩子hook进程注入反调试和反分析技术是理解现代用户态恶意软件规避技术的关键组件之一)
     - [NtGetContextThread(NtCurrentThread(), \&mut ctx)](#ntgetcontextthreadntcurrentthread-mut-ctx)
+- [build，一旦发现死链就报错，强迫你在提交代码前修复链接。](#build一旦发现死链就报错强迫你在提交代码前修复链接)
+    - [NtGetContextThread(NtCurrentThread(), \&mut ctx)](#ntgetcontextthreadntcurrentthread-mut-ctx-1)
+      - [这里为什么不使用indirect syscall?(重要)](#这里为什么不使用indirect-syscall重要)
+  - [pub enum WINAPI](#pub-enum-winapi)
+    - [NtAllocateVirtualMemory](#ntallocatevirtualmemory)
+    - [NtProtectVirtualMemory](#ntprotectvirtualmemory)
+    - [NtCreateThreadEx](#ntcreatethreadex)
+    - [NtWriteVirtualMemory](#ntwritevirtualmemory)
+  - [pub fn set\_use\_breakpoint(enable:bool) {USE\_BREAKPOINT.store(enable, core::sync::atomic::Ordering::SeqCst);}](#pub-fn-set_use_breakpointenablebool-use_breakpointstoreenable-coresyncatomicorderingseqcst)
+  - [trait Into](#trait-into)
+  - [set\_breakpoint](#set_breakpoint)
+  - [set\_breakpoint获取的是线程寄存器,那么进程有没有寄存器?](#set_breakpoint获取的是线程寄存器那么进程有没有寄存器)
 
 # Breakpoint
 
@@ -484,9 +494,9 @@ Wait, logic check:
 3. 为什么要改 R10 而不是 RCX。  
 4. 为什么要去 Rsp + 0x30 找参数。
 
-## 源码
+# 源码
 
-### use core::ffi::c_void
+## use core::ffi::c_void
 
 dinvoke 项目的核心是与 Windows 操作系统 API 进行交互（FFI - 外部函数接口）。Windows API（以及 C 语言 API）大量使用 void* 指针来表示“任意类型的内存块”或“不透明句柄”
 
@@ -520,11 +530,9 @@ pub enum c_void {
 
 利用枚举来禁止实例化，利用 `repr(u8)` 来保证内存布局非零，利用 `lang item`来获得编译器的原生支持，最终造就了一个完全服务于 FFI 指针操作的特殊类型
 
-<<<<<<< Updated upstream
+
 ## 关于启用硬件端点时,调用NtGetContextThread的工作原理
-=======
-## 关于NtGetContextThread的工作原理
->>>>>>> Stashed changes
+
 
 ### 系统调用 (Syscall)：CPU 从用户模式（Ring 3）切换到内核模式（Ring 0）
 
@@ -584,8 +592,7 @@ pub enum c_void {
 ### 总结
 
 `NtGetContextThread` 是一个赋予程序强大“内省”（Introspection）能力的底层系统函数。它允许代码捕获并保存 CPU 在某一时刻的完整状态快照。在合法开发中，它是编写调试器（Debugger）和性能分析工具的基础。而在安全开发（无论是攻击还是防御）中，它被用于实现高级的代码钩子（Hook）、进程注入、反调试和反分析技术，是理解现代用户态恶意软件规避技术的关键组件之一
-=======
-<<<<<<< Updated upstream
+
 
 ### NtGetContextThread(NtCurrentThread(), &mut ctx)
 
@@ -613,4 +620,309 @@ NtGetContextThread 是 Windows 的Native API（原生 API），它不属于标�
 本文件中 pub fn NtGetContextThread并不是一个普通的“函数调用”，它是一个封装器（Wrapper）,通过dinvk!宏等其他包装手段,找到该函数的在内存中的地址,而进行的**直接调用**
 
 #### 这里为什么不使用indirect syscall?(重要)
->>>>>>> Stashed changes
+
+
+## pub enum WINAPI
+
+这个枚举的作用是 "用于在异常处理期间恢复真实执行意图的参数包"
+
+### NtAllocateVirtualMemory
+
+* 作用：在指定进程的虚拟地址空间中保留、提交或同时保留并提交内存区域。这是 Shellcode Loader 的第一步（申请内存放 Shellcode）。
+
+**函数原型与本项目中的定义:**
+
+```c
+NTSTATUS NtAllocateVirtualMemory(
+  HANDLE ProcessHandle,      // RCX (第1参)
+  PVOID *BaseAddress,        // RDX (第2参)
+  ULONG_PTR ZeroBits,        // R8  (第3参)
+  PSIZE_T RegionSize,        // R9  (第4参)
+  ULONG AllocationType,      // RSP+0x28 (第5参, 栈)
+  ULONG Protect              // RSP+0x30 (第6参, 栈) <-- 关键！
+);
+```
+
+```rust
+ NtAllocateVirtualMemory {
+        ProcessHandle: HANDLE,
+        Protect: u32,
+    },
+```
+
+* 欺骗逻辑：
+  * ProcessHandle：明面上可能传 0 或无效句柄，VEH中恢复为真实句柄（通常是 NtCurrentProcess() 即-1）。这可以绕过一些基于句柄权限的静态扫描。
+  *  Protect：这是 EDR 监控的重中之重。明面上传 PAGE_READONLY(0x02)，VEH 中恢复为 PAGE_EXECUTE_READWRITE (0x40)
+
+* 风险与隐蔽性：
+* 风险：Protect 是第 6 个参数，位于栈上。修改栈上数据（Rsp + 0x30）比修改寄存器更容易被内存扫描检测到（尽管在异常处理瞬特征：RWX（可读可写可执行）内存是极大的特征。现代 EDR会扫描内存属性，即使你欺骗了 API 调用，内存分配好之后依然是 RWX的，**会被定期扫描发现**。
+* 改进建议：先申请 RW（读写），写入 Shellcode后，再通过 NtProtectVirtualMemory 改为 RX（只读执行）。
+* 本项目是怎么做的?
+
+
+### NtProtectVirtualMemory
+
+* 作用：更改已提交内存页面区域的保护属性。通常用于在写入 Shellcode后将内存变为可执行（Malleable PE / Fluctuating）。
+
+**函数原型与本项目中的定义:**
+
+```c
+ NTSTATUS NtProtectVirtualMemory(
+         HANDLE ProcessHandle,      // RCX
+         PVOID *BaseAddress,        // RDX
+         PSIZE_T RegionSize,        // R8
+         ULONG NewProtect,          // R9  <-- 关键！
+         PULONG OldProtect          // RSP+0x28
+        );
+```
+
+```rust
+NtProtectVirtualMemory {
+         ProcessHandle: HANDLE,
+          NewProtect: u32,
+     }
+```
+
+* 欺骗逻辑：
+* NewProtect：位于 R9 寄存器。明面上可能传 PAGE_READONLY，VEH中恢复为 PAGE_EXECUTE_READ。
+* 优势：参数在寄存器中，修改速度极快且不留痕迹（不像栈内存那样有残留风险）。
+* 本项目是怎么做的?
+
+
+### NtCreateThreadEx 
+
+* 作用：创建一个新线程。这是 Shellcode 执行的常见方式（Remote Thread Injection 或本地线程执行）
+
+**函数原型与本项目中的定义:**
+
+```c
+NTSTATUS NtCreateThreadEx(
+  PHANDLE ThreadHandle,       // RCX
+  ACCESS_MASK DesiredAccess,  // RDX <-- 关键！
+  POBJECT_ATTRIBUTES ObjectAttributes, // R8
+  HANDLE ProcessHandle,       // R9
+  PVOID StartRoutine,         // RSP+0x28 (线程入口，即 Shellcod
+  PVOID Argument,             // RSP+0x30
+  ULONG CreateFlags,          // RSP+0x38         ...
+   );
+```
+
+```rust
+  NtCreateThreadEx {
+        ProcessHandle: HANDLE,
+        ThreadHandle: *mut HANDLE,
+        DesiredAccess: u32,
+        ObjectAttributes: *mut OBJECT_ATTRIBUTES
+    },
+```
+
+* 欺骗逻辑：
+* 这个 API 的参数非常多。枚举中存储了前 4 个参数（寄存器参数）。
+* DesiredAccess：明面上可能只给 THREAD_QUERY_INFORMATION，VEH中恢复为 THREAD_ALL_ACCESS。
+* ProcessHandle：同样可以欺骗目标进程句柄。
+* 最大风险：StartRoutine (Shellcode 地址)。
+* 这个参数在栈上（第 5 参）。目前的 WINAPI 枚举没有包含StartRoutine。这意味着 dinvk 的这个实现并没有欺骗线程入口地址！
+* 如果 EDR Hook 了这个函数，它一眼就能看到 StartRoutine指向的是一块不在磁盘文件（Floating Code）上的内存区域（即你的Shellcode），直接告警。
+* 改进：应该把 StartRoutine 也加入枚举，明面上传一个合法函数地址（如RtlExitUserThread），VEH 中替换为 Shellcode 地址。这叫 "ThreadStack Spoofing" 的一部分。
+
+
+### NtWriteVirtualMemory
+
+* 作用：向指定进程内存写入数据。用于进程注入（Injection）
+
+**函数原型与本项目中的定义:**
+
+```c
+NTSTATUS NtWriteVirtualMemory(
+         HANDLE ProcessHandle,       // RCX
+         PVOID BaseAddress,          // RDX
+         PVOID Buffer,               // R8  <-- 恶意数据源
+         SIZE_T NumberOfBytesToWrite,// R9
+         PSIZE_T NumberOfBytesWritten// RSP+0x28
+        );
+```
+
+```rust
+ NtProtectVirtualMemory {
+        ProcessHandle: HANDLE,
+        NewProtect: u32,
+    },
+```
+
+* 欺骗逻辑：
+* 主要欺骗 ProcessHandle（注入目标）和 Buffer（Shellcode 内容）。
+* 明面上可以写入一堆 0x00 或随机数据，VEH 中替换为真实的 Shellcode缓冲区指针。
+* 本项目是怎么做的?
+
+
+## pub fn set_use_breakpoint(enable:bool) {USE_BREAKPOINT.store(enable, core::sync::atomic::Ordering::SeqCst);}
+
+**这么写的根本原因是多核 CPU 的核心——内存模型（Memory Model）与乱序执行（Out-of-Order Execution）**:  
+1. 在单核 CPU 或 简单的微控制器 上，atomic bool = true 和 bool = true 几乎没有区别.
+2. 但在 现代多核 x64/ARM 处理器 上，情况完全不同。普通的赋值（bool = true）可能会导致致命的 Bug，而AtomicBool 配合 SeqCst 就是为了解决这些问题.普通赋值不保证顺序。在多线程环境下，这是灾难
+
+**USE_BREAKPOINT.store(enabled, Ordering::SeqCst)**的底层  
+A. 编译器层面（Compiler Fence）  
+编译器看到 SeqCst（顺序一致性），它被禁止重排指令。
+* 它必须保证：这行代码之前的所有读写操作（比如准备好 API 参数、计算好Hash），必须在这行代码生成汇编指令之前全部完成。
+* 它必须保证：这行代码之后的所有操作，必须在这行代码生成汇编指令之后才开始。
+
+B. CPU 硬件层面（Memory Barrier / MFENCE）  
+`MFENCE` (内存屏障) 的作用：  
+CPU 核心会对自己大喊一声：“停！”
+1. 清空写缓冲（Store Buffer）：把所有暂存在 CPU Cache / RAM）。
+2. 全员通知（Cache Coherence）：通过总线（Bus）告诉所有其他 CPU核心：“USE_BREAKPOINT的值变了！你们缓存里的旧值作废（Invalidate），下次读必须来主内存拿最新的！”
+3. 禁止乱序：CPU承诺，屏障之后的指令（比如后续的异常处理逻辑）绝对不会在屏障之前被“偷跑”执行。
+
+**为什么在这里（Hardware Breakpoint）必须要用？**  
+在 dinvk 的场景中，set_use_breakpoint(true) 是一个总开关。
+
+场景：
+1. 你准备好了 CURRENT_API（存了真参数）。
+2. 你开启了 USE_BREAKPOINT = true。
+3. 你调用了 ntdll 函数触发断点。
+
+
+如果用普通赋值（无屏障）：
+* CPU 可能会先执行第 3 步（调用函数，触发异常）。
+* 此时异常处理程序（VEH）跑起来了，去读 USE_BREAKPOINT。
+* 出事了：因为它可能读到 false（因为第 2步的写入还在缓存里，没刷到主内存），或者读到了 true 但 CURRENT_API还没写完（因为乱序）。
+* 后果：VEH认为“没开断点”，直接忽略异常，程序崩溃或执行了假参数（攻击失败）。
+
+
+用了 `SeqCst`：
+* 它保证：在调用 ntdll 之前，CURRENT_API 一定写好了，USE_BREAKPOINT 一定是true，且所有 CPU 核心（包括运行 VEH 的那个核心）都能立刻看到这个 `true`。
+
+* 普通赋值：只是改个值，CPU 爱啥时候改就啥时候改，别的核能不能看见随缘。
+* Atomic + SeqCst：是广播 + 承诺。
+* 广播：“所有人都得看到这个新值！”
+* 承诺：“我绝对不在这个赋值完成前偷跑后面的代码！”
+
+
+这就是为什么在操作系统内核、驱动、以及这种极度底层的 Shellcode开发中，必须使用原子操作的原因。它是多核世界的交通信号灯。
+
+## trait Into
+
+```rust
+core::convert
+pub trait Into<T>
+where
+    Self: Sized,
+```
+
+## set_breakpoint
+
+```rust
+    //设置ContextFlags,让ring0读取标记的调试寄存器,而不是所有状态
+    let mut ctx = CONTEXT {
+        ContextFlags: if cfg!(target_arch = "x86_64") { 
+            // 设置为当前线程的硬件调试寄存器（Dr0-Dr7）
+            CONTEXT_DEBUG_REGISTERS_AMD64 } else { CONTEXT_DEBUG_REGISTERS_X86 },
+        ..Default::default()
+    };
+```
+
+1.  结构体更新语法 (Struct Update Syntax)：..Default::default()  
+```rust
+let mut ctx = CONTEXT {
+     ContextFlags: ...,  // 显式设置的字段
+     ..Default::default() // 剩下的字段全部用 Default::default() 的值填充
+ };
+```
+
+* 痛点：CONTEXT 结构体非常庞大（在 x64 下有 30+ 个字段，如 Rax, Rbx, Rip, Dr0等）。如果手动初始化每一个字段为 0，代码会变得冗长且难维护。
+* Default Trait：在 types.rs 中，CONTEXT 实现了 Default trait（通常是通过#[derive(Default)] 或手动实现 unsafe { core::mem::zeroed() }）。这意味着Default::default() 会返回一个所有位都为 0 的 CONTEXT 实例。
+* 魔法：.. 告诉编译器：“除了我已经显式赋值的 ContextFlags字段外，其他所有字段都从 Default::default() 这个实例中拷贝过来。”
+* 结果：你得到了一个干干净净的、除了 ContextFlags 外全为 0 的结构体。
+* Default::default() 的隐蔽性作用: 将其他字段初始化为 0（尤其是 Dr6 和 Dr7 的某些位）是防止脏数据的关键
+* 如果复用了栈上的垃圾内存，Dr7可能包含随机值，导致断点行为异常（比如断点没生效，或者在此处不该断的时候断了）。
+* 使用 Default::default() 确保我们是在一张白纸上作画。
+
+1.  if cfg!(target_arch = "x86_64") { ... } else { ... }
+   
+* 编译期决议：这不是运行时的 if 判断。cfg! 宏在编译阶段就会被求值。
+* 消除死代码：
+* 如果你在 x64 机器上编译，编译器看到的实际上是：ContextFlags: CONTEXT_DEBUG_REGISTERS_AMD64
+* else 分支的代码会被完全剔除，不会生成任何汇编指令
+* 跨平台兼容：这让一份代码可以同时兼容 x86 和 x64架构，而不需要写两个分开的函数
+
+**项目中的作用：准备上下文查询请求**:  
+CONTEXT 结构体是 CPU寄存器状态的镜像。由于寄存器非常多（通用寄存器、浮点寄存器、调试寄存器等），一次性全部读取或写入开销很大。Windows 设计了 ContextFlags 字段作为过滤器：
+* CONTEXT_CONTROL：读取/写入控制寄存器（RIP, RSP, EFlags 等）。
+* CONTEXT_INTEGER：读取/写入通用整数寄存器（RAX, RBX, RCX 等）。
+* CONTEXT_DEBUG_REGISTERS：读取/写入调试寄存器（Dr0-Dr7）。
+
+此处设置 ContextFlags = CONTEXT_DEBUG_REGISTERS_AMD64的作用:  
+1.  精准查询：这意味着随后调用的 NtGetContextThread 只会去读取 Dr0-Dr7 的值填入ctx，而不会浪费时间去读取 RAX, RBX 等无关寄存器
+2. 安全修改：当我们修改完 ctx.Dr0 和 ctx.Dr7 后，调用 NtSetContextThread。内核看到 ContextFlags 里只有 DEBUG_REGISTERS 标志，它就只会更新物理CPU 的调试寄存器，绝对不会碰其他寄存器（比如正在使用的 RSP 或 RIP）
+* 重要性：如果如果不小心覆盖了 RIP（指令指针）或RSP（栈指针），程序立马崩溃。通过设置Flags，我们实现了外科手术式的精准修改
+
+## set_breakpoint获取的是线程寄存器,那么进程有没有寄存器?
+
+没有
+
+
+  寄存器是 CPU 核心的物理硬件状态。当 CPU
+  执行代码时，它是在执行某个线程的代码流。因此：
+   * RIP (指令指针)：属于线程（记录这个线程执行到哪了）。
+   * RSP (栈指针)：属于线程（记录这个线程的函数调用栈）。
+   * RAX, RBX (通用寄存器)：属于线程（记录这个线程的临时变量）。
+   * Dr0-Dr7 (调试寄存器)：绝对属于线程！
+
+  2. 硬件断点为何必须是线程级的？
+
+
+  想象一下：
+   * 你的电脑是 8 核 CPU，同时跑着 100 个进程，每个进程有 10 个线程（共 1000
+     个线程）。
+   * 硬件限制：每个 CPU 核心只有 4 个硬件断点寄存器（Dr0-Dr3）。全电脑加起来也就
+     32 个断点槽位。
+   * 如果断点属于进程：那所有线程都会触发断点？硬件根本不够用！
+
+
+  Windows 内核的设计（上下文切换）：
+   1. 保存现场：当线程 A 的时间片用完，CPU 要切换到线程 B 时，操作系统会把 CPU
+      所有的寄存器值（包括 Dr0-Dr7）保存到线程 A 的内核栈或 ETHREAD 结构中。
+   2. 恢复现场：操作系统从线程 B 的结构中读出它的寄存器值，写入物理 CPU。
+   3. 结果：线程 B 看到的 Dr0 是空的，而线程 A 看到的 Dr0 是你设置的断点地址。
+
+  这就是为什么 `set_breakpoint`
+  函数必须针对特定线程（`NtCurrentThread`）操作，而不是进程。
+
+
+  3. dinvk 的设计缺陷与隐患
+
+  你在 breakpoint.rs 中看到的：
+
+
+   1 NtGetContextThread(NtCurrentThread(), &mut ctx); // 获取当前线程
+   2 // ...
+   3 NtSetContextThread(NtCurrentThread(), &ctx);     // 设置当前线程
+
+
+  这意味着什么？
+   * 你的硬件断点 Hook 只对当前这一个线程生效！
+   * 多线程问题：如果目标程序（或你的 Loader）创建了新线程，或者其他线程也调用了
+     NtAllocateVirtualMemory，它们不会触发断点！因为它们有自己独立的寄存器上下文
+     ，它们的 Dr0 是空的。
+
+
+  这也是为什么高级 EDR 如此难缠：
+  EDR 注入的 DLL 会在所有新线程初始化时（通过 Hook LdrInitializeThunk
+  或内核回调），给每个新线程都设置上它的硬件断点。
+
+
+  你的 `breakpoint.rs` 目前只能保护当前主线程。 如果你的 Shellcode
+  在新线程里跑，或者你通过 CreateThread 启动了 Payload，这个 Hook
+  机制就失效了。这是单线程 Shellcode Loader 的局限性。
+
+  4. 总结
+
+
+   * 进程 = 房子的产权证（资源）。
+   * 线程 = 住在房子里的人（执行）。
+   * 寄存器 = 人手里的工具（状态）。
+   * 硬件断点 = 给特定人的工具做的记号。
+
+
+换了个人（切换线程），手里的工具（寄存器）也换了，记号（断点）自然就没了。所以，硬件断点永远是线程上下文（Context）的一部分，而非进程属性。

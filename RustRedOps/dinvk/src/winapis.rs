@@ -9,6 +9,7 @@ use obfstr::obfstr as s;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use crate::breakpoint::{is_breakpoint_enabled, set_breakpoint, WINAPI, CURRENT_API};
 use crate::module::{get_ntdll_address, get_module_address};
+// 注意dinvok宏的声明方式
 use crate::{types::*, dinvoke};
 
 /// Wrapper for the `LoadLibraryA` function from `KERNEL32.DLL`.

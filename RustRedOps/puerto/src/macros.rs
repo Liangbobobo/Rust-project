@@ -1,4 +1,35 @@
-     use core::fmt::{self, Write};
+    /// #[macro_export]会将宏提升到crate根
+    /// 写rust宏时,经常会出现ide提示失效
+    /// 使用cargo expand检测
+    /// 安装：cargo install cargo-expand(cargo expand --lib winapis)  
+    /// 或者新建一个tests/macro_test.rs 进行单独测试
+    
+    
+    
+    
+    use core::fmt::{self, Write};
+    
+    #[macro_export]
+    macro_rules! dinvok {
+        ($module:expr,$function:expr,$ty:ty,$($arg:expr),*) => {
+            {
+                let address=$crate::module::get_proc_address($module,$function,$crate::hash::fnv1a_utf16);
+
+                if address.is_null(){
+                    None
+                }else
+                {   
+                    // pub const unsafe fn transmute<Src, Dst>(src: Src) -> Dst
+                    let func=unsafe{
+                        core::mem::transmute::<*mut core::ffi::c_void,$ty>(address)
+                    };
+
+                    Some(unsafe{func($($arg),*)})
+                }
+            }
+        };
+    }
+
 
     #[macro_export]
     macro_rules! println {

@@ -1,4 +1,5 @@
 use crate::types::{PEB};
+use crate::{dinvok};
 
 #[inline(always)]
     /// 不调用windows api通过cpu的gs寄存器读取当前进程的peb地址
