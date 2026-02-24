@@ -119,10 +119,20 @@
 
 3. 内存中的真实样子 (x64 环境)
 
+```rust
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct UNICODE_STRING {
+    pub Length: u16,
+    pub MaximumLength: u16,
+    pub Buffer: *const u16,
+}
+```
+
 | 偏移  | 字段名        | 内存数据 (示例)       | 说明 |
 |-------|---------------|------------------------|------|
 | +...  | Length        | 0C 00                  | 二进制数 12，表示 12 字节 |
-| +...  | `Maximum...`  | 0E 00                  | 二进制数 14，表示缓冲区 ... |
+| +...  | `MaximumLength`  | 0E 00                  | 二进制数 14，表示缓冲区 ... |
 | +...  | (填充)        | 00 00 00 00            | 为了 8 字节对齐而存在的空白 |
 | +...  | Buffer        | `A0 55 44 33 22 ...    | 内存地址，指向真正存字符... |
 
@@ -203,12 +213,12 @@
 
 - 状态：互联网通用的标准，Rust 的 String 默认编码。
 - 定义：变长编码（1-4 字节）。
-  - ASCII 字符：1 字节 (和 ASCII 一模一样，0x41)。
-  - 中文：通常 3 字节 (中 -> E4 B8 AD)。
-  - Emoji：通常 4 字节。
+- ASCII 字符：1 字节 (和 ASCII 一模一样，0x41)。
+- 中文：通常 3 字节 (中 -> E4 B8 AD)。
+- Emoji：通常 4 字节。
 - Rust 类型：String, &str。
 
-  🔴 红队视角
+🔴 红队视角
 
 - C2 通信：你的木马回传数据给控制台（Cobalt Strike / Sliver）时，通常是 JSON 或 XML格式，这些全是 UTF-8。
 - 主要冲突：Rust 的世界是 UTF-8，Windows 的世界是 UTF-16。
@@ -216,21 +226,15 @@
 - 你调用 API 时：LdrLoadDll 需要 buffer: *mut u16 (这是 UTF-16)。
 - 必须转换：你必须时刻进行 UTF-8 -> UTF-16 的转换（expanding）和 UTF-16 -> UTF-8的转换（narrowing）。
 
-  ---
+**第二章：内存指纹深度对比（Hex View）**
 
-  第二章：内存指纹深度对比（Hex View）
-
-  假设我们要存储字符串 "A中"。
-
-  ┌────────────┬────────────────────┬────────────────────────────────────┬─────────┐
-  │ 编码       │ 内存十六进制 (Hex) │ 解释                                 │ 长度    │
-  ├────────────┼────────────────────┼────────────────────────────────────┼─────────┤
-  │ ASCII      │ 41 3F              │ 41('A'), '中'无法表示，变成3F('?')   │ 2 bytes │
-  │ GBK (ANSI) │ 41 D6 D0           │ 41('A'), D6 D0('中' Code Page)     │ 3 bytes │
-  │ UTF-16 LE  │ 41 00 2D 4E        │ 41 00('A'), 2D 4E('中')            │ 4 bytes │
-  │ UTF-16 BE  │ 00 41 4E 2D        │ 大端序，Windows 不用 这个           │ 4 bytes │
-  │ UTF-8      │ 41 E4 B8 AD        │ 41('A'), E4 B8 AD('中')            │ 4 bytes │
-  └────────────┴────────────────────┴────────────────────────────────────┴─────────┘
+| 编码       | 内存十六进制 (Hex) | 解释                                 | 长度    |
+|------------|--------------------|--------------------------------------|---------|
+| ASCII      | 41 3F              | 41('A'), '中'无法表示，变成3F('?')   | 2 bytes |
+| GBK (ANSI) | 41 D6 D0           | 41('A'), D6 D0('中' Code Page)     | 3 bytes |
+| UTF-16 LE  | 41 00 2D 4E        | 41 00('A'), 2D 4E('中')            | 4 bytes |
+| UTF-16 BE  | 00 41 4E 2D        | 大端序，Windows 不用 这个           | 4 bytes |
+| UTF-8      | 41 E4 B8 AD        | 41('A'), E4 B8 AD('中')            | 4 bytes |
 
 ### pe peb结构体及其字段编码格式
 
@@ -760,11 +764,8 @@ pub struct API_SET_NAMESPACE {
     /// 含义: ApiSetSchema 版本号（关键解析依据）  
     /// 指向数据: 无（纯数值）  
     /// 常见值:  
-    ///   - 2 = Windows 7  
-    ///   - 4 = Windows 8  
-    ///   - 6 = Windows 8.1 / Windows 10 (1507–1809)  
-    ///   - 10 = Windows 10 (1903+)  
-    ///   - 12 = Windows 11 (22H2+)  
+
+    ///   - 6 = Windows 8.1 / Windows 10 (1507–1809),及以后的版本   
     /// ⚠️ 解析前必须校验！不同版本内存布局差异极大
     pub Version: u32,
 
@@ -831,7 +832,7 @@ API_SET_NAMESPACE 是 Windows ApiSetSchema（API 集命名空间）的根描述�
 
 | 字段 | 详细说明 | 实战注意事项 |
 |------|----------|--------------|
-| `Version` | Schema 版本号：<br>• `2` = Win7<br>• `4` = Win8<br>• `6` = Win8.1 / Win10 早期<br>• `10` = Win10 19H1+<br>• `12` = Win11 22H2+ | 必须先校验！ 不同版本内存布局差异极大（如 Win10 19H1+ 增加 `HostOffset` 字段）。解析前需 `if header.Version != 6 { return Err(...) }` |
+| `Version` | Schema 版本号：<br>• `6` = Win8.1 / Win10 及以后 | 必须先校验！  |
 | `Size` | 整个 ApiSetMap 内存块大小（单位：字节），包含：<br>• 头部 (28B)<br>• Entry 数组 (Count × 24B)<br>• ValueEntry 数组<br>• 所有字符串数据区<br>• 哈希表 | 用于边界检查：`if offset >= header.Size { panic!("越界!") }` |
 | `Flags` | 位标志：<br>• `bit 0` = `1`：启用哈希表（`HashOffset` 有效）<br>• 其他位保留 | 多数 Win10 系统此值为 `1`（启用哈希加速） |
 | `Count` | 虚拟 DLL 条目总数（即 `API_SET_NAMESPACE_ENTRY` 数组长度） | 典型值：Win10 约 200~300 个（含 `api-ms-*`, `ext-ms-*`） |
@@ -846,6 +847,7 @@ EntryOffset字段,是一个RVA,和基址共同组成指向第一个API_SET_NAMES
 
 **内存布局全景（以 Version 6 为例）**
 
+``` text
 [API_SET_NAMESPACE] (28 bytes)
 │
 ├─ EntryOffset → [API_SET_NAMESPACE_ENTRY × Count] 
@@ -858,9 +860,8 @@ EntryOffset字段,是一个RVA,和基址共同组成指向第一个API_SET_NAMES
 ├─ HashOffset → [u32 哈希桶数组] (用于 O(1) 查找)
 │
 └─ (字符串数据区连续存储所有 Name/Value)
+```
 
-**版本兼容性**
-1. Win11 22H2+ (Version=12) 新增 HostOffset 字段（支持主机重定向），硬编码解析 Version 6 会导致崩溃
 
 **用途**
 1. 解析 IAT 中的 api-ms-win-*.dll → 真实 DLL（绕过 IAT Hook）
@@ -922,17 +923,20 @@ let ns_entries = from_raw_parts(ns_entry, (*map).Count as usize);
   这个内存地址开始，往后的一段连续内存中，存放了 Count 个
   API_SET_NAMESPACE_ENTRY 类型的结构体。”
 
-  内存中的实际样子大概是这样的：
+内存中的实际样子大概是这样的：
 
+```text
    1 内存地址 (假设结构体大小为 24 字节)
    2 -------------------------------------------------------
    3 0x1000  |  Entry 0 的内容 (24 bytes)  <-- ns_entry 指针指向这里
    4 0x1018  |  Entry 1 的内容 (24 bytes)
    5 0x1030  |  Entry 2 的内容 (24 bytes)
    6 ...
+```
 
-  2. 类型的大小 (Size of Type)
-  Rust 在编译时就已经确切知道了 API_SET_NAMESPACE_ENTRY
+2. 类型的大小 (Size of Type)
+
+Rust 在编译时就已经确切知道了 API_SET_NAMESPACE_ENTRY
   这个结构体占用了多少字节（假设使用了 #[repr(C)]，其大小是固定的）。
 
   当你写 for entry in ns_entries 时，实际上发生的是：
@@ -944,7 +948,9 @@ let ns_entries = from_raw_parts(ns_entry, (*map).Count as usize);
   在底层指针运算中，pointer + 1 并不代表地址加 1，而是代表 地址 +
   `size_of::<API_SET_NAMESPACE_ENTRY>()`。
 
-  3. 代码层面的等价逻辑
+3. 代码层面的等价逻辑
+
+```rust
   for entry in ns_entries 的底层逻辑在概念上等同于下面的伪代码：
 
     1 let size = std::mem::size_of::<API_SET_NAMESPACE_ENTRY>(); // 获取步长
@@ -959,14 +965,13 @@ let ns_entries = from_raw_parts(ns_entry, (*map).Count as usize);
    10
    11     // ... 你的循环体逻辑
    12 }
+```
 
-  总结
+  总结  
   之所以能区分出每个 entry，是因为：
-   1. 数据是连续的（由 Windows API 保证）。
-   2. 结构体大小是固定的（由 Rust 类型系统定义）。
-   3. Slice 知道步长：Slice
-      不仅仅是一个指针，它包含了类型定义。迭代器利用这个类型大小（步长）来准确地
-      跳到下一个结构体的起始位置。w
+  1. 数据是连续的（由 Windows API 保证）。
+  2. 结构体大小是固定的（由 Rust 类型系统定义）。
+  3. Slice 知道步长：Slice不仅仅是一个指针，它包含了类型定义。迭代器利用这个类型大小（步长）来准确地跳到下一个结构体的起始位置。
 
 #### API_SET_VALUE_ENTRY (重定向目标/宿主条目)
 
@@ -1161,6 +1166,8 @@ Ldr 是一个指向 PEB_LDR_DATA 结构体的指针 (*mut PEB_LDR_DATA)。
 它指向了关于进程已加载模块（如 DLLs）的详细信息。操作系统加载器（Loader）使用这个结构来维护所有加载到该进程地址空间的模块链表。
 
 - Rust 类型: 在 dinvk 中，它被定义为裸指针，意味着访问它需要使用unsafe 代码块。
+
+
 
 ## PEB_LDR_DATA
 
@@ -1663,6 +1670,24 @@ pub struct IMAGE_EXPORT_DIRECTORY {
     pub AddressOfNameOrdinals: u32,
 }
 ```
+
+物理上（内存里）存储的 3 个数组：
+AddressOfNames (u32数组)：只存名字
+元素[0]: 指向 "CreateFile"
+元素[1]: 指向 "ExitProcess"
+元素[2]: 指向 "VirtualAlloc"
+(注：这个数组必须按字母排序，为了方便二分查找)
+AddressOfNameOrdinals (u16数组)：只存映射关系
+元素[0]: 5 (对应 CreateFile)
+元素[1]: 2 (对应 ExitProcess)
+元素[2]: 0 (对应 VirtualAlloc)
+(注：它的顺序严格跟随上面的 Name 数组，是一一对应的)
+AddressOfFunctions (u32数组)：只存代码地址 (不管顺序，这是仓库)
+元素[0]: 0x3000 (这里放着 VirtualAlloc 的代码)
+... (其他无名函数)
+元素[2]: 0x2000 (这里放着 ExitProcess 的代码)
+...
+元素[5]: 0x1000 (这里放着 CreateFile 的代码)
 
 #### `IMAGE_EXPORT_DIRECTORY->AddressOfNames` 的内存归属解析
 

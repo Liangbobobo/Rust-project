@@ -192,7 +192,7 @@ pub fn get_proc_address(
     // initializes a new pe struct
     let pe = PE::parse(h_module);
     // 将传入的h_module转为usize方便后续计算
-    // 在win64下这是u64
+    // 在win64下usize是u64
     let h_module = h_module as usize;
 
     unsafe {
@@ -204,13 +204,12 @@ pub fn get_proc_address(
         };
 
         // retrieve export table 大小,用于判断该模块是否是export forwarding(函数转发)
-        let export_size = (*nt_header).OptionalHeader.DataDirectory
         // IMAGE_DIRECTORY_ENTRY_EXPORT 是索引值,在rust中slice和数组必须是usize
-        [IMAGE_DIRECTORY_ENTRY_EXPORT as usize]
-            .Size as usize;
+        let export_size = (*nt_header).OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT as usize]
+        .Size as usize;
 
         // 下面分别获取IMAGE_EXPORT_DIRECTORY 中AddressOfNames AddressOfNameOrdinals AddressOfFunctions三个字段(字段的类型都是u32,代表各自的RVA),后期会用RVA加上基址找到实际的指针地址
-        // 虽然指针是u32(4字节的),但AddressOfNameOrdinals指向的内容是u16(2字节).其余两个是u32
+        // 虽然指针是u32(4字节的),但AddressOfNameOrdinals指向的内容是u16(2字节)的数组.其余两个是u32的数组.这代表数组中的每个元素是2字节(2 字节的无符号整数)或者4字节的(4 字节的相对虚拟地址),这三个数组的长度由各字段的number表示
         // 在名称数组中i位置找到需要的函数,在序号数组中使用i获取对应的地址数组的下标idx,使用idx从地址数组中取函数的地址(RVA)
 
         // AddressOfNames(RVA)指向一个数组([u32]类型),数组中每个元素也是RVA
