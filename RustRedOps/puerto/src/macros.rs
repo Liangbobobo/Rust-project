@@ -9,19 +9,20 @@
     
     use core::fmt::{self, Write};
     
+    /// 由于p版更改了部分函数的参数和返回值,这里与d版的宏不同.
     #[macro_export]
     macro_rules! dinvok {
         ($module:expr,$function:expr,$ty:ty,$($arg:expr),*) => {
             {
-                let address=$crate::module::get_proc_address($module,$function,$crate::hash::fnv1a_utf16);
+                let address=$crate::module::get_proc_address(Some($module),Some($function),Some($crate::hash::fnv1a_utf16))
 
-                if address.is_null(){
+                if address.unwrap().is_null(){
                     None
                 }else
                 {   
                     // pub const unsafe fn transmute<Src, Dst>(src: Src) -> Dst
                     let func=unsafe{
-                        core::mem::transmute::<*mut core::ffi::c_void,$ty>(address)
+                        core::mem::transmute::<*mut core::ffi::c_void,$ty>(address.unwrap())
                     };
 
                     Some(unsafe{func($($arg),*)})

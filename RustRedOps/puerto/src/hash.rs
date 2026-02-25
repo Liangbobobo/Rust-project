@@ -30,7 +30,7 @@
 
 // 在 hash.rs 中增加一个处理模块名的逻辑，使其在哈希时自动忽略 .DLL后缀（类似于你做的大小写折叠）
 /// 直接传入&[u16]给hash函数
-pub fn fnv1a_utf16(data: &[u16]) -> u32 {
+pub  fn fnv1a_utf16(data: &[u16]) -> u32 {
     const FNV_OFFSET_BASIS: u32 = 0x3D91_4AB7; // 你自定义的种子
     const FNV_PRIME: u32 = 0xAD37_79B9;        // 你自定义的素数
 
@@ -79,22 +79,3 @@ pub fn fnv1a_utf16_from_u8(data: &[u8]) -> u32 {
     }
     hash
 }
-
-
-// 传入名字的fnv1a hash算法
-//  pub fn fnv1a(string: &str) -> u32 {
-
-//     /// 需要修改的种子
-//     const FNV_OFFSET_BASIS: u32 = 0x3D91_4AB7;
-
-//     /// 需要修改的素数(避免出现hash撞库)
-//     const FNV_PRIME: u32 = 0xAD37_79B9;
-
-//     let mut hash = FNV_OFFSET_BASIS;
-//     for &byte in string.as_bytes() {
-//         hash ^= byte as u32;
-//         hash = hash.wrapping_mul(FNV_PRIME);
-//     }
-
-//     hash
-// }

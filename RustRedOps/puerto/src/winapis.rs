@@ -1,5 +1,23 @@
-use crate::types::{PEB};
+use crate::module::{get_ntdll_address};
+use crate::types::{CONTEXT, HANDLE, NtGetThreadContextFn, PEB};
 use crate::{dinvok};
+
+
+pub fn NtGetContextThread(
+    hthread: HANDLE,
+    lpcontext: *mut CONTEXT
+) ->i32{
+dinvok!(
+    // pue版本中
+    get_ntdll_address(),
+    crate::hash::fnv1a_utf16("NtGetContextThread"),
+    NtGetThreadContextFn,
+    hthread,
+    lpcontext
+)
+.unwrap_or(0)
+}
+
 
 #[inline(always)]
     /// 不调用windows api通过cpu的gs寄存器读取当前进程的peb地址
