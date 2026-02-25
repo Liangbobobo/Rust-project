@@ -176,6 +176,8 @@ pub fn retrieve_module_add(
 /// 通过hash值找到的地址需要判断是否为转发地址,并进一步在get_forwarded_address中处理
 /// 
 /// peb通过ldr字段,维护着一个描述进程已加载模块的双向链表( PEB -> Ldr -> 模块链表 -> 导出基址 (DllBase))
+/// 
+/// 多次分析,仍然是函数参数不需要使用option,返回值使用option,下次重构时使用
 pub fn get_proc_address(
     h_module: Option<HMODULE>,
     function: hash_type,

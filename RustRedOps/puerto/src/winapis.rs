@@ -2,6 +2,10 @@ use crate::module::{get_ntdll_address};
 use crate::types::{CONTEXT, HANDLE, NtGetThreadContextFn, PEB};
 use crate::{dinvok};
 
+#[inline(always)]
+pub fn NtCurrentThread()->HANDLE {
+    -2isize as HANDLE
+}
 
 pub fn NtGetContextThread(
     hthread: HANDLE,
@@ -10,13 +14,14 @@ pub fn NtGetContextThread(
 dinvok!(
     // pue版本中
     get_ntdll_address(),
-    crate::hash::fnv1a_utf16("NtGetContextThread"),
+    0x0FFA8E6A,
     NtGetThreadContextFn,
     hthread,
     lpcontext
 )
 .unwrap_or(0)
 }
+
 
 
 #[inline(always)]

@@ -14,7 +14,7 @@
     macro_rules! dinvok {
         ($module:expr,$function:expr,$ty:ty,$($arg:expr),*) => {
             {
-                let address=$crate::module::get_proc_address(Some($module),Some($function),Some($crate::hash::fnv1a_utf16))
+                let address=$crate::module::get_proc_address(Some($module),Some($function),Some($crate::hash::fnv1a_utf16));
 
                 if address.unwrap().is_null(){
                     None

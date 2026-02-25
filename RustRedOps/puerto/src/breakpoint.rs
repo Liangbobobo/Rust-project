@@ -4,8 +4,10 @@
 // 偷梁换柱：当 CPU 执行到 API入口时触发硬件断点，异常处理程序（VEH）会捕获这个瞬间，从 CURRENT_API中取出真实的参数，写入寄存器，替换掉假的参数
 
 use crate::types::{
-    CONTEXT, CONTEXT_DEBUG_REGISTERS_AMD64, CONTEXT_DEBUG_REGISTERS_X86, HANDLE, OBJECT_ATTRIBUTES,
+    CONTEXT, CONTEXT_DEBUG_REGISTERS_AMD64, CONTEXT_DEBUG_REGISTERS_X86, HANDLE, OBJECT_ATTRIBUTES
 };
+
+use crate::winapis::{NtGetContextThread,NtCurrentThread};
 
 use core::{ffi::c_void, sync::atomic::AtomicBool};
 
@@ -43,6 +45,11 @@ pub(crate) fn set_breakpoint<T: Into<u64>>(address: T) {
     // 实现了隐藏导入表,但没有实现indirect syscall
     NtGetContextThread(NtCurrentThread(), &mut ctx);
 
+    // 修改阶段
+    // 需要引入[dependencies] 下添加 cfg_if
+    cfg_if::cfg_if!{
+
+    }
 }
 
 #[derive(Debug)]

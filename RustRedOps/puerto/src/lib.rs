@@ -17,4 +17,6 @@ pub mod winapis;
 pub mod helper;
 pub mod macros;
 pub mod syscall;
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub mod breakpoint;
