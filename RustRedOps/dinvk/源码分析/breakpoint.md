@@ -25,6 +25,7 @@
       - [1. RW0 (Bit 16-17) - Read/Write Control (触发条件)](#1-rw0-bit-16-17---readwrite-control-触发条件)
       - [2. LEN0 (Bit 18-19) - Length Control (监控长度)](#2-len0-bit-18-19---length-control-监控长度)
     - [三、 结合 breakpoint.rs 的实战解读](#三-结合-breakpointrs-的实战解读)
+      - [需要补足当new\_bit大于nmbr\_bits的风险](#需要补足当new_bit大于nmbr_bits的风险)
 - [源码](#源码)
   - [use core::ffi::c\_void](#use-coreffic_void)
   - [关于启用硬件端点时,调用NtGetContextThread的工作原理](#关于启用硬件端点时调用ntgetcontextthread的工作原理)
@@ -245,7 +246,7 @@ Dr7 是一个 32 位（在 x64 下通常也只用低 32 位）的寄存器。它
 
 ### 1. 寄存器位图结构 (Bit Layout)
 
-请复制下面的代码块，这是最准确的位图表示：
+位图表示：
 
 ```text
 31  30  29  28  27  26  25  24  23  22  21  20  19  18  17  16
@@ -340,12 +341,56 @@ Dr7 是一个 32 位（在 x64 下通常也只用低 32 位）的寄存器。它
 
 ### 三、 结合 breakpoint.rs 的实战解读
 
+x64 架构中，调试寄存器 Dr0 到 Dr3 存放的是内存地址,而 `Dr7` (Debug Control Register) 则是这些地址的“开关”和“配置器”  
+第 0-7 位：控制 Dr0-Dr3 的启用（局部启用/全局启用）    
+第 16-31 位：控制断点的类型（读、写、执行）和长度（1, 2, 4, 8 字节）
+
+不可以直接给dr7赋值,只需要修改dr7的部分位,达到控制dr0的目的就可以了.
+
 现在回过头看代码中的这行操作：
+
+逻辑是:  
+1. 构造mask掩码
+2. 挖坑（利用 & !）
+3. 填入（利用 |）
 
 ```rust
 // 代码：set_dr7_bits(ctx.Dr7, 0, 1, 1);
 // 意思是：从第 0 位开始，修改 1 个位，将其设为 1。
+
+fn set_dr7_bits<T: Into<u64>>(
+  current: T,     // 当前dr7的值
+  start_bit: i32, // 要修改的位的起始位置,从0开始
+  nmbr_bits: i32, // 要修改的位的长度(占几个位)
+  new_bit: u64    // 填入的新值
+  ) -> u64 
+  {
+    let current = current.into();
+    let mask = (1u64 << nmbr_bits) - 1;
+    (current & !(mask << start_bit)) | (new_bit << start_bit)
+}
 ```
+
+1. `<T:Into<u64>>`,trait bound,允许传入u32及其他可转为u64的类型.以便兼容不同系统调用的返回值
+2. start_bit,如果修改dr0的启用位,该值为0,如果修改dr0长度,该值为18
+3. nmbr_bits,启用位长度(宽度)1,类型位宽度为2
+4. `new_bit`：你要设置的状态。比如在控制位上 1 表示开启;在其他位(配置断点长度的LEN字段中 占用2个位),当该字段占用2个位时,就能表达四种状态,硬件规定了这四种变化对应的含义,其中3 表示 4 字节长度。什么意思?
+
+
+**let mask = (1u64 << nmbr_bits) - 1;**这里具体代表了哪些运算?即其运算过程是怎样的?这里的每个变量和运算符分别代表什么?  
+作用:产生一个低位全部是1,长度是numbr_bits的数字
+解析:  
+1. 1u64,一个u64类型的数值,值为1,二进制形式:000...0001
+2. nmbr_bits,要操作的类型的位宽,开启位是1,控制字段为2
+3. <<,左移位运算符,将二进制值左移指定位,右侧补0
+4. -,普通的减法运算符.因为是在1u64上操作的位,所以最后需要减去1,得到干净的位宽值,且在二进制中,从一个只有高位是1的值减1,会触发连续借位,导致高位的1变为0,后面的所有0都变为1.这样,就利用了二进制减法的错位特性快速生成位掩码
+
+
+**(current & !(mask << start_bit)) | (new_bit << start_bit)**  
+1. (current & !(mask << start_bit)),把代表位宽的mask这个临时掩码,左移位运算到start_bit(要操作的字段)的起始位置.之后取反,此时只有要修改的字段的位是0(除start_bit 到 start_bit +nmbr_bits),其他位都是1.之后和current做与运算(任何位与0相与都会变成0,任何位和1相与都会保留原值),此时,清空要修改的字段,保留了其他位的值
+2. |(new_bit << start_bit),首先通过(new_bit << start_bit)将新值左移到要修改的位置,后面的位变为0.之后进行或操作.任何位和0或操作都等于其自身.
+3. 作用:将新值精确的填入,构造其他位不变,只修改要操作的字段的目的
+
 
 这实际上只做了 **一件事**：
 
@@ -373,7 +418,24 @@ Dr6：状态中心 (The Status Register)
 - B0 - B3 (位 0-3)：如果 Dr0 触发，B0 置 1；如果 Dr1 触发，B1 置 1。  
 - BS (位 14)：Single Step。如果是单步调试（EFLAGS 的 TF 位）触发的，这一位会置 1。
 
----
+
+#### 需要补足当new_bit大于nmbr_bits的风险
+
+风险:  
+当nmbr_bits是1,new_bit是3时,即想要修改的位宽是1,但实际传入的新值超过了nmbr_bits表达的范围,就会出现污染旁位的情况.这可能开启另外一个断点,导致系统崩溃.
+
+改进:  
+```rust
+ // --- 新增：安全加固 ---
+         let safe_new_bit = new_bit & mask;
+    
+        // 使用 safe_new_bit 代替原来的 new_bit
+        (current & !(mask << start_bit)) | (safe_new_bit << start_bit)
+```
+
+假设nmbr_bits=2,那么mask是0b11,此时如果传入的new_bit=5(0b101)  
+以上,这种方式并不能达到目的,需要明显的错误控制来显示错误,进而修改(未完成)
+
 
 二、 Windows 异常处理流程 (Exception Dispatching)
 

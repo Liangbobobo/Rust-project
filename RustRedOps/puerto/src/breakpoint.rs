@@ -3,6 +3,8 @@
 // 真实的意图：真实的恶意参数（例如：申请 Read-Write-Execute内存）被打包封装在这个 WINAPI 枚举中，并存储在全局变量 CURRENT_API 里
 // 偷梁换柱：当 CPU 执行到 API入口时触发硬件断点，异常处理程序（VEH）会捕获这个瞬间，从 CURRENT_API中取出真实的参数，写入寄存器，替换掉假的参数
 
+
+// use cfg_if;
 use crate::types::{
     CONTEXT, CONTEXT_DEBUG_REGISTERS_AMD64, CONTEXT_DEBUG_REGISTERS_X86, HANDLE, OBJECT_ATTRIBUTES
 };
@@ -47,10 +49,25 @@ pub(crate) fn set_breakpoint<T: Into<u64>>(address: T) {
 
     // 修改阶段
     // 需要引入[dependencies] 下添加 cfg_if
-    cfg_if::cfg_if!{
+    // cfg_if::cfg_if!手动指定路径,不需要在本文件中use cfg
+   cfg_if::cfg_if!{
 
+    if #[cfg(target_arch="x86_64")]{
+
+        // dr0(寄存器)
     }
+   }
+   
 }
+
+
+/// 
+fn set_dr7_bits<T:Into<u64>>(curent:T,start_bit:i32,num_bits:i32,new_bit:u64)->u64 {
+    
+    // 
+    let current=curent.into();
+}
+
 
 #[derive(Debug)]
 /// 暂存真实的API参数
