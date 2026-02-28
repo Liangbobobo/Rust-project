@@ -1,5 +1,9 @@
 //! Hardware breakpoint management utilities.
 
+
+// 1. win64下,所有通用寄存器都是64位,
+
+
 use core::ffi::c_void;
 use core::ptr::addr_of_mut;
 use core::sync::atomic::{Ordering, AtomicBool};
@@ -180,7 +184,7 @@ pub enum WINAPI {
 // 允许在 unsafe 函数体中直接进行 unsafe 操作（Rust 2024 edition 风格）
 #[allow(unsafe_op_in_unsafe_fn)]
 
-// extern "system"告诉 Rust 编译器使用 Windows标准的调用约定（stdcall 的变体）这样操作系统（Windows内核）才能正确地回调这个函数
+// extern "system"告诉 Rust 编译器使用 Windows标准的调用约定（stdcall 的变体）这样操作系统（Windows内核）才能正确地回调这个函数.
 pub unsafe extern "system" fn veh_handler(exceptioninfo: *mut EXCEPTION_POINTERS) -> i32 {
     
     // 判断异常是否是硬件断点触发的单步调试异常
@@ -196,7 +200,6 @@ pub unsafe extern "system" fn veh_handler(exceptioninfo: *mut EXCEPTION_POINTERS
     // 异常发生时,rip指向导致异常的那条指令,即rip应指向dr0中在set_breakpoint设置的api地址
     // .Dr7 & 1,取出dr7的第0位,确认断点是在硬件层面开启的
     if (*context).Rip == (*context).Dr0 && (*context).Dr7 & 1 == 1 {
-
         // addr_of_mut!(CURRENT_API),获取全局变量CURRENT_API的裸指针
         if let Some(current) = (*addr_of_mut!(CURRENT_API))
         // 获取option中的值,并将原值设为NONE
