@@ -1,6 +1,29 @@
 use crate::module::{get_ntdll_address};
-use crate::types::{CONTEXT, HANDLE, NtGetThreadContextFn, PEB};
+use crate::types::{CONTEXT, HANDLE, NtGetThreadContextFn, PEB,NtSetThreadContextFn};
 use crate::{dinvok};
+
+/// Returns the default heap handle for the current process from the PEB.
+#[inline(always)]
+pub fn GetProcessHeap() -> HANDLE {
+    let peb = NtCurrentPeb();
+    (unsafe { *peb }).ProcessHeap
+}
+
+
+pub fn NtSetContextThread(
+    hthread: HANDLE,// 目标线程句柄
+    lpcontext: *const CONTEXT,// 新的上下文数据(只读指针)
+) -> i32 {
+    dinvok!(
+        get_ntdll_address(),
+        0xAD4FA23E,
+        NtSetThreadContextFn,
+        hthread,
+        lpcontext
+    )
+    .unwrap_or(0)
+}
+
 
 #[inline(always)]
 pub fn NtCurrentThread()->HANDLE {

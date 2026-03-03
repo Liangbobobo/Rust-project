@@ -228,7 +228,7 @@ pub unsafe extern "system" fn veh_handler(exceptioninfo: *mut EXCEPTION_POINTERS
 
 
                 // NtProtectVirtualMemory 原型：(Handle, Base, Size, NewProtect,OldProtect)
-                // 直接修改寄存器，最简单高效
+                // 直接修改寄存器，最简单高效.
                 WINAPI::NtProtectVirtualMemory { 
                     ProcessHandle, 
                     NewProtect, 

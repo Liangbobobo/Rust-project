@@ -6,14 +6,20 @@
 // 1.在win64中,地址必须是8字节,64位的
 // 2.在win64中,通用寄存器都是64位的
 
+
+// 优化及问题:
+// 1.veh_handle末尾关掉了断点,如果不关会怎么样,如何让断点一直开着,每次调用都拦截? 
+// 2.current_api多线程不安全,如何用thread local storage来为每个线程维护独立的hook状态,支持多线程并发注入?
+// 未在winapis.rs文件中定义NtAllocateVirtualMemory, NtProtectVirtualMemory 等,封装系统调用,导致出现set_point() unuse警告,需要完善
 // use cfg_if;
 use crate::types::{
-    CONTEXT, CONTEXT_DEBUG_REGISTERS_AMD64, CONTEXT_DEBUG_REGISTERS_X86, HANDLE, OBJECT_ATTRIBUTES,EXCEPTION_POINTERS,EXCEPTION_SINGLE_STEP,EXCEPTION_CONTINUE_SEARCH
+    CONTEXT, CONTEXT_DEBUG_REGISTERS_AMD64, CONTEXT_DEBUG_REGISTERS_X86, HANDLE, OBJECT_ATTRIBUTES,EXCEPTION_POINTERS,EXCEPTION_SINGLE_STEP,EXCEPTION_CONTINUE_SEARCH,EXCEPTION_CONTINUE_EXECUTION
 };
 
-use crate::winapis::{NtGetContextThread,NtCurrentThread};
+use crate::winapis::{NtGetContextThread,NtSetContextThread,NtCurrentThread};
 
 use core::{ffi::c_void, sync::atomic::AtomicBool};
+use core::ptr::addr_of_mut;
 
 pub static mut CURRENT_API: Option<WINAPI> = None;
 
@@ -57,9 +63,16 @@ pub(crate) fn set_breakpoint<T: Into<u64>>(address: T) {
     if #[cfg(target_arch="x86_64")]{
 
         // dr0(寄存器)
+        ctx.Dr0 = address.into();
+        ctx.Dr6 = 0x00;
+        ctx.Dr7 = set_dr7_bits(ctx.Dr7, 0, 1, 1);
+    }else{
+        ctx.Dr0 = address.into() as u32;
+            ctx.Dr6 = 0x00;
+            ctx.Dr7 = set_dr7_bits(ctx.Dr7 as u64, 0, 1, 1) as u32;
     }
    }
-   
+   NtSetContextThread(NtCurrentThread(), &ctx);
 }
 
 
@@ -92,6 +105,12 @@ pub enum WINAPI {
     ///
     ///
     NtAllocateVirtualMemory { ProcessHandle: HANDLE, Protect: u32 },
+
+    /// represents the NtProtectVirtualMemory call
+    NtProtectVirtualMemory{
+        ProcessHandle:HANDLE,
+        NewProtect:u32,
+    },
 
     /// Represents the `NtCreateThreadEx` call.
     NtCreateThreadEx {
@@ -137,7 +156,7 @@ pub unsafe extern "system" fn veh_handler(exceptioninfo:*mut EXCEPTION_POINTERS)
     ((*context).Dr7 &1)==1 {
         
 
-        let Some(current) =  (*addr_of_mut!(CURRENT_API))
+        if let Some(current) =  (*addr_of_mut!(CURRENT_API))
         .take(){
             match current {
 
@@ -158,11 +177,40 @@ pub unsafe extern "system" fn veh_handler(exceptioninfo:*mut EXCEPTION_POINTERS)
                     *(((*context).Rsp+0x30) as *mut u32)=Protect;
 
 
+                },
+
+                // NtProtectVirtualMemory原型参数:(Handle, Base, Size, NewProtect,OldProtect)
+                // 修改第一个和第四个参数
+                WINAPI::NtProtectVirtualMemory { ProcessHandle, NewProtect }=>{
+                    (*context).R10 = ProcessHandle as u64;
+                    (*context).R9  = NewProtect as u64;
+                },
+                 WINAPI::NtCreateThreadEx { 
+                    ProcessHandle,
+                    ThreadHandle,
+                    DesiredAccess,
+                    ObjectAttributes
+                } => {
+                    (*context).R10 = ThreadHandle as u64;
+                    (*context).Rdx = DesiredAccess as u64;
+                    (*context).R8  = ObjectAttributes as u64;
+                    (*context).R9  = ProcessHandle as u64;
+                },WINAPI::NtWriteVirtualMemory { 
+                    ProcessHandle,
+                    Buffer,
+                    NumberOfBytesToWrite,
+                } => {
+                    (*context).R10 = ProcessHandle as u64;
+                    (*context).R8  = Buffer as u64;
+                    (*context).R9  = NumberOfBytesToWrite as u64;
                 }
             }
-            todo!()
+            (*context).Dr0 = 0x00;
+            (*context).Dr6 = 0x00;
+            (*context).Dr7 = set_dr7_bits((*context).Dr7, 0, 1, 0);
         }
+        return EXCEPTION_CONTINUE_EXECUTION;
     }
-    todo!()
-
+    
+EXCEPTION_CONTINUE_SEARCH
 }

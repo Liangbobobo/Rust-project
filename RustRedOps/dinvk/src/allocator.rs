@@ -11,7 +11,7 @@ use crate::{types::*, winapis::GetProcessHeap};
 pub struct WinHeap;
 
 impl WinHeap {
-    /// Returns the handle to the default process heap.
+    /// Returns the handle to the default process heap. 
     #[inline]
     fn get(&self) -> HANDLE {
         GetProcessHeap()
