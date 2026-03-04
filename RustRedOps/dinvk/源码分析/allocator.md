@@ -99,9 +99,58 @@ dealloc时手动写0。这是为了反取证。在高级取证中，内存释放
 我们在 GlobalAlloc内部绝对不能调用任何会触发内存分配的东西（比如打印日志到String）。否则：alloc -> log -> alloc -> log…… 瞬间爆栈。
 
 
-## 源码
+# 源码
 
-### winapis::GetProcessHeap
+**在no_std环境下,为了使用依赖堆内存的Vec\String\HashMap等,必须提供自定义内存分配.其流程如下:(以dinvk的allocator.rs为例)**  
+1. 契约绑定：实现 GlobalAlloc Trait,这是最关键的一步。Rust 编译器不关心你用什么方法要内存，它只认 GlobalAlloc协议
+* 你定义的 pub struct WinHeap; 就像是一个内存分配器的身份声明
+* 通过 unsafe impl GlobalAlloc forWinHeap，你正式告诉编译器：“以后所有关于堆内存的操作，都请转交给这个结构体的方法来处理”
+
+2. 资源寻址：获取堆句柄 (HANDLE),通过`fn get(&self) -> HANDLE { GetProcessHeap() }`
+* 背景：Windows进程启动时，内核会分配一个默认堆。所有的内存操作都需要这把“钥匙”（句柄）
+* 实现：通过 self.get() 获取这个句柄。在你的项目中，这个句柄是通过 winapis模块获取的（通常是读取 PEB 里的 ProcessHeap 字段）
+
+3. 底层链接：与 ntdll.dll 握手
+* dinvk使用了windows-targets这个crate.puerto中使用的是unsafe  extern "system".这两种方式都是声明外部函数的
+* 仍然不安全,可能在IAT中留下记录,应使用module.rs中的功能找到系统中分配内存的函数地址在执行内存分配
+
+**当在项目中发生内存分配时会:**  
+当在项目中（或者 Rust 的 alloc库）调用这个分配器时  
+
+* 内存申请阶段 (alloc 被触发),当代码执行 let v = Vec::with_capacity(10); 时：
+   1. 计算尺寸：alloc 库根据 u8 类型和长度 10 算出 Layout（大小为 10 字节）。
+   2. 句柄获取：调用 self.get()，拿到进程默认堆的地址。
+   3. 零大小检查：代码中有一个 if size == 0 { return null_mut();}。这是为了防止向 Windows 堆管理器申请 0字节导致的未定义行为，保护了程序的健壮性。
+   4. 内核调用：执行 RtlAllocateHeap。
+   5. 返回地址：Windows 从堆中划出一块地，返回起始地址给 Rust，此时 Vec就拥有了真实的物理内存。
+
+
+* 内存释放阶段 (dealloc 被触发),当 v 离开作用域（Drop）时：
+   1. 空指针判定：if ptr.is_null() { return; } 确保不会释放一个空地址。
+   2. 【关键】红队反取证动作：  
+    1. unsafe { core::ptr::write_bytes(ptr, 0, layout.size()) };
+       * 功能：在把内存还给系统之前，用 0 彻底抹除这块区域的内容。
+       * 意义：即使 EDR或取证工具在随后扫描内存，也无法通过残留数据分析出你刚才在这里存过什么敏感信息（如 API Hash 或 Shellcode）。
+
+* 正式释放：调用 RtlFreeHeap，内存块回归系统池。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## winapis::GetProcessHeap
 
 ```rust
 #[inline(always)]
