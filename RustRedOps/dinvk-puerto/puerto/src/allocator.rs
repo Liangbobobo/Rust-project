@@ -12,6 +12,10 @@
 // 待优化
 // 1.链接外部win的函数时,会在IAT中留下记录
 
+
+// 该文件实现内存分配的逻辑?
+
+
 use core::{alloc::GlobalAlloc, ptr::null_mut};
 use core::ffi::{c_void};
 // 获取当前进程的默认heap handle
@@ -39,6 +43,8 @@ unsafe impl GlobalAlloc for WinHeap {
 
         // self代表一个WinHeap的实例,等同WinHeap::get(&self)
         let heap =self.get();
+
+        // 
         let size =layout.size() ;
 
         // size为0的情况
@@ -49,7 +55,7 @@ unsafe impl GlobalAlloc for WinHeap {
         unsafe {
             RtlAllocateHeap(
                 heap,
-                0,
+                0,// 不要使用0x00000008这个有明显特征的magic num
                 size
             ) as *mut u8
         }
@@ -61,7 +67,7 @@ unsafe impl GlobalAlloc for WinHeap {
             return;
         }
     
-        unsafe { core::ptr::write_bytes(ptr, 0, layout.size()) };
+        unsafe { core::ptr::write_bytes(ptr, 0, layout.size()) };// 释放前将内存数据归0,避免被扫描
         unsafe { RtlFreeHeap(self.get(), 0, ptr.cast()); }
     }
 
