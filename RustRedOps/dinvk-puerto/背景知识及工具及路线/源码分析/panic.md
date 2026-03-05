@@ -1,11 +1,19 @@
-# 什么是panic
+- [Rust中的panic](#rust中的panic)
+  - [panic机制](#panic机制)
+    - [core::panic::PanicInfo](#corepanicpanicinfo)
+- [panic时背后发生了什么](#panic时背后发生了什么)
+  - [dinvk中panic的逻辑](#dinvk中panic的逻辑)
+- [重构](#重构)
+
+
+# Rust中的panic
 
 **Rust中,panic指程序遇到了无法恢复的错误(Unrecoverable Error)如:**  
 1. 数组越界-Index out of bounds
 2. 显示调用-panic!("...")
 3. unwrap()在None上的调用
 
-## std中的panic
+## panic机制
 
 Rust std分层非常严谨,Panic就是其中代表  
 
@@ -22,7 +30,7 @@ Rust std分层非常严谨,Panic就是其中代表
 
 
 
-
+**painc的结构**
 1. 最底层：core::panic (模块)-定位:基石
 *  core 库是完全独立于操作系统的，不依赖堆分配，也不依赖libc。它可以运行在裸机（Bare Metal）或你的 Shellcode 中
 *  功能：它定义了 Panic 机制中最抽象的数据结构

@@ -31,7 +31,8 @@
         };
     }
 
-
+    
+    // 源d项目中的console.rs完全移入了macro中
     #[macro_export]
     macro_rules! println {
         ($($arg:tt)*) => {

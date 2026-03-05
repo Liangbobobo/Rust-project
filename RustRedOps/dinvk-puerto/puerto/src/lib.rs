@@ -18,6 +18,7 @@ pub mod helper;
 pub mod macros;
 pub mod syscall;
 mod allocator;
+mod painc;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub mod breakpoint;
