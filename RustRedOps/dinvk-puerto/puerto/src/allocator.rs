@@ -2,7 +2,7 @@
 // 在有std的rust项目中,不需要关心内存分配.但是在这种#![no_std]环境中不手写allocator:
 // 会失去默认分配器,std中有一个基于os api(如win下的HeapAlloc)的全局分配器,在#![no_std]中自然没有了这个默认分配器
 // 项目中使用了Vec String等,这些定义在rust alloc库中.但alloc库本身只负责逻辑,它需要一个底层搬运工帮它向os申请内存
-// 如果只写了 extern crate alloc,不提供分配器,便器在链接时会出现,error: no global memory allocator found
+// 如果只写了 extern crate alloc,不提供分配器,rustx在链接时会出现,error: no global memory allocator found
 
 // allocator的作用:
 // 将rust的高层代码(如 String::from("..."))的内存申请,转为底层windows原生系统调用
@@ -13,11 +13,14 @@
 // 1.链接外部win的函数时,会在IAT中留下记录
 
 
-// 该文件实现内存分配的逻辑?
+// 该文件实现内存分配的逻辑是什么?一步一步的说明,比如1.新建一个空WinHeap结构,作为.. 2. 在该结构体实现get获取..
 
 
 use core::{alloc::GlobalAlloc, ptr::null_mut};
 use core::ffi::{c_void};
+use core::ptr::write_bytes;
+use spin::lock_api::Mutex;
+
 // 获取当前进程的默认heap handle
 use crate::{types::HANDLE, winapis::GetProcessHeap};
 
@@ -44,21 +47,31 @@ unsafe impl GlobalAlloc for WinHeap {
         // self代表一个WinHeap的实例,等同WinHeap::get(&self)
         let heap =self.get();
 
-        // 
+        // 获取调用者需要的内存大小,详见winapi
         let size =layout.size() ;
 
         // size为0的情况
         if size==0 {
             return null_mut();
         }
-        
         unsafe {
-            RtlAllocateHeap(
+            let ptr =RtlAllocateHeap(
                 heap,
                 0,// 不要使用0x00000008这个有明显特征的magic num
                 size
-            ) as *mut u8
+            );
+
+            
+            // 需要判断RtlAllocateHeap返回指针是否为空
+            // write_bytes()返回(),而()不能直接转为*mut u8,所以这里不能在RtlAllocateHeap中链式调用write_bytes()
+            if !ptr.is_null() {
+                write_bytes(ptr as *mut u8, 0, size);
+            }  
+
+            // 这里与ptr as *mut u8在生成的二进制文件中没有任何区别,不会产生额外的指令
+            ptr.cast()    
         }
+        
     }
 
       /// Deallocates memory using the custom heap.
@@ -80,7 +93,7 @@ unsafe impl GlobalAlloc for WinHeap {
 // 当运行cargo build或cargo test时,链接器(如MSVC的link.exe)会扫描你提供的所有库文件(lib文件)及rustc自动链接的一些win的基础库(如ntdll kernel32)等,发现对应的函数定义,链接器就会将这里的代码和ntdll里面的函数关联起来
 // windows-targets 宏只是指定了在哪个模块里面找,而extern会扫描所有模块.当出现重名函数时windows-targets 宏就很有优势了
 unsafe  extern "system"{
-    fn RtlFreeHeap(heap: HANDLE, flags: u32, ptr: *mut c_void) -> i8;
+    fn RtlFreeHeap(heap: HANDLE, flags: u32, ptr: *mut c_void) -> u32;// 为了兼容改为u32,详见winapi的分析
     fn RtlAllocateHeap(heap: HANDLE, flags: u32, size: usize) -> *mut c_void;
 }
 
