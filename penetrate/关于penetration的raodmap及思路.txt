@@ -1,0 +1,18 @@
+在渗透测试的生命周期中，“开门” 的专业术语叫 初始访问 (Initial Access)
+
+1. Web 脆弱性研究 (Web Vulnerability Research),绝大多数服务器的“门”都是通过 Web 端口（80/443）暴露的
+* 必修课：命令注入 (RCE)、文件上传漏洞、SQL 注入、反序列化漏洞
+* 重点：关注 中间件漏洞（如 Nginx、IIS、Tomcat、Weblogic）和 CMS 框架漏洞
+
+2. 服务侧漏洞利用 (Service-Side Exploits)
+* 技术：针对 RDP (3389)、SMB (445)、Redis、MySQL 等公开服务的已知漏洞利用。
+* 工具：熟悉 Metasploit (MSF) 的使用，但更要理解 漏洞原理（例如永恒之蓝MS17-010 的内存损坏原理）
+
+3. 社会工程学与钓鱼 (Phishing & Social Engineering),在现代高强度防御环境下，Web 漏洞越来越少，“人的弱点” 成了最常被利用的门
+* 场景：发送一个带有宏的 Excel，或者一个伪装成补丁的 .exe
+
+4. 边界资产发现 (Reconnaissance / Attack Surface Management)
+* 技术：子域名挖掘、端口扫描（nmap）、指纹识别（Identifying Tech Stack）、目录扫描（dirsearch/ffuf）
+* 核心：渗透的本质是信息差。你知道目标用了一个 3 年没更新的 WordPress插件，而管理员不知道，这就是你的门
+
+关于
