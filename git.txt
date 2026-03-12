@@ -1,9 +1,11 @@
 不能有仓库密钥
-不能上传单个大于50M的文件
+github不要上传大文件，否则.git文件过大，影响使用 不能上传单个大于50M的文件
 
 项目中存在他人的仓库(git clone的其他仓库)如何提交?
-删除子项目(他人仓库)中的.git文件
+1. 回到clone仓库的上一层文件夹(如果显示fatal: pathspec 'uwd/uwd' did not match any files,表示路径层级不对再向上一层文件夹) 这里的uwd是文件夹名称
+git rm -r --cached uwd/uwd
 
+2. 
 
 关于换行符:
 git config --global core.autocrlf true
@@ -40,7 +42,7 @@ git push -u origin main
 git pull --rebase origin main
 
 
-github不要上传大文件，否则.git文件过大，影响使用
+
 
 git add .  向这个本地的代码仓库添加当前目录的所有改动
 
