@@ -1,0 +1,41 @@
+[package]
+name = "uwd"
+version = "0.3.5"
+edition = "2024"
+description = "Call Stack Spoofing for Rust"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/joaoviictorti/uwd"
+homepage = "https://github.com/joaoviictorti/uwd"
+readme = "README.md"
+build = "build.rs"
+keywords = ["spoofing", "stack", "windows", "rust", "redteam"]
+categories = ["os", "security"]
+include = [
+    "src/**",
+    "build.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+]
+
+[lib]
+doctest = false
+
+[dependencies]
+bitfield = "0.19.0"
+obfstr = "0.4.4"
+dinvk = "0.4.2"
+anyhow = { version = "1.0.98", default-features = false }
+memchr = { version = "2.7.4", default-features = false }
+
+[build-dependencies]
+cc = "1.2.19"
+nasm-rs = "0.3.0"
+
+[features]
+default = []
+desync = []
+
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = ["x86_64-pc-windows-gnu", "x86_64-pc-windows-msvc"]
