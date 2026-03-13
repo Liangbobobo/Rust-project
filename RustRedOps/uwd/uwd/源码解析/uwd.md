@@ -1,9 +1,62 @@
+- [背景知识](#背景知识)
+  - [win64 异常处理机制及对应的uwd源码](#win64-异常处理机制及对应的uwd源码)
+    - [UnwindCode: UNWIND\_CODE](#unwindcode-unwind_code)
+  - [扩展-栈对齐](#扩展-栈对齐)
+  - [扩展-叶子函数/非叶子函数(Non-leaf Function)](#扩展-叶子函数非叶子函数non-leaf-function)
+  - [扩展-shadow space](#扩展-shadow-space)
+  - [扩展-Prolog / Prologue(函数序言)](#扩展-prolog--prologue函数序言)
+    - [prolog的作用](#prolog的作用)
+    - [prolog常见操作](#prolog常见操作)
+    - [prolog的基础知识](#prolog的基础知识)
+  - [扩展-Epilog(函数尾声)](#扩展-epilog函数尾声)
+  - [扩展-栈和栈帧](#扩展-栈和栈帧)
+    - [序言格式二](#序言格式二)
+  - [扩展-汇编指令](#扩展-汇编指令)
+    - [call](#call)
+    - [ret](#ret)
+    - [push](#push)
+    - [sub](#sub)
+    - [add](#add)
+    - [20h](#20h)
+    - [pop](#pop)
+  - [扩展-寄存器](#扩展-寄存器)
+    - [rsp](#rsp)
+    - [rbp](#rbp)
+    - [rip](#rip)
+
+
 # 背景知识
 
 ## win64 异常处理机制及对应的uwd源码
 
-在 x86 时代，回溯栈靠的是 EBP 链(帧指针)。每个函数在序言(prolog)中都会执行push ebp;mov ebp,esp.回溯时,只需要沿着ebp指向的地址像链表一样向上爬即可.  
-但在 x64下，为了释放RBP寄存器作为通用寄存器使用,获取性能，取消了这种机制。win64引入了基于表格的异常处理机制,编译器在编译每个函数时,会额外生成一段元数据,记录这个函数如何操作栈\保存了哪些寄存器.这些袁术的索引被存放在PE文件的.pdata段,即Exception Directory.源码中的IMAGE_RUNTIME_FUNCTION就是这个索引iao中的每一个条目.Windows 改用一种名为 Exception Directory(.pdata) 的机制：
+在 x86 时代，回溯栈靠的是 EBP 链(帧指针)。每个函数在序言(prolog)中都会执行push ebp;mov ebp,esp.回溯时,只需要沿着ebp指向的地址像链表一样向上爬即可.x86下这是必须的
+
+但在 x64下，通过rip查表就可以知道当前函数栈帧大小,不需要RBP指针也能精准回溯.现代编译器(MSVC,Rustc)默认开启帧指针省略,在ntdll.dll等系统组件中,绝大多数函数不再使用RBP序言,这种情况下,RBP成为一个通用易失性寄存器,编译器多了一个可使用的寄存器做高速运算,可以减少内存访问,同时省去了push mov pop等指令(但并没有完全取消在1.调试中2.动态分配(函数内部使用alloca()或变长数组,导致栈帧大小在编译时无法确定,编译器必须使用RBP锁定局部变量的访问基准)3.某些复杂的内核函数依然保留)   
+即win64下,运行核心逻辑是依靠表(.pdata)回溯,而不是依靠链(RBP chain)回溯  
+win64引入的基于表格的异常处理机制,编译器在编译每个函数时,会额外生成一段元数据(.xdata节,对应uwd中UNWIND_INFO结构体),记录这个函数如何操作栈\保存了哪些寄存器.这些元数据的索引被存放在PE文件的.pdata段,即Exception Directory.  
+源码中的IMAGE_RUNTIME_FUNCTION就是这个索引中的每一个条目.
+
+**uwd中对异常处理机制的解析:**  
+代码地址 ->栈布局说明 -> 物理还原
+
+
+Unwind (Manager/Struct)->IMAGE_RUNTIME_FUNCTION -> UNWIND_INFO -> UNWIND_CODE -> UNWIND_OP_CODES (枚举) 
+
+1. 作用链:  
+Unwind (Manager/Struct)  
+->IMAGE_RUNTIME_FUNCTION // 
+->UNWIND_INFO           // 描述一个函数回溯信息的全局特征(是否启用帧寄存器/版本等),是后续UNWIND_CODE的容器头
+->UNWIND_CODE           // 原始操作码,记录序言中单次汇编动作
+->UNWIND_OP_CODES (枚举) 
+
+2. 位置链:  
+Unwind (Manager/Struct)  
+->IMAGE_RUNTIME_FUNCTION  //PE -> .pdata节  
+->UNWIND_INFO  
+->UNWIND_CODE  
+->UNWIND_OP_CODES (枚举) 
+
+**Exception Directory(.pdata) 的机制：**
    * .pdata 段：存储了一个 RUNTIME_FUNCTION数组(对应uwd源码中的IMAGE_RUNTIME_FUNCTION)，记录了每个函数的起始、结束地址。.pdata段是一个连续的IMAGE_RUNTIME_FUNCTION数组,可以通过(End_of_pdata - Start_of_pdata) /size_of(IMAGE_RUNTIME_FUNCTION) 来计算该模块有多少个函数
    * 不是所有函数都有.pdata条目,如果一个函数不调用其他函数/不修改堆栈(不分配空间)/不修改非易失性寄存器,它就可能没有.pdata条目.但在uwd中,要伪造通常是非叶子函数,因为我们要作为调用者存在
    * UNWIND_INFO：每个函数对应一个描述符，记录了该函数如何分配栈空间、保存了哪些寄存器。
@@ -380,9 +433,225 @@ win64下,指针是8字节.cpu内部有一类特殊的寄存器xmm是16字节,128
 1. 既然sse指令可能再任何地方出现,abi必须强制要求栈再关键时刻(函数入口)是16对齐的  
 2. 牺牲局部，保全整体： 虽然 CALL 压入 8字节破坏了对齐，但只要每个函数都遵循“再补一个 8字节”的约定，整体系统就能高效运行。
 
+## 扩展-叶子函数/非叶子函数(Non-leaf Function)
+
+## 扩展-shadow space
+
+微软之所以坚持使用影子空间，主要有三个核心的工程考量，这反映了 Windows设计哲学中的保守性与稳定性：  
+1. 为“可变参数”提供统一的物理模型 (Uniform Variadic Support)
+* 在各种编程语言中,都存在可变参数函数.win的做法,前4个参数在shadow space中的寄存器上,后面的参数都在栈上.物理位置上影子空间紧邻调用者压入的第5+个参数.这样很容易遍历所有参数.
+
 ## 扩展-Prolog / Prologue(函数序言)
 
-winx64下,prolog是os结构化异常处理SEH和栈回溯stack unwinding机制的基石  
+winx64下,prolog是os结构化异常处理SEH和栈回溯stack unwinding机制的基石   
+函数序言是编译器生成的机器码与操作系统运行时环境之间的协议接口.  
+prolog不仅完成了物理层面的资源配置,更通过.pdata机制确立了程序执行的可追溯性和异常安全性.在底层对抗中,掌握序言的解析与模拟即掌握了对执行流指纹的操控权.
+
+### prolog的作用
+
+1. 执行上下文的保存 (Context Preservation)
+
+函数序言承担了 被调用者保存寄存器 (Callee-Saved Registers)的持久化责任。根据 Microsoft x64 调用约定，非易失性寄存器（如 RBX, RBP,RDI, RSI, R12-R15）在函数执行期间必须保持原值。序言通过 PUSH 指令或 MOV [RSP + Offset], Reg 模式将这些寄存器的当前状态压入栈帧，确保在执行函数尾声 (Epilog) 时能够完整还原调用方的执行上下文
+
+2. 栈帧的建立与空间编排 (Stack Frame Establishment)
+
+序言负责初始化当前函数的活动记录 (Activation Record)
+* 线性空间分配： 通过 SUB RSP, Immediate 分配局部变量（Local Variables）及编译器生成的溢出槽（Spill Slots）
+* 基址锚定： 若编译器未启用 帧指针省略 (FPO)，序言将执行 MOV RBP, RSP，将RBP 确立为当前栈帧的 基准地址 (Base Address)，从而实现通过固定偏移量对参数和局部变量的随机访问(建立新执行的函数在栈中的物理位置,相关前置知识在rbp寄存器中. [rbp](#rbp))
+* 影子空间预留 (Shadow Space)：为符合调用约定，序言必须为下层函数的寄存器参数（RCX, RDX, R8, R9）预留32 字节（0x20）的物理空间
+
+3. 内存对齐的强制恢复 (Stack Alignment Correction)
+
+由于 CALL 指令会将 8 字节的返回地址压入栈中，导致进入函数时 RSP 的 16字节对齐状态被破坏（变为 `$16n +8$`）。函数序言必须通过分配特定大小的栈空间（即 8 的奇数倍偏移），将 RSP强制修正回 16 字节对齐（16-byte Alignment）。这是确保 SSE/AVX 矢量指令集能够执行对齐内存访问（如 MOVDQA）而不会触发硬件异常（Alignment Fault）的必要前提。
+
+4. 异常处理元数据的注册 (SEH Metadata Registration)
+
+在 Windows x64 下，序言指令的每一个原子操作必须与 PE 文件的 .pdata(Exception Directory) 节中的 IMAGE_RUNTIME_FUNCTION 记录保持同步。
+* Unwind Codes： 序言的操作码被编码为 UNWIND_CODE 序列，供 结构化异常处理(SEH) 引擎在发生异常时进行 栈回溯 (Stack Unwinding)。
+* 运行时一致性： 若序言行为与元数据不匹配，会导致RtlVirtualUnwind解析失败，引发系统级进程终止
+
+5. 动态防御规避与调用链伪造 (Anti-Forensics & Stack Spoofing)
+
+在红队工程（如 uwd 项目）中，序言被视为合法调用的身份指纹。
+* 回溯校验绕过： 现代 EDR 通过监控 API 调用时的返回地址（Return Address），溯源其是否指向一个具备合法 .pdata定义且符合序言特征的代码段。
+* 模拟调用： 借用合法模块（如kernel32.dll）中的已知序言特征，可以构造出符合 CFG (Control Flow Guard)校验和栈回溯算法预期的伪造栈帧，从而实现隐蔽的系统函数调用
+
+6. 栈增长安全性校验 (Stack Probing)
+
+当函数申请的栈空间超过单页（4 KB）阈值时，序言需插入对__chkstk 或__alloca_probe 的调用。该动作通过顺序触碰（Touch）内存页，确保 守卫页(Guard Page) 能够正常扩展，防止发生跨页内存非法访问
+
+### prolog常见操作
+
+winx64下,prolog的操作是高度标准化的,严格遵循unwind opcodes的定义.  
+这里称严格按照顺序是指:依赖关系和元数据(unwind code)的记录顺序
+
+按照逻辑顺序prolog执行如下操作:  
+1. 非易失性寄存器的持久化 (Saving Non-volatile Registers)
+序言必须在破坏这些寄存器前将其备份。有两种主流实现方式：  
+* 入栈模式 (Push Mode)：
+  * PUSH RBP, PUSH RBX, PUSH R12 等
+  * 特性： 指令字节短，但会频繁改变 RSP 指针。每一个 PUSH 都会导致 RSP - 8
+* 位移赋值模式 (Store via Offset)：
+  * MOV [RSP + Offset], RBX
+  * 特性： 通常发生在 SUB RSP 分配空间之后。这种方式不会改变RSP，利于编译器进行指令流水线优化
+* push mode和store via offset之间有啥区别?除了是否移动rsp
+
+2. 栈指针的算术偏移 (RSP Arithmetic / Stack Allocation)
+序言中用于申请局部资源的核心操作
+* 小规模分配 (Small Allocation)：
+  * SUB RSP, 8 到 SUB RSP, 128
+  * 对应的 Unwind Code： UWOP_ALLOC_SMALL
+* 大规模分配 (Large Allocation)：
+  * SUB RSP, Immediate (超过 128 字节)
+  * 对应的 Unwind Code： UWOP_ALLOC_LARGE
+  * 注意： 分配数值必须经过计算以补偿 CALL 造成的 8 字节对齐偏移
+* unwind code是什么?
+
+3. 帧指针的初始化 (Establishing Frame Pointer)
+若函数逻辑复杂或需要支持动态栈分配，则会设立 RBP 作为基准
+
+* 指令： MOV RBP, RSP
+* 对应的 Unwind Code： UWOP_SET_FPREG。
+* 变体： 有时会附带一个偏移量，例如 LEA RBP, [RSP + 0x20]，以优化对参数的访问
+
+4. 影子空间预留 (Shadow Space Reservation)
+在 Windows x64 下，非叶子函数（Non-leaf Functions）必须在栈顶预留 32 字节
+* 汇编表现： 通常隐藏在主 SUB RSP 指令中。例如，若局部变量需 16 字节，指令将显示为`SUB RSP, 30h ($16 + 32 = 48 = 0x30$)`
+
+5. XMM 寄存器的状态保存 (Saving XMM Registers)
+若函数涉及浮点运算或 SSE 优化，需要保存非易失性的浮点寄存器（XMM6-XMM15）
+
+* 指令： MOVAPS [RSP + Offset], XMM6 或 MOVUPS。
+* 对应的 Unwind Code： UWOP_SAVE_XMM128。
+* 约束： 使用 MOVAPS 要求目标内存地址必须 16 字节对齐
+
+6. 栈增长探测 (Stack Probing / Guard Page Touching)
+
+当单次申请的栈空间过大（通常 `$\ge 4096$` 字节）时执行。
+
+* 指令： MOV EAX, Size; CALL __chkstk。
+* 逻辑： 这种操作不会直接映射到单一的UNWIND_CODE，但它是序言中确保内存连续可用性的关键防护手段
+
+7. 异常处理器的设立 (EH/SEH Frame Initialization) —— 较少见于普通序言
+在包含 try/except 块的函数中，序言会初始化特定的异常处理器结构。
+* 指令： MOV [RSP + Offset], Handler_Address
+
+以上7步是理想化的逻辑分层执行指令顺序,在真实的win x64环境下,必须需要遵守的不是指令顺序而是**栈帧状态的一致性协议**:  
+
+1. 约束一：寄存器保护必须在“被污染”之前 (The "Ownership" Constraint)
+* 规则： 函数序言可以先 push rbx，也可以先 sub rsp, 40h 然后 mov `[rsp+30h]`, rbx。
+* 唯一约束： 在你执行任何会改写 RBX 寄存器的逻辑指令（函数主体）之前，原始的 RBX必须已经被安全地备份到了栈上。
+* 红队意义： 在伪造栈时，如果你借用的函数序言里备份了R12，你的伪造栈帧的对应位置必须填入一个看起来像合法寄存器的值。
+* 这里的rbx依然只是8字节的.
+
+
+**包括影子空间在内的函数参数是caller保存的,这里怎么又保存在新函数开辟的栈空间里面?**  
+这正是 x64 Windows调用约定中最容易让人产生“精神分裂”的地方。理解它的钥匙在于区分：谁的影子空间  
+请记住,任何非叶子函数都要给被调用者预留32字节的shadow space.因此,这里虽然开辟了影子空间,但是不是给自己用的,不是给调用当前函数的调用者用的,而是给当前函数调用的另一个函数用的.
+
+
+
+  1. 约束二：RBP 基准确立的时机 (The "Anchor" Constraint) —— 最核心
+   * 规则： mov rbp, rsp 可以发生在 push rbp 之后的第一行，也可以发生在 sub rsp, 0x1000
+     之后。
+   * 唯一约束： 一旦执行了 mov rbp, rsp，RBP 的值就不允许再改变了（直到函数尾声）。
+   * 工业实现：
+       * 早锚定（Early Anchor）： push rbp; mov rbp, rsp; sub rsp, 20h。此时 RBP
+         指向栈帧顶部。
+       * 晚锚定（Late Anchor）： push rbp; sub rsp, 20h; mov rbp, rsp。此时 RBP
+         指向栈帧底部。
+   * 重要差异： 晚锚定通常是为了利用 RBP 作为“变长数组”或“动态分配”的基准。
+
+
+  3. 约束三：元数据（Unwind Info）的同步性 (The "Evidence" Constraint)
+   * 规则： 无论指令顺序如何，它们对栈的影响必须能够被 编码进 UNWIND_CODE 序列。
+   * 严格顺序： 在 .pdata 表中，Unwind 操作码的排列顺序必须是指令执行顺序的逆序。
+       * 因为系统回溯是“倒着看”的。如果序言是 push 后 sub，元数据记录必须先记录 sub
+         的撤销，再记录 push 的撤销。
+
+  ---
+
+
+  4. 总结：生产环境下“必须遵守”的逻辑顺序流
+
+  如果你现在手写一段符合 Windows 规范的 Prolog，你应该遵循以下流水线逻辑：
+
+
+   1. 确定非易失性寄存器集合： 统计函数内要用的 RBX, RSI, RDI 等。
+   2. 执行原子化备份： 选择 push（早备份）或 mov（分配空间后的晚备份）。
+   3. 确立 RSP 的最终稳定态： 执行 sub rsp, X。注意此时必须补偿 call 带来的 8
+      字节偏差，达成 16 字节对齐。
+   4. 【可选】确立 RBP 坐标系： 如果需要使用 RBP，选择一个点执行 mov rbp, rsp。
+       * 注意：这个点决定了之后 Unwind Code 中 FrameRegister 的 FrameOffset 如何计算。
+   5. 开启安全防护： 如果空间很大，执行 __chkstk。
+
+  ---
+
+  5. 为什么 uwd 要深入这个“压缩版”真相？
+
+
+  因为 uwd 并不是在“写代码”，而是在“读代码”。
+
+
+  在 uwd.rs 的解析器里：
+   * 它遇到一个 UWOP_SET_FPREG。
+   * 它必须停下来想：“这个 RBP 是在哪个时刻被确立的？”
+   * 它通过读取 FrameOffset 字段，反向推导出这个 RBP 指向的是当初 push rbp
+     时的那个原始点，还是经过 sub rsp 后的那个点。
+
+
+  底层结论：
+  真正的顺序不是 1-2-3，而是 “先存、后分、立锚点”
+  的逻辑闭环。只要这三件事在函数进入主体逻辑（Body）之前完成，并且在 .pdata
+  里留下了正确的“倒带说明”，那就是一个完美的、生产级别的序言。
+
+**push rbp mov rbp,rsp对应的是哪一步操作?**  
+你之前回答的不是说prolog的操作是严格按照顺序来的吗?这里为啥可以从第一步保存易失性寄存器push rbp 跳到第三步栈指针初始化,确立当前函数基准点的mov rbp,rsp?  
+以上说的步骤严格按照依赖关系和元数据(unwind code)的记录顺序,而不是指函数必须执行完所有第一步(保存所有寄存器)才能开始第二步(分配空间)
+
+1. 为什么可以“跳过”第二步？
+在标准的函数序言逻辑中：
+* 第一步： 保存寄存器（Push Mode 下会改变 RSP）。
+* 第二步： 分配栈空间（SUB RSP, X）。
+* 第三步： 设置帧指针（MOV RBP, RSP）。
+
+关键真相： MOV RBP, RSP 建立的是 “当前时刻”的基准。
+* 如果编译器决定在分配局部变量空间（第二步）之前就固定 RBP，这是完全合法的。
+* 物理结果： 此时 RBP指向的是“干净”的、尚未分配局部变量空间的栈顶。在这种情况下，局部变量将通过 [rbp -offset] 访问，而参数通过 [rbp + offset] 访问(rbp是参数和局部变量的分界线)。这里参数为什么会在rbp上方?因为参数空间是由caller在执行call指令之前已经在栈上准备好的.不仅有影子空间的四个参数还包含可能的第五个及其他更多的参数
+* 对比： 如果在 SUB RSP, 0x20 之后才执行 MOV RBP, RSP，那么 RBP指向的就是分配后的栈顶
+* PUSH RBP; MOV RBP, RSP 确实跨了步骤，但这在 x64 中是 允许且常规的。
+  * 物理上： 它是原子化的“锚定”行为
+  * 顺序上： 只要 RBP的状态（值、备份、回溯记录）在整个序言结束前达到一致状态，顺序的微调是编译器的自由。
+
+
+
+
+**uwd中这些操作被映射为 UNWIND_OP_CODES 枚举**
+```rust
+#[repr(u8)]
+#[allow(dead_code)]
+pub enum UNWIND_OP_CODES {
+    UWOP_PUSH_NONVOL = 0,
+    UWOP_ALLOC_LARGE = 1,
+    UWOP_ALLOC_SMALL = 2,
+    UWOP_SET_FPREG = 3,
+    UWOP_SAVE_NONVOL = 4,
+    UWOP_SAVE_NONVOL_BIG = 5,
+    UWOP_EPILOG = 6,
+    UWOP_SPARE_CODE = 7,
+    UWOP_SAVE_XMM128 = 8,
+    UWOP_SAVE_XMM128BIG = 9,
+    UWOP_PUSH_MACH_FRAME = 10,
+}
+```
+这里尚未一一对应
+
+
+
+LEA操作是什么?
+
+### prolog的基础知识
+
 1. 序言是如何产生的？（生成机制）
 函数序言是由 编译器后端（Compiler Backend） 自动生成:
 *  计算需求： 当你编译 Rust 或 C++ 代码时，编译器会扫描函数，统计：
@@ -505,6 +774,93 @@ RestoreSynthetic ENDP
 
 ## 扩展-栈和栈帧
 
+Windows x64 物理栈帧拓扑图 (Standard Prologue Anchor)  
+假设函数 B 执行了标准序言：PUSH RBP; MOV RBP, RSP; PUSH RBX; SUB RSP, 30h
+
+
+| 物理地址属性 | 相对 RBP 偏移 | 数据元 (8-Byte Slots) | 属性与约束 (Technical Constraints) | 对应 Unwind Code |
+|--------------|---------------|------------------------|------------------------------------|------------------|
+| 高地址       | +0x38 + 8n    | Stack Argument n       | Caller Parameter Area：第 6 个及以后的参数。 | 无               |
+|              | +0x30         | Parameter 5            | 调用方压入的第一个物理栈参数。 | 无               |
+|              | +0x28         | Home Space (R9)        | 寄存器溢出槽：调用方预留，地址必须 8 字节对齐。 | 无               |
+|              | +0x20         | Home Space (R8)        |                                  | 无               |
+|              | +0x18         | Home Space (RDX)       |                                  | 无               |
+|              | +0x10         | Home Space (RCX)       |                                  | 无               |
+|              | +0x08         | Return Address         | 返回地址：由 CALL 压入，使 RSP 产生 8 字节偏移。 | 无               |
+| 基准点       | +0x00         | Saved RBP              | 锚点 (Anchor)：RBP 寄存器物理指向此槽位。 | UWOP_SET_FPREG   |
+|              | -0x08         | Saved RBX              | 非易失性寄存器区：必须在 SUB RSP 前或后完成持久化。 | UWOP_PUSH_NONVOL |
+|              | -0x10         | Saved RSI              |                                  | UWOP_SAVE_NONVOL |
+|              | -0x18         | Local Variable         | 私有数据区：首个局部变量偏移。 | UWOP_ALLOC_SMALL |
+|              | -0x20         | Alignment Pad          | 对齐填充：确保下一级 CALL 前 RSP 为 16 字节对齐。 | (由编译器自动计算) |
+|              | -0x28         | XMM6 Save Area         | 16字节对齐约束：存储 MOVAPS 备份的浮点寄存器。 | UWOP_SAVE_XMM128 |
+|              | -0x38         | Outbound Shadow        | 出站影子空间：为子函数 C 预留的 32 字节。 | (包含在总分配中) |
+| 低地址       | -0x38         | (Current RSP)          | 动态栈顶。 | 无               |
+
+
+1. 在该序言中，执行 `MOV RBP, RSP` 紧跟在 `PUSH RBP` 之后。因此，`[RBP + 0x00]` 物理上就是Saved RBP。
+**红队意义**： 在 uwd 中伪造栈帧时，必须确保 RBP 指向的值是父函数的 RBP，而 RBP + 8必须是返回地址。
+
+2. XMM 寄存器的对齐陷阱 (XMM Alignment)
+* 非易失性 XMM 寄存器（XMM6-XMM15）的保存必须使用 `MOVAPS`  指令，这要求内存地址必须 16 字节对齐。
+* 编译器在分配栈空间时，如果探测到有 XMM 备份需求，会强制插入 Alignment Pad，使得 XMM 存储区的起始地址能被 16 整除。
+* 如果 uwd 在解析 `UWOP_SAVE_XMM128` 时忽略了对齐偏差，计算出的 `total_stack` 将产生 8 字节的漂移，导致整个回溯链断裂。
+
+3. 影子空间（Home Space）的命名规范
+
+业界更倾向于将调用者预留的 32 字节称为 **Home Space** 或 **Register Save Area**，而将当前函数预留给子函数的称为 **Shadow Space**。这种区分有助于在 `uwd.rs` 的递归解析逻辑中厘清“谁为谁预留”的权属关系。
+
+4. Unwind Code 的执行序与存储序
+* 在 `.pdata` 中，Unwind Code是按偏移量降序排列的（即对应指令执行的逆序）
+* uwd 项目的算法逻辑： `rbp_offset` 函数必须通过“回滚”这些操作码来模拟`RtlVirtualUnwind` 的行为。
+  - 例如：解析到 `UWOP_ALLOC_SMALL(0x28)`，意味着物理指令执行了 `SUB RSP, 0x28`，那么回溯引擎必须执行 `RSP += 0x28` 才能找到父帧。
+
+在将 uwd 的栈伪造能力引入 puerto 时，请务必校验以下三点：
+
+1. **确定性锚点**： 确保伪造的 RBP 寄存器值与内存中 Saved RBP 的地址完全一致（偏移量为 `0`）。
+2. **影子空间占位**： 无论目标函数是否真的有 4 个参数，伪造栈必须在返回地址上方留出 32字节的空白区，然后再放置第 5 个参数。
+3. **返回地址合法性**： 伪造的返回地址 `(RBP + 8)` 必须指向一个合法的、已加载模块的非序言代码区（即函数内部指令），以通过 EDR 的 `Return Address Boundary Check`。
+
+### 序言格式二
+
+在现代 x64 Windows体系结构中，编译器（MSVC、rustc、Clang）为了极致的性能优化，广泛采用了一种名为帧指针省略（Frame Pointer Omission, FPO） 的技术。这意味着，绝大多数现代 Windows 系统DLL（如 ntdll.dll, kernel32.dll）中的函数根本不使用 RBP
+
+A. 帧指针范式 (RBP-based Frame) —— 传统/复杂函数
+* 序言特征： 包含 PUSH RBP; MOV RBP, RSP。
+* 栈结构： 以 RBP 为绝对锚点。局部变量位于 RBP 负偏移，参数位于 RBP 正偏移。
+* 适用场景： 包含动态栈分配（如 alloca）、极多局部变量或需要复杂异常处理的函数。
+
+B. RSP 基准范式 (RSP-only / FPO Frame) —— 现代/标准函数
+* 序言特征： 只有 SUB RSP, X 和可能的寄存器保存（如 `MOV [RSP+20h], RBX`）。
+* 栈结构： 没有 RBP 锚点。所有数据（包括参数和局部变量）全部通过 RSP的相对偏移进行索引。
+* 物理结果： RSP 是唯一的坐标系。由于 RSP 会随着 PUSH/POP指令频繁变动，编译器必须在编译时精确计算每一个指令位置对应的 RSP 偏移量
+
+**既然结构变了，操作系统如何回溯？ (The Unwind Secret)**
+
+这也是Windows x64 必须引入 .pdata (Exception Directory) 的根本原因  
+在 x86 时代，没有 RBP 链就无法回溯。但在 x64 下，即便函数没有序言、没有RBP，操作系统也能通过以下机制完成回溯：
+1. 查表： 当需要回溯时，系统根据当前指令指针（RIP）在 .pdata 中检索IMAGE_RUNTIME_FUNCTION 结构。
+2. 解析元数据： 系统读取对应的 UNWIND_INFO。
+3. 计算：
+* 如果元数据中没有 UWOP_SET_FPREG（即没用 RBP），系统就通过UWOP_ALLOC_LARGE/SMALL 的记录，直接给当前的 RSP 加回对应的数值。
+* 结果： 无论函数序言怎么写，只要元数据记录了“我减了多少RSP”，系统就能精准跳回父帧
+
+由于可能存在不同的栈结构,这正是 uwd.rs 中 rbp_offset 和 stack_frame 存在的意义.uwd不是硬编码一个结构,它是动态适配的
+* 如果目标函数是 RBP 范式：uwd 通过 UWOP_SET_FPREG 识别出 RBP 的锚定位置，并在伪造栈时模拟 PUSH RBP。
+* 如果目标函数是 RSP 范式：uwd 会跳过 RBP 逻辑，仅仅通过累加所有的 ALLOC 操作码来计算 total_stack。
+* 伪造逻辑的改变：在 synthetic.asm 中，uwd 能够动态选择是否压入一个伪造的 RBP值。如果目标函数不使用 RBP，uwd 伪造出来的栈帧中原属于 Saved RBP的位置将被填入合法的“栈填充数据（Stack Padding）”。
+
+**另一种极致情况：叶子函数 (Leaf Functions)**  
+这一种函数连 SUB RSP 都没有
+* 特征： 不调用任何函数，不使用栈空间。
+* 栈结构： 仅仅在栈顶有一个返回地址。
+* 回溯： .pdata 中甚至没有这个函数的记录。系统默认认为执行 RSP + 8 即可回溯。
+
+**uwd项目准则:**   
+1. 不要假设 RBP： 在编写伪造逻辑时，必须先检查目标函数（借用的序言）是否真的使用了RBP。
+2. 对齐是唯一的不变量： 无论是否使用 RBP，CALL 指令造成的 8 字节偏移和序言必须实现的16 字节对齐是物理定律，不可逾越。
+3. 元数据为王： 真正的栈结构不取决于汇编代码长什么样，而取决于 .pdata里是怎么“写报告”的
+
+
 
 
 
@@ -533,7 +889,9 @@ RestoreSynthetic ENDP
 
 ## 扩展-寄存器
 
+非易失性寄存器：必须保存并恢复的寄存器——RBX, RBP, RDI, RSI, RSP, R12, R13, R14, R15
 
+易失性寄存器：可以自由使用的寄存器——RAX, RCX, RDX, R8-R11
 
 ### rsp
 
@@ -560,43 +918,32 @@ mov  rbp,rsp
 2. 执行push rbp:手动压入8字节旧RBP.此时RSP重新回到了16字节对齐
 3. 执行mov rbp, rsp : RBP的值现在等于 0x...F0(为啥是F0,往下看)  
 图示prolog的push rbp  mov rbp, rsp之后的stack布局:
-```text
-  ┌──────────────┬───────┬──────────────────┬────────────────────┐
-  │ 物理地址（示 │ 偏移  │ 栈内存内容       │ 物理位置描述与逻辑 │
-  │ 例）         │ 量    │ (8字节一格)      │ 含义               │
-  ├──────────────┼───────┼──────────────────┼────────────────────┤
-  │ 0x...20      │ +0x30 │ Parameter 5      │ 调用者压入的第 5   │
-  │              │       │                  │ 个参数             │
-  │ 0x...18      │ +0x28 │ Shadow Space     │ 预留给寄存器参数的 │
-  │              │       │ (for R9)         │ 32 字节空间        │
-  │ 0x...10      │ +0x20 │ Shadow Space     │ (影子空间的高端)   │
-  │              │       │ (for R8)         │                    │
-  │ 0x...08      │ +0x18 │ Shadow Space     │ (影子空间的低端)   │
-  │              │       │ (for RDX)        │                    │
-  │ 0x...00      │ +0x10 │ Shadow Space     │ 调用者帧的起始点   │
-  │              │       │ (for RCX)        │                    │
-  │ 0x...F8      │ +0x08 │ Return Address   │ call               │
-  │              │       │                  │ 指令压入的返回地址 │
-  │ 0x...F0      │ +0x00 │ Saved Old RBP    │ RBP 和 RSP         │
-  │              │       │                  │ 共同指向这里！     │
-  │ 0x...E8      │ -0x08 │ (未定义/编译器填 │ 尚未执行 sub rsp,  │
-  │              │       │ 充)              │ X，此处是“虚空”    │
-  └──────────────┴───────┴──────────────────┴────────────────────┘
-```
+
+| 物理地址（示例） | 偏移量 | 栈内存内容 (8字节一格) | 物理位置描述与逻辑含义 |
+|------------------|--------|------------------------|------------------------|
+| 0x...20          | +0x30  | Parameter 5            | 调用者压入的第 5 个参数 |
+| 0x...18          | +0x28  | Shadow Space (for R9)  | 预留给寄存器参数的 32 字节空间 |
+| 0x...10          | +0x20  | Shadow Space (for R8)  | (影子空间的高端) |
+| 0x...08          | +0x18  | Shadow Space (for RDX) | (影子空间的低端) |
+| 0x...00          | +0x10  | Shadow Space (for RCX) | 调用者帧的起始点 |
+| 0x...F8          | +0x08  | Return Address         | call 指令压入的返回地址 |
+| 0x...F0          | +0x00  | Saved Old RBP          | RBP 和 RSP 共同指向这里！ |
+| 0x...E8          | -0x08  | (未定义/编译器填充)    | 尚未执行 sub rsp, X，此处是“虚空” |
+
 
 通过这张图，你可以发现几个极其重要的物理真相：
 
    1. RBP 的物理指向：
       RBP 此时指向的 不是 局部变量，而是
   “上一个函数留下的坐标原点”。即：[rbp] 里面存的值就是 Old RBP。
-   2. 返回地址的绝对位置：
+   1. 返回地址的绝对位置：
       在 Windows x64 中，返回地址 永远 位于 RBP + 8 的物理位置。这是 EDR
   和调试器进行栈回溯（Unwinding）的硬性物理基准。
-   3. 16字节对齐的维持：
+   1. 16字节对齐的维持：
       你会发现，RBP 指向的地址（0x...F0）本身就是 16字节对齐
   的。这意味着，如果接下来函数要执行 sub rsp, 20h 分配局部变量，新的 RSP
   依然会保持 16 字节对齐。
-   4. 参数 5 的物理距离：
+   1. 参数 5 的物理距离：
       为什么是 +0x30？
       计算：RBP(0) -> Saved RBP(8) -> ReturnAddr(8) -> ShadowSpace(32) =
   48 字节 ($0x30$)。
