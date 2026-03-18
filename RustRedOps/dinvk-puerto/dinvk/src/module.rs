@@ -63,7 +63,7 @@ where
         
         //rust中* 这个符号被重载(overloaded)了,当*在变量前表示解引用,取值操作;当出现*const *mut的时候,代表这是裸指针类型
         //这里的as只改变了指针的类型标签,不改变地址数值,也不会丢失数据,更没有读取内存中的数据
-        //直接使用指向LDR_DATA_TABLE_ENTRY中InMemoryOrderLinks这个链表的指针,作为LDR_DATA_TABLE_ENTRY的0x00处指针,方便找到DllBase的地址
+        //直接使用指向LDR_DATA_TABLE_ENTRY中InMemoryOrderLinks这个链表的指针,作为LDR_DATA_TABLE_ENTRY的0x00处指针,方便找到DllBase的地址 
         //这里data_table_entry指向LDR_DATA_TABLE_ENTRY中InMemoryOrderLinks的位置
         //由于as *const LDR_DATA_TABLE_ENTRY;这里将data_table_entry转为指向LDR_DATA_TABLE_ENTRY结构体中InMemoryOrderLinks所在的偏移位置(0x10),但是在编译器看来仍然是指向这个结构体的第0个字节处
         let mut data_table_entry = (*ldr_data).InMemoryOrderModuleList.Flink as *const LDR_DATA_TABLE_ENTRY;
