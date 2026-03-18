@@ -52,11 +52,31 @@ unsafe extern "C" {
 /// ```
 #[macro_export]
 macro_rules! spoof {
+    // $告诉宏引擎,后面跟着的是一个宏变量或一个重复块的开始.$arg是一个元变量名称,在宏展开时,可以通过$arg来引用用户传进来的数据.宏是如何对应传进来的数据的?以这个宏举例.是通过$addr:expr, 这里的,分割的
+    // ()重复块的边界;expr,片段分类符,约束这个变量必须是一个表达式expression(如1+2,&x,my_ptr)详见rust reference
+    // 括号外的, 表示在重复匹配$arg时,用户必须用都好分开
+    // + 代表一次或多次重复 *表示零次或多次重复 ?代表零次或一次
+    // $($arg:expr),+ $(,)? 这里$($arg:expr)代表一个可重复的块的开始 紧接的,代表这个可重复的块中不同的参数之间用,分割 紧接的+代表用,分割的参数可以有一个或多个 紧接的$代表一个新的可重复块 紧接的(,)代表匹配的是,即重复块的内容本身就是, 紧接的?代表匹配的,可以是一个也可以没有
+    //  这一段的含义是如果用户在最后一个参数后面加上一个逗号,这里的?就会匹配这个逗号,如果没有加也不会报错.这么做可以让宏自适应任何数量的参数,以灵活的对应win api的参数
+    // 
     ($addr:expr, $($arg:expr),+ $(,)?) => {
         unsafe {
+            // crate代表一个特殊的占位符,在宏展开时$crate会被替换为定义该宏的哪个库的绝对路径.即编译器会在本文件中(uwd.rs)查找这个宏定义
+            // ::路径连接符path separator 是rust明明空间层级分割符
+            // __双下划线,业界规范,代表是内部实现,不在文档中公开,步破坏公开接口
+            // __private私有模块名(本文件中定义的另一个mod) .这里为啥要另外定义一个mod __private 因为宏是在调用者(用户)的仓库里展开的,在宏中调用的函数必须是pub的函数.但这里只希望使用spoof!宏 不去直接调用底层spoof函数.这么做是为了方便修改具体的实现外,还可以把调用和实现分割开
+            // ::spoof 在__private模块中的spoof函数.
+            // 宏是拷贝,如果调用10次宏,rustc会生成10次重复代码,增加二进制文件体积.因此宏应尽量少,具体实现放到函数中.函数的调用是指针,体积小的多
             $crate::__private::spoof(
                 $addr,
+                // &[] 数组引用,把所有转换后的参数放入一个固定大小的数组,以slice的方式使用.后续的spoof函数只需要接收一个参数的slice,而不是多个独立的参数
+                // $(...),* 代表将宏捕获的()里面的内容以,分割 并重复捕获0或多次.并将捕获的内容在()中的代码中执行
+                // ::core::mem::transmute($arg as usize) transmute将这块内存的数据当作另一种类型使用.由于后续spoof函数接收的是args: &[*const c_void] 所以这里将$arg当作*const c_void这种原始指针
+                // ::core这里最前面的::代表从全局根命令空间开始查找后面的模块,而不是从当前模块或当前库中查找.防止“影子遮蔽” Shadowing
+                // 在编写库crate时,尤其在宏中永远使用绝对路径::或$crate
+                // transmute原型只需要src的类型,rustc会根据transmute的位置自动推断dst的类型
                 &[$(::core::mem::transmute($arg as usize)),*],
+                // SpoofKind是一个enum,代表要执行的操作类型
                 $crate::SpoofKind::Function,
             )
         }
@@ -99,15 +119,26 @@ macro_rules! syscall {
     };
 }
 
+/// 由于该mod在宏中展开了使用了spoof函数,而宏展开需要将spoof标记为pub.但标记为pub函数spoof会出现在docs.rs的官方文档中,导致调用这个库的用户以为这是一个可直接调用的api.而作为公开的api如果后续修改了函数,就会破坏语义化.导致原来的调用不适配更改后的函数定义
+/// 
+/// 解决方案是对这个mod使用#[doc(hidden)],生成的docs.rs文档会隐藏这个mod
+/// 
+/// 重新定义一个mod为了模块化重构的方便及形成一个功能模块
 #[doc(hidden)]
 pub mod __private {
     use core::ffi::c_void;
+    // 将父mod中所有可见的内容,全部拉入到当前mod的作用域
+    // 不仅仅是父mod中pub内容,父mod定义的所有内容在子mod中都可以用,以及父mod中use的的内容在子mod中也可以用.因为子mod对父mod是完全透明的,实质上不用use super::* 子mod也可以访问父mod的私有成员,但需要加上super:: 这里加上这个use后可以省略super::这个前缀
+    // 例外1. 父mod中定义的宏没有使用#[macro_export]导出,那子mod中的super::* 抓不到这个宏,此外宏的可见性遵循从上而下,因此宏定义通常放在最前面;
+    // 2. 同名冲突,编译器会优先使用子mod中的定义
+    // 3. 只对上一级的mod有效,不能无限向上
     use super::*;
 
     /// Performs call stack spoofing in `synthetic` mode.
     #[cfg(not(feature = "desync"))]
     pub fn spoof(addr: *mut c_void, args: &[*const c_void], kind: SpoofKind) -> Result<*mut c_void> {
         // Max 11 args
+        // 为什么限制在11个参数以内,详见源码解析/types.md
         if args.len() > 11 {
             bail!(s!("too many arguments"));
         }
