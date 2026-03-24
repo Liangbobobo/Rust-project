@@ -1,0 +1,38 @@
+[package]
+name = "hypnus"
+version = "0.2.0"
+edition = "2024"
+description = "Memory Obfuscation in Rust"
+license = "MIT"
+readme = "README.md"
+authors = ["João Victor"]
+repository = "https://github.com/joaoviictorti/hypnus"
+homepage = "https://github.com/joaoviictorti/hypnus"
+documentation = "https://docs.rs/hypnus/latest"
+keywords = ["memory", "obfuscation", "windows", "rust", "redteam"]
+categories = ["os", "security"]
+include = [
+    "src/**",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+]
+
+[lib]
+doctest = false
+
+[dependencies]
+obfstr = "0.4.4"
+dinvk = "0.4.2"
+uwd = "0.3.5"
+anyhow = { version = "1.0.98", default-features = false }
+memchr = { version = "2.7.4", default-features = false }
+spin = { version = "0.10.0", default-features = false }
+windows-targets = "0.53.4"
+
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = [
+    "x86_64-pc-windows-gnu",
+    "x86_64-pc-windows-msvc",
+]
