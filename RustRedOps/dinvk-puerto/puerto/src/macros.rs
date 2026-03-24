@@ -79,7 +79,7 @@
          ($($arg:tt)*) => {
              #[cfg(debug_assertions)]
             {   
-                 $crate::println!($($arg)*);
+                $crate::println!($($arg)*);
              }
         };
     }

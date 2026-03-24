@@ -144,6 +144,9 @@ pub mod __private {
         }
 
         // Function pointer must be valid unless syscall spoof
+        // 如果当前伪装的是普通函数调用(非系统调用),那么传入的addr不能为空.因为syscall是通过ssn定位的
+        // s!是否足够安全?anyhow在cargon.toml中禁用默认特性(default-feature=false)是否可在no_std下运行
+
         if let SpoofKind::Function = kind && addr.is_null() {
             bail!(s!("null function address"));
         }
