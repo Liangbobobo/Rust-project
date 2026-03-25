@@ -146,7 +146,7 @@ pub mod __private {
         // Function pointer must be valid unless syscall spoof
         // 如果当前伪装的是普通函数调用(非系统调用),那么传入的addr不能为空.因为syscall是通过ssn定位的
         // s!是否足够安全?anyhow在cargon.toml中禁用默认特性(default-feature=false)是否可在no_std下运行
-
+        // 初步结论是模拟NTSTATUS的状态来表示错误
         if let SpoofKind::Function = kind && addr.is_null() {
             bail!(s!("null function address"));
         }
@@ -794,14 +794,26 @@ pub fn stack_frame(module: *mut c_void, runtime: &IMAGE_RUNTIME_FUNCTION) -> Opt
 /// Useful for identifying spoof-compatible RUNTIME_FUNCTION entries.
 pub fn ignoring_set_fpreg(module: *mut c_void, runtime: &IMAGE_RUNTIME_FUNCTION) -> Option<u32> {
     unsafe {
+
+        // 指向UNWIND_INFO结构体
         let unwind_info = (module as usize + runtime.UnwindData as usize) as *mut UNWIND_INFO;
+
+        // 跳过UNWIND_INFO前4个字节,指向真正的操作码数组
         let unwind_code = (unwind_info as *mut u8).add(4) as *mut UNWIND_CODE;
+        // 以上,win规定,prolog中每一条修改rsp或保存寄存器的指令,都必须在此处有一个对应的操作码
+
+        // *unwind_info内存中该结构体的首地址(原始指针在unsafe中用*解引用,将该指针指向区域具象化一个结构体实例)
+        // Flags()由bitfield! 生成的方法,通过mask运算从VersionFlags这个8位的字段中提取高5位(标志位).不同标志位代表函数的不同特性,如0x4表示是否有链式回溯,0x1表示函数是否有异常处理
         let flag = (*unwind_info).VersionFlags.Flags();
 
         let mut i = 0usize;
+        // 该函数每解析一个涉及栈增长的操作码,将对应的字节数加到total_stack.最终会得到需要的函数栈帧深度
         let mut total_stack = 0u32;
+
+        // CountOfCodes 表示UNWIND_CODE数组中有多少元素
         while i < (*unwind_info).CountOfCodes as usize {
             // Accessing `UNWIND_CODE` based on the index
+            // add(i)指针算数运算,将指针向后移动i个UNWIND_CODE结构体宽度()
             let unwind_code = unwind_code.add(i);
 
             // Information used in operation codes
