@@ -806,8 +806,9 @@ pub fn ignoring_set_fpreg(module: *mut c_void, runtime: &IMAGE_RUNTIME_FUNCTION)
         // Flags()由bitfield! 生成的方法,通过mask运算从VersionFlags这个8位的字段中提取高5位(标志位).不同标志位代表函数的不同特性,如0x4表示是否有链式回溯,0x1表示函数是否有异常处理
         let flag = (*unwind_info).VersionFlags.Flags();
 
+        // 对UNWIND_CODE的计数
         let mut i = 0usize;
-        // 该函数每解析一个涉及栈增长的操作码,将对应的字节数加到total_stack.最终会得到需要的函数栈帧深度
+        // 该函数每解析一个涉及栈增长的操作码,将对应的字节数加到total_stack.最终会得到需要的函数栈帧深度,即增加了多少字节
         let mut total_stack = 0u32;
 
         // CountOfCodes 表示UNWIND_CODE数组中有多少元素
@@ -817,23 +818,26 @@ pub fn ignoring_set_fpreg(module: *mut c_void, runtime: &IMAGE_RUNTIME_FUNCTION)
             let unwind_code = unwind_code.add(i);
 
             // Information used in operation codes
+            // Opinfo()和UnwindOp()这两个从一个UNWIND_CODE回溯操作码的高八位获取各自的位值,该位值代表不同的栈操作(Unwindop来表示压栈\分配\移动)以及栈操作的具体情况(Opinfo来表示谁被压栈\分配多少\移动到哪里)
             let op_info = (*unwind_code).Anonymous.OpInfo() as usize;
             let unwind_op = (*unwind_code).Anonymous.UnwindOp();
 
+            // 根据不同的栈操作,调整对应的寄存器
             match UNWIND_OP_CODES::try_from(unwind_op) {
                 // Saves a non-volatile register on the stack.
                 //
-                // Example: push <reg>
+                // 针对栈push操作.Example: push <reg>
                 Ok(UWOP_PUSH_NONVOL) => {
                     if Registers::Rsp == op_info {
                         return None;
                     }
 
+                    // 虽然UWOP_PUSH_NONVOL是16位,但此时函数栈的操作是push只针对寄存器,而寄存器是8位的
                     total_stack += 8;
                     i += 1;
                 }
 
-                // Allocates small space in the stack.
+                // Allocates small space in the stack.即prolog对小规模栈空间分配的元数据记录情况
                 //
                 // Example (OpInfo = 3): sub rsp, 0x20  ; Aloca 32 bytes (OpInfo + 1) * 8
                 Ok(UWOP_ALLOC_SMALL) => {

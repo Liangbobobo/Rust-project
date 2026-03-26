@@ -4,6 +4,7 @@
     - [IMAGE\_RUNTIME\_FUNCTION](#image_runtime_function)
     - [UNWIND\_INFO](#unwind_info)
     - [UNWIND\_CODE\\bitfield!](#unwind_codebitfield)
+    - [enum UNWIND\_OP\_CODES](#enum-unwind_op_codes)
   - [扩展-函数返回地址](#扩展-函数返回地址)
   - [扩展-栈对齐](#扩展-栈对齐)
   - [扩展-叶子函数/非叶子函数(Non-leaf Function)](#扩展-叶子函数非叶子函数non-leaf-function)
@@ -261,8 +262,12 @@ bitfield库通过宏,将16位原始二进制数据转为具有逻辑意义的字
   * 作用：提供操作码的附加参数;如果是 PUSH：代表寄存器索引（如 3 代表 RBX;如果是 ALLOC：参与计算分配的字节数
   * 在 ignoring_set_fpreg 函数中，OpInfo 的意义完全取决于它左边的 UnwindOp
 
+
 **字段二通过TryFrom转换**  
 **uwd中这些操作(字段二的组合)被映射为 UNWIND_OP_CODES 枚举**
+
+### enum UNWIND_OP_CODES
+
 ```rust
 #[repr(u8)]
 #[allow(dead_code)]
@@ -280,7 +285,36 @@ pub enum UNWIND_OP_CODES {
     UWOP_PUSH_MACH_FRAME = 10,
 }
 ```
-这里尚未一一对应
+
+1. UWOP_PUSH_NONVOL = 0 :UWOP_PUSH_NONVOL是一个UNWIND_CODE节点(2字节).UWOP(unwind operation回溯操作),代表UnwindOp(共4位)的含义.是win64 seh结构异常处理的核心,它不是执行指令,用于撤销指令操作;NONVOL(Non-volatile)非易失性,用于对寄存器分类(共有8个:RBX, RBP, RDI, RSI, R12, R13, R14, R15)
+  * 当UnwindOp是UWOP_PUSH_NONVOL时,Opinfo代表寄存器编号.opinfo是5代表rbp,3是rbx
+  * 对栈的影响.假设要伪装kernelbase.dll某个函数,这个函数的.pdata有3个UWOP_PUSH_NONVOL,那么在虚假栈中必须腾出3*8共24字节空间;当edr调用RtlVirtualUnwind检查这个函数的栈时,回溯读取UWOP_PUSH_NONVOL,并预期在当前的栈指针位置找到一个有效的寄存器数值;后续是寄存器恢复为压栈的值
+
+2. UWOP_ALLOC_SMALL = 2: 全称为unwind operation allocate small stack area.对应汇编指令sub rsp, constant
+  * small限制分配的大小在8-128字节空间,再大编译器需要使用UWOP_ALLOC_LARGE.
+  * 当UnwindOp是WOP_ALLOC_SMALL时,Opinfo这4位不再代表寄存器的类型,而是一个倍数因子.根据AMD规范,opinfo为0代表倍数因子是1,15代表16
+  * x64栈指针rsp必须8字节对齐.即最小操作单位是8字节
+
+3. UWOP_ALLOC_LARGE = 1:全称Unwind Operation Allocate Large Stack Area.对应汇编指令sub rsp, constant
+  * 与samll不同,opinfo的4位表示不同的分配策略.0代表最高分配512KB-8字节/1代表最高分配4GB-8字节
+  * 当UnwindOp是UWOP_ALLOC_LARGE时.会占用紧邻的一个或2个unwind_code.当opinfo为0的时候,unind_code这个union不再是Anonymous而是FrameOffset(u16).此时FrameOffset中存的是字节数(实际大小/8).对应的此时的i应加2,即除了自身的unwind_code又跳过了一个,到达第三个位置
+  * opinfo为1时,源码使用了*(unwind_code.add(1) as *mut i32).代表将紧邻的下一个unwind_code(`*mut unwind_code` 16字节的原始指针)强转为`*mut i32`,意味着一次性横跨两个unwind_code.占用三个unwind_code对应的i应加3
+  * 此时根据微软规范,不再将额外占用的两个unwind_code当作结构体看待,而是把它们变为纯粹的raw data原始数据容器.此时,栈的大小就是通过紧随其后的两个槽位合成的一个 32 位原始数据（Raw
+  Data）来表示的
+  * `*(unwind_code.add(1) as *mut i32)`,此时当前的unwind_code用于区分类型(large分配),add(1)表示移到下一个unwind_code,这里是起点,是转为的*mut i32的数据的起点.而i32是一个4字节数据,读取一个4字节数据相当于跳过了两个unwind_code
+  * win的线程栈默认1mb,最大很少超过几十mb
+  * 使用i32是win abi的行业标准,对应c中的LONG/DWORD
+
+4. UWOP_SAVE_NONVOL = 4:
+  * 背景知识:push和mov在栈上的物理区别.push rsi会让rsp做减法,动态增加栈大小;`mov [rsp+0x40],rsi`时,rsp不动,用到的空间必须由之前的sub rsp ,x提前准备.
+  * 编译器有时候为了优化会一次性分配空间,然后用mov将寄存器放入栈空间
+  * 这个操作码是否代表mov?还能代表其他操作吗
+  * 微软约定此时占用两个unwind_code.第一个表示操作码和寄存器索引(opinfo);另一个以FrameOffset的形式代表存储位置的偏移.对应i+2
+  * 这个操作不增栈
+
+5. UWOP_SAVE_NONVOL_BIG = 5:当函数分配巨大的栈(如1mb),又想将寄存器存到非常靠后的位置(偏移超过512kb)时,16位的unwind_code就无法表示偏移了
+  * 占用3个unwind_code.第一个表示操作码(unwindop)和寄存器索引(opinfo);
+
 
 
 
