@@ -1,3 +1,10 @@
+- [Memory management](#memory-management)
+  - [x64 架构的四级分页模型（PML4 -\> PDPT -\> PD -\> PT）](#x64-架构的四级分页模型pml4---pdpt---pd---pt)
+  - [Introduction to the memory manager](#introduction-to-the-memory-manager)
+    - [Large and small pages](#large-and-small-pages)
+  - [x64 virtual address translation](#x64-virtual-address-translation)
+
+
 # Memory management
 
 **使用windbg对书中提到的内容进行验证甚至比通读本章更加重要**
@@ -8,9 +15,10 @@
 
 ## x64 架构的四级分页模型（PML4 -> PDPT -> PD -> PT）
 
-1. 小页面 (4KB)：映射在最后一级（Page Table, PT）
-2. 普通大页 (2MB)：映射在倒数第二级（Page Directory, PD）
-3. 巨型页面 (1GB)：直接映射在倒数第三级（Page Directory Pointer Table, PDPT）
+1. Level 4 (PML4)：由 CR3 指向，顶级索引。(4kb * 512 * 512 *512=512GB)
+2. Level 3 (PDPT - Page Directory Pointer Table)：由 PML4指向，这就是书里说的“第三级结构”(4kb * 512 * 512=1GB)
+3. Level 2 (PD - Page Directory)：由 PDPT 指向(4kb*512=2MB)
+4. Level 1 (PT - Page Table)：由 PD 指向，最终指向物理页(4kb)
 
 目前的 x64 硬件（Intel/AMD）只使用了其中的 48 位来进行地址转换（这被称为 Canonical Address）。这 48 位被精确地切割成五个部分  
 | 位偏移 (Bits) | 缩写 | 全称                     | 作用                           |
@@ -443,3 +451,127 @@ huge pages, which are 1 GB in size. This is done automatically if the allocation
 than 1 GB, but it does not have to be a multiple倍数 of 1 GB. For example, an allocation of 1040 MB would 
 result in using one huge page (1024 MB) plus 8 “normal” large pages (16 MB divided by 2 MB).
 * 在 Windows 10 版本 1607 x64 和 Server 2016 系统上，大页面也可以使用‘巨型页面（Huge Pages）’进行映射，其尺寸为 1 GB。如果申请的分配大小超过 1GB，系统会自动执行此操作，且分配大小不一定要是 1 GB 的整数倍。例如，一次 1040 MB的分配请求将产生一个巨型页（1024 MB）以及 8 个‘普通’大页（16 MB 除以 2 MB）
+
+
+
+## x64 virtual address translation
+
+**Each process has a top-level 
+extended page directory called the page map level 4 table(pml4) that contains the physical locations of 512 
+third-level structures, called page directory pointers**
+* 每个进程都有一个pml4表作为独立的顶层结构,可以做到进程独立.该pml4表物理地址存在EPROCESS结构的DirectoryTableBase字段中(),当cpu切换进程时,会将该地址加载到cr3寄存器.即如果能读取另一进程的cr3,就可以解析其页表读取其私有内存,无需切换到该进程上下文(如父子进程)
+* pml4本质是一个4kb大小的内存页.在x64下一个地址描述项(Entry)占用8字节,即总共拥有512个条目.这里的Entry代表一个带有属性标签的硬件指针.这个指针是一个64位的数据结构,存储在内存中,由两部分组成(1是物理基址,指向下一级结构的起始物理地址.2是控制位,记录了这块内存的权限等).
+* Entry是一次指针寻址,但完全是软件层面的指针寻址,而是硬件执行的查表寻址
+  * 软件寻址,在c/rust中对*ptr,cpu需要翻译ptr的虚拟地址
+  * 页表Entry寻址:cpu内部mmu(内存寻址单元)直接从内存读取这8字节的Entry,提取物理地址,然后硬件直接跳转到对应的物理地址,不需要再次翻译.这个过程在硬件中叫page walk页表漫游. 
+  * 虚拟地址,指的是在代码中使用的地址.在rust代码中的指针,如果用windbg查看的地址\rustc生成的指令里面的地址全部都是虚拟地址.虚拟地址是os给每个进程的,让每个进程都觉得自己拥有128TB的连续内存空间.
+  * 虚拟地址也是64位的,但是其有效位也是48位,且被分为4个9位的索引和一个偏移.真实物理地址 = 物理页基址 (从 PTE 提取) + 虚拟地址的最后 12 位 (Offset)
+* pml4中的每个条目pml4e都指向下一级结构pdpt在rma中的真实位置(物理位置,可以直接访问)
+* 寻址规模,pml4中1个条目可寻址虚拟空间中512GB范围(为什么).512个条目*512GB=256TB.这256TB是理论寻址空间,用户态和内核态各占128TB
+
+**Page Walk**
+1. 从四级页表计算物理基址过程称为page walk页表漫游.其前提是需要一个64位但实际有效位是48位的va(包含4个9位的index和1个12位的offset);以及cr3寄存器,存储了pml4表的物理基址
+2. 从 PML4 找到 PDPT:从VA 的 47:39 位（PML4 Index）开始定位(忽略12位的权限位,提取中间的4个9位的PFN).通过PML4E_Addr = CR3 + (PML4_Index * 8),这里得到的是PDPT表的物理基址
+3. 从 PDPT 找到 PD:从VA 的 38:30 位（PDPT Index）,通过PDPTE_Addr = PDPT_Base + (PDPT_Index * 8)计算Entry地址.读取该处的8字节Entry.得到pd表的物理基址.但如果该层的ps位为1,代表这是一个1GB大页,寻址至此结束.
+
+
+
+第一步：从 PML4 找到 PDPT
+   1. 定位行号：取 VA 的 47:39 位（PML4 Index）。
+   2. 计算 Entry 地址：PML4E_Addr = CR3 + (PML4_Index * 8)。
+   3. 提取物理基址：读取该处的 8 字节 Entry。
+       * 关键位操作：忽略低 12 位的权限位（Flags），提取中间的 PFN (Page Frame
+         Number)。
+       * 结果：这就是 PDPT 表 的物理基地址。
+
+  第二步：从 PDPT 找到 PD
+   1. 定位行号：取 VA 的 38:30 位（PDPT Index）。
+   2. 计算 Entry 地址：PDPTE_Addr = PDPT_Base + (PDPT_Index * 8)。
+   3. 提取物理基址：读取该处的 8 字节 Entry。
+       * 注意：如果这一层的 PS 位 (Page Size) 为 1，说明这是一个 1GB
+         大页，寻址在此结束。
+       * 结果：如果不是大页，这就是 PD 表 的物理基地址。
+
+  第三步：从 PD 找到 PT
+   1. 定位行号：取 VA 的 29:21 位（PD Index）。
+   2. 计算 Entry 地址：PDE_Addr = PD_Base + (PD_Index * 8)。
+   3. 提取物理基址：读取该处的 8 字节 Entry。
+       * 注意：如果这一层的 PS 位 为 1，说明这是一个 2MB 大页，寻址在此结束。
+       * 结果：如果不是大页，这就是 PT 表 的物理基地址。
+
+  第四步：从 PT 找到 物理页帧 (PFN)
+   1. 定位行号：取 VA 的 20:12 位（PT Index）。
+   2. 计算 Entry 地址：PTE_Addr = PT_Base + (PT_Index * 8)。
+   3. 最终提取：读取该处的 8 字节 PTE。
+       * 结果：提取出来的物理地址就是目标 4KB 物理内存页 的起始位置。
+
+  ---
+
+  终点：合成最终物理地址
+  现在你手里拿到了：
+   * 物理页基址：从上一步 PTE 中提取出来的（比如 0x1A2B3000）。
+   * 页内偏移 (Offset)：VA 的最后 11:0 位（比如 0x678）。
+
+  > 最终物理地址 = 0x1A2B3000 + 0x678 = 0x1A2B3678
+
+
+
+
+这个 Entry 是什么？
+  在第二步中，你找到的这个 8 字节 Entry 叫做 PDPTE (Page Directory Pointer Table
+  Entry)。
+
+   * 它的角色：它是四级寻址链条中的 “接力棒”。
+   * 它的内容：
+       * 核心任务：它存储了 PD (Page Directory) 表 的起始物理基地址。
+       * 附加任务：它带有权限位（比如：这一层级的 1GB 范围是否允许用户访问）。
+   * 为什么需要它？：因为 PML4 只告诉你“这一大块 512GB 在哪里”，而 PDPTE
+     进一步精确地告诉你“这 512GB 里的某 1GB 在哪里”。
+
+  ---
+
+  1. 这个 Entry 存储在什么地方？
+  它存储在 RAM（物理内存条） 的一个特定 4KB 页面中。
+
+   * 归属感：它属于那个由 PDPT_Base 定义的 4KB 页面。
+   * 物理位置：
+       * PDPT_Base 是这个 4KB 页面的开头。
+       * PDPT_Index * 8 是这个页面内的偏移量。
+       * 相加的结果：就是你在内存条上找到这 8 个字节的 “精确坐标”。
+
+  划重点：整个四级页表（PML4, PDPT, PD, PT）本质上就是 4 个 4KB
+  的物理内存页，它们散落在 RAM
+  的各个角落。硬件（MMU）就像在玩“寻宝游戏”，每一级拿到的 Entry
+  都指引它去寻找下一个 4KB 页面。
+
+  ---
+
+  3. 为啥需要一个新的 Entry？（逻辑的演进）
+  我们可以把这个寻址过程比作 “查字典”：
+
+   1. 第一步 (PML4)：你查“部首索引”，找到了“木”字部在哪一页（拿到 PDPT_Base）。
+   2. 第二步
+      (PDPT)：你翻到“木”字部那一页，根据虚拟地址给你的“笔画数”（PDPT_Index），找
+      到了“森林”这两个字所在的具体行。这一行就是你要找的“新的 Entry” (PDPTE)。
+   3. 第三步 (PD)：这一行（Entry）会指引你去字典的后面找“森”字的具体解释（拿到
+      PD_Base）。
+
+  结论：如果没有这个“新的
+  Entry”，寻址就断了。你需要它来告诉硬件：“接下来的路怎么走”。
+
+  ---
+
+  4. 深度细节：Entry 的生命周期
+
+  当你通过 PDPTE_Addr = PDPT_Base + (PDPT_Index * 8) 得到地址并读取了那 8
+  个字节后：
+
+   * 硬件动作：MMU 会把这 8 字节加载到自己的 内部寄存器 中。
+   * 属性检查：MMU 首先看它的 Present 位。如果是 0，硬件直接“翻脸”，抛出 Page
+     Fault（缺页异常）。
+   * 继续前进：如果一切正常，MMU 提取物理基址，开始 第三步（去查 PD 表）。
+
+
+
+**All the “physical loca
+tions” in the preceding description are stored in these structures as PFNs.**
