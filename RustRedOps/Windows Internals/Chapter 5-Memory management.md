@@ -2,16 +2,24 @@
   - [x64 架构的四级分页模型（PML4 -\> PDPT -\> PD -\> PT）](#x64-架构的四级分页模型pml4---pdpt---pd---pt)
   - [Introduction to the memory manager](#introduction-to-the-memory-manager)
     - [Large and small pages](#large-and-small-pages)
+  - [Page states and memory allocations](#page-states-and-memory-allocations)
+  - [PTE-System page table entries(即页表PT中的一个条目)](#pte-system-page-table-entries即页表pt中的一个条目)
+  - [Prototype PTEs](#prototype-ptes)
   - [x64 virtual address translation](#x64-virtual-address-translation)
 
 
 # Memory management
 
+
+
 **使用windbg对书中提到的内容进行验证甚至比通读本章更加重要**
 
 **有任何与本书冲突的,除非能使用windbg验证,否则以本书为准**
 
+**原书中每段都有很多细节,必须使用ai分析深入.**  
 **每一段的原理基本上都可以应用到三件套项目中,但需要仔细衡量隐蔽性代价**(第一遍先理解对应概念,第二段再深入refactor三件套)
+
+加粗的字体一般是原文
 
 ## x64 架构的四级分页模型（PML4 -> PDPT -> PD -> PT）
 
@@ -28,6 +36,14 @@
 | 29 : 21       | PD   | Page Directory           | 第二级索引，指向 PT            |
 | 20 : 12       | PT   | Page Table               | 第一级索引，指向物理页帧       |
 | 11 : 0        | Offset | Page Offset            | 物理页内的偏移量 (4KB 范围)    |
+
+
+1. PML4 (顶级)：里面的条目叫 PML4E,它只管指向下一级 PDPT
+2. PDPT (三级)：里面的条目叫 PDPTE,它只管指向下一级 PD
+3.  PD (二级)：里面的条目叫 PDE,它只管指向下一级 PT
+4.  PT (一级/底层)：里面的条目就是 PTE.PTE 直接指向你在内存条上的那个 4KB的物理空间（Page Frame）
+
+只有PTE控制物理页的属性
 
 A. 起跑点：CR3 寄存器
   每个进程都有一个唯一的物理地址，存储在 CPU 的 CR3 寄存器 中。这个地址指向该进程的 PML4
@@ -453,12 +469,97 @@ result in using one huge page (1024 MB) plus 8 “normal” large pages (16 MB d
 * 在 Windows 10 版本 1607 x64 和 Server 2016 系统上，大页面也可以使用‘巨型页面（Huge Pages）’进行映射，其尺寸为 1 GB。如果申请的分配大小超过 1GB，系统会自动执行此操作，且分配大小不一定要是 1 GB 的整数倍。例如，一次 1040 MB的分配请求将产生一个巨型页（1024 MB）以及 8 个‘普通’大页（16 MB 除以 2 MB）
 
 
+## Page states and memory allocations
+
+**Pages in a process virtual address space are:**  
+1. free
+2. reserved
+3. shareable
+4. committed.
+
+**Committed Page/Private Page**
+
+1. **Committed and shareable pages are pages that, when accessed, ultimately translate to valid pages in physical memory. Committed pages are also referred to as private pages. This is because committed pages cannot be shared with other processes, whereas shareable pages can be (but might be in use by only one process)**
+2. **Private pages are allocated through the Windows VirtualAlloc, VirtualAllocEx, and Virtual AllocExNuma functions, which lead eventually to the executive in the function NtAllocateVirtual Memory inside the memory manager.**   
+**These functions are capable of committing memory as well as reserving memory.**
+3. **Reserving memory means setting aside留出 a range of contiguous virtual addresses for possible future use (such as an array) while consuming negligible微不足道 system resources, and then committing portions of the reserved space as needed as the application runs.**
+4. **Or, if the size requirements are known in advance预先, a process can reserve and commit in the same function call.**  
+**In either case, the resulting committed pages can then be accessed by any thread in the process.**
+5. **If committed (private) pages have never been accessed before, they are created at the time of first access as zero-initialized零初始化 pages (or demand zero按需零初始化,这意味着尚未初始化的内存页可能保存有其他内容,可用于内存取证). Private committed pages may later be automatically written to the paging file分页文件 by the operating system if required by demand for physical memory.**   
+**Private refers to是指 the fact that these pages are normally inaccessible to any other process.**
+6. **Attempting to access free or reserved memory results in an access violation违反 exception because the page isn’t mapped to any storage that can resolve the reference.**
+
+
+
+**Some functions, such as ReadProcessMemory and WriteProcessMemory, appear to permit cross-process memory access, but these are implemented by running kernel-mode code in the context of the target process. (This is referred to as attaching to the process.)**   
+**They also require that the security descriptor of the target process grant授予 the accessor the PROCESS_VM_READ or PROCESS_VM_WRITE right, respectively, or that the accessor holds the SeDebugPrivilege, which is by default granted only to members of the administrators group.**
+* 背景:Context Switch上下文切换,每个进程有独立的页表(通过Cr3指向),不同进程不能相互读各自的取物理内存
+  * 内核附加Attaching:内核通过修改cpu的cr3寄存器,让当前执行流临时使用目标进程的页表
+  * security descriptor安全描述符:记录SID拥有什么权限
+* 这段揭示了跨进程访问的物理本质
+  1. API 请求：进程 A 调用 ReadProcessMemory 访问进程 B
+  2. 安全检查：内核检查进程 A 的 Token。如果 A 没有SeDebugPrivilege，且进程 B 的 SD 没给 A 权限，调用直接被毙掉
+  3. 内核态切换：通过安全检查后，代码进入内核态
+  4. 原子动作：KeStackAttachProcess：内核读取进程 B 的 DirectoryTableBase（即进程 B 的 PML4物理地址）;内核将这个地址加载进当前 CPU 的 CR3 寄存器;逻辑坍塌：此刻，CPU 虽然还在执行 ntoskrnl的代码，但它眼中的“虚拟地址世界”已经变成了进程 B 的样子
+  5. 数据拷贝：内核直接从进程 B的虚拟地址读取数据，存入内核缓冲区，然后切回进程 A 的CR3，将数据拷给进程 A
+
+
+
+**Shared Pages**
+
+1. Shared pages are usually mapped to a view of a section. This in turn is part or all of a file, but may instead represent a portion of page file space. All shared pages can potentially be shared with other processes. Sections are exposed in the Windows API as file-mapping objects.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## PTE-System page table entries(即页表PT中的一个条目)
+
+这里是system pte和prototype pte不同
+
+物理本质:一个64位的硬件数据结构  
+位置:四级分页模型中最后一级PT中的一个条目.虚拟位置在内核虚拟地址空间,在x64下被分配在一个特定的动态区域.物理位置存储在物理内存ram中,是os启动时预留的一块内存专门存放这些8字节条目.不属于任何用户进程属于系统进程,修改需要Ring0权限  
+作用:存储一个虚拟页(4kb)到物理帧(4kb)的最终映射关系.并定义该页的物理属性(读/写/执行等)
+管理者:Windows内存管理器(Memory Manager,Mm).内核中使用nt!MiSystemPtePool 结构来维护这个池
+  * 内核驱动调用 MmMapIoSpace 或 MmMapLockedPages时,内存管理器会从池中抠出几个空闲条目
+  * 位图管理 (Bitmaps)：内核通常使用位图或链表来标记哪些 System PTE是空的，哪些是占用的
+  * ：如果分配失败，内核会抛出STATUS_INSUFFICIENT_RESOURCES。在 2026年的高负载服务器上，这依然是内核级不稳定的诱因
+
+
+System page table entries (PTEs) are used to dynamically map system pages such as I/O space, kernel stacks, and the mapping for memory descriptor lists (MDLs, discussed to some extent in Chapter 6).  
+
+## Prototype PTEs
 
 ## x64 virtual address translation
 
 **Each process has a top-level 
-extended page directory called the page map level 4 table(pml4) that contains the physical locations of 512 
-third-level structures, called page directory pointers**
+extended page directory called the page map level 4 table(pml4) that contains the physical locations of 512 third-level structures, called page directory pointers**
 * 每个进程都有一个pml4表作为独立的顶层结构,可以做到进程独立.该pml4表物理地址存在EPROCESS结构的DirectoryTableBase字段中(),当cpu切换进程时,会将该地址加载到cr3寄存器.即如果能读取另一进程的cr3,就可以解析其页表读取其私有内存,无需切换到该进程上下文(如父子进程)
 * pml4本质是一个4kb大小的内存页.在x64下一个地址描述项(Entry)占用8字节,即总共拥有512个条目.这里的Entry代表一个带有属性标签的硬件指针.这个指针是一个64位的数据结构,存储在内存中,由两部分组成(1是物理基址,指向下一级结构的起始物理地址.2是控制位,记录了这块内存的权限等).
 * Entry是一次指针寻址,但完全是软件层面的指针寻址,而是硬件执行的查表寻址
