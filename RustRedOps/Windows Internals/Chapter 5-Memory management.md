@@ -5,6 +5,8 @@
   - [Page states and memory allocations](#page-states-and-memory-allocations)
   - [Shared memory and mapped files](#shared-memory-and-mapped-files)
   - [Protecting memory](#protecting-memory)
+  - [Data Execution Prevention](#data-execution-prevention)
+  - [Copy-on-write](#copy-on-write)
   - [PTE-System page table entries(即页表PT中的一个条目)](#pte-system-page-table-entries即页表pt中的一个条目)
   - [Prototype PTEs](#prototype-ptes)
   - [x64 virtual address translation](#x64-virtual-address-translation)
@@ -571,7 +573,7 @@ The underlying primitives in the memory manager used to implement shared memory 
 This fundamental primitive in the memory manager is used to map virtual addresses whether in main memory, in the page file, or in some other file that an application wants to access as if it were in memory. A section can be opened by one process or by many. In other words, section objects don’t necessarily必定 equate等同 to shared memory.
 
 **mapped file**  
-A section object can be connected to an open file on disk (called a mapped file) or to committed memory (to provide shared memory). Sections mapped to committed memory are called page-file-backed sections because the pages are written to the paging file (as opposed to a mapped file) if demands on physical memory require it. (Because Windows can run with no paging file, page-file-backed sections might in fact be “backed” only by physical memory.) As with any other empty page that is made visible to user mode (such as private committed pages), shared committed pages are always zero-filled when they are first accessed to ensure that no sensitive data is ever leaked.
+A section object can be connected to an open file on disk (**called a mapped file**) or to committed memory (to provide shared memory). Sections mapped to committed memory are called page-file-backed sections because the pages are written to the paging file (as opposed to a mapped file) if demands on physical memory require it. (Because Windows can run with no paging file, page-file-backed sections might in fact be “backed” only by physical memory.) As with any other empty page that is made visible to user mode (such as private committed pages), shared committed pages are always zero-filled when they are first accessed to ensure that no sensitive data is ever leaked.
 
 To create a section object, call the Windows CreateFileMapping, CreateFileMappingFromApp, or CreateFileMappingNuma(Ex) function, specifying a previously opened file handle to map it to (or INVALID_HANDLE_VALUE for a page-file-backed section) and optionally a name and security descriptor.   
 If the section has a name, other processes can open it with OpenFileMapping or the CreateFileMapping* functions. Or you can grant access to section objects through either handle inheritance (by specifying that the handle be inheritable when opening or creating the handle) or handle duplication (by using DuplicateHandle). Device drivers can also manipulate section objects with the ZwOpenSection, ZwMapViewOfSection, and ZwUnmapViewOfSection functions.
@@ -606,6 +608,42 @@ process can inadvertently or deliberately无意或故意 corrupt污染 the addre
 
 
 4. Shared memory section objects have standard Windows access control lists (ACLs) that are checked when processes attempt to open them, thus limiting access of shared memory to those processes with the proper rights. Access control also comes into play when a thread creates a section to contain a mapped file. To create the section, the thread must have at least read  access to the underlying file object or the operation will fail.
+
+
+Once a thread has successfully opened a handle to a section, its actions are still subject to the  memory manager and the hardware-based page protections described earlier. A thread can change the page-level protection on virtual pages in a section if the change doesn’t violate the permissions in the ACL for that section object. For example, the memory manager allows a thread to change the pages of a read-only section to have copy-on-write access but not to have read/write access. The copy-on-write access is permitted because it has no effect on other processes sharing the data.
+
+
+## Data Execution Prevention
+
+Data Execution Prevention (DEP)数据执行保护, or no-execute (NX) page protection, causes引起 an attempt to transfer control to an instruction in a page marked as “no execute” to generate an access fault.   
+1. This can prevent certain types of malware from exploiting bugs in the system through the execution of code placed in a data page such as the stack. 
+2. DEP can also catch poorly written programs that don’t correctly set permissions on pages from which they intend to execute code. 
+3. If an attempt is made in kernel mode to execute code in a page marked as “no execute,” the system will crash with the bug check code ATTEMPTED_ EXECUTE_OF_NOEXECUTE_MEMORY (0xFC). (See Chapter 15, “Crash dump analysis,” in Part 2 for an explanation of these codes.) 
+4. If this occurs in user mode, a STATUS_ACCESS_VIOLATION (0xC0000005) exception is delivered to the thread attempting the illegal reference.
+5. If a process allocates memory that needs to be executable, it must explicitly mark such pages by specifying the PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, or PAGE_EXECUTE_WRITECOPY flags on the page-granularity memory-allocation functions.
+
+
+On 32-bit x86 systems that support DEP, bit 63 in the page table entry (PTE) is used to mark a page as non-executable. Therefore, the DEP feature is available only when the processor is running in Physical Address Extension (PAE) mode, without which page table entries are only 32 bits wide. (See the section “x86 virtual address translation” later in this chapter.) Thus, support for hardware DEP on 32-bit systems requires loading the PAE kernel (%SystemRoot%\System32\Ntkrnlpa.exe), which currently is the only supported kernel on x86 systems. 
+
+On ARM systems, DEP is set to AlwaysOn.
+
+On 64-bit versions of Windows  
+1. execution protection is always applied to all 64-bit processes and device drivers and can be disabled only by setting the nx BCD option to AlwaysOff. 
+2. Execution protection for 32-bit programs depends on system configuration settings, described shortly. On 64-bit Windows, execution protection is applied to thread stacks (both user and kernel mode), user-mode pages not specifically marked as executable, the kernel paged pool, and the kernel session pool. For a description of kernel memory pools, see the section “Kernel-mode heaps (system memory pools).” However, on 32-bit Windows, execution protection is applied only to thread stacks and user-mode pages, not to the paged pool and session pool.
+
+...
+
+
+## Copy-on-write
+
+Copy-on-write page protection is an optimization the memory manager uses to conserve节省/保存 physical memory. 
+
+When a process maps a copy-on-write view of a section object that contains read/write pages, the memory manager delays the copying of pages until the page is written to instead of making a process private copy at the time the view is mapped. 
+
+
+
+
+
 
 
 
