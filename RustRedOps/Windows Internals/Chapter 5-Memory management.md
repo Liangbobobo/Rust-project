@@ -3,6 +3,8 @@
   - [Introduction to the memory manager](#introduction-to-the-memory-manager)
     - [Large and small pages](#large-and-small-pages)
   - [Page states and memory allocations](#page-states-and-memory-allocations)
+  - [Shared memory and mapped files](#shared-memory-and-mapped-files)
+  - [Protecting memory](#protecting-memory)
   - [PTE-System page table entries(即页表PT中的一个条目)](#pte-system-page-table-entries即页表pt中的一个条目)
   - [Prototype PTEs](#prototype-ptes)
   - [x64 virtual address translation](#x64-virtual-address-translation)
@@ -488,7 +490,9 @@ result in using one huge page (1024 MB) plus 8 “normal” large pages (16 MB d
 5. **If committed (private) pages have never been accessed before, they are created at the time of first access as zero-initialized零初始化 pages (or demand zero按需零初始化,这意味着尚未初始化的内存页可能保存有其他内容,可用于内存取证). Private committed pages may later be automatically written to the paging file分页文件 by the operating system if required by demand for physical memory.**   
 **Private refers to是指 the fact that these pages are normally inaccessible to any other process.**
 6. **Attempting to access free or reserved memory results in an access violation违反 exception because the page isn’t mapped to any storage that can resolve the reference.**
-
+7. You can decommit private pages and/or release address space with the VirtualFree or VirtualFreeEx function. The difference between decommittal and release is similar to the difference between reservation and committal. Decommitted memory is still reserved, but released memory has been freed; it is neither committed nor reserved.
+8. Using the two-step process of reserving and then committing virtual memory defers延迟 committing pages—and, thereby因此, defers adding to the system commit charge命令/指示 described in the next section—until needed, but keeps the convenience of virtual contiguity虚拟临街. Reserving memory is a relatively相对 inexpensive operation because it consumes very little actual memory. All that needs to be updated or constructed is the relatively small internal data structures that represent the state of the process address space. We’ll explain these data structures, called page tables and Virtual Address Descriptors (VADs), later in this chapter.
+9. One extremely common use for reserving a large space and committing portions of it as needed is the user-mode stack for each thread. When a thread is created, a stack is created by reserving a contiguous portion of the process address space. (The default size is 1 MB but you can override this size with the CreateThread and CreateRemoteThread(Ex) function calls or change it on an executable image basis by using the /STACK linker flag.) By default, the initial page in the stack is committed and the next page is marked as a guard page (which isn’t committed) that traps references beyond the end of the committed portion of the stack and expands it.
 
 
 **Some functions, such as ReadProcessMemory and WriteProcessMemory, appear to permit cross-process memory access, but these are implemented by running kernel-mode code in the context of the target process. (This is referred to as attaching to the process.)**   
@@ -510,13 +514,98 @@ result in using one huge page (1024 MB) plus 8 “normal” large pages (16 MB d
 1. Shared pages are usually mapped to a view of a section. This in turn is part or all of a file, but may instead represent a portion of page file space. All shared pages can potentially be shared with other processes. Sections are exposed in the Windows API as file-mapping objects.
 
 
+2. When a shared page is first accessed by any process, it will be read in from the associated mapped file unless the section is associated with the paging file, in which case it is created as a zero-initialized page. Later, if it is still resident in physical memory, the second and subsequent processes accessing it can simply use the same page contents that are already in memory. Shared pages might also have been prefetched by the system.  
+Two upcoming sections of this chapter, “Shared memory and mapped files” and “Section objects,” 
+go into much more detail about shared pages. 
 
 
+Pages are written to disk through a mechanism called modified page writing. This occurs as pages are moved from a process’s working set to a system-wide list called the modified page list. From there, they are written to disk or remote storage(通过网线连接的硬盘). (Working sets and the modified list are explained later in this chapter.)   
+Mapped file pages can also be written back to their original files on disk with an explicit call to FlushViewOfFile or by the mapped page writer as memory demands dictate需要
 
 
+**Commit charge and commit limit**
+
+win下的任务管理器/性能中能看到已提交的内存用量
+
+There is a system-wide limit, called the system commit limit or simply the commit limit, on the amount of committed virtual memory that can exist at any one time. This limit corresponds to the  current total size of all paging files plus the amount of RAM that is usable by the operating system.    
+This is the second of the two numbers displayed under the Committed label. The memory manager  can increase the commit limit automatically by expanding one or more of the paging files if they are not already at their configured maximum size.  
+Commit charge and the system commit limit are explained in more detail in the section “Commit 
+charge and the system commit limit” later in this chapter.
 
 
+**Locking Memory**
 
+In general, it’s better to let the memory manager decide which pages remain in physical memory.   
+However, there might be special circumstances when it might be necessary for an application or device driver to lock pages in physical memory. Pages can be locked in memory in two ways:  
+1. Windows applications can call the VirtualLock function to lock pages in their process working set. Pages locked using this mechanism remain in memory until explicitly unlocked or until the process that locked them terminates. The number of pages a process can lock can’t exceed超过 its minimum working set size minus减去 eight pages. If a process needs to lock more pages, it can increase its working set minimum with the SetProcessWorkingSetSizeEx function, discussed later in this chapter in the section “Working set management.”
+2. Device drivers can call the MmProbeAndLockPages, MmLockPagableCodeSection, MmLockPagableDataSection, or MmLockPagableSectionByHandle kernel-mode functions. Pages locked using this mechanism remain in memory until explicitly unlocked. The last three of these APIs enforce no quota配额/限额 on the number of pages that can be locked in memory because the resident available page charge is obtained when the driver first loads. This ensures that it can never cause a system crash due to overlocking. For the first API, quota charges must be obtained or the API will return a failure status.
+
+
+**Allocation granularity**
+
+Windows aligns each region of reserved process address space to begin on an integral完整的 boundary defined by the value of the system allocation granularity, which can be retrieved from the Windows GetSystemInfo or GetNativeSystemInfo functions.   
+This value is 64 KB, a granularity that is used by the memory manager to efficiently allocate metadata (for example, VADs, bitmaps, and so on) to support various process operations. In addition, if support were added for future processors with larger page sizes (for example, up to 64 KB) or virtually indexed caches that require system-wide physical-to-virtual page alignment, the risk of requiring changes to applications that made assumptions about allocation alignment would be reduced.
+* win的内存对齐在不同层级有不同的颗粒度
+* 64K是逻辑边界,4k是物理边界
+* 所有通过 VirtualAlloc 或 MapViewOfFile开启的新内存区域，其起始地址都必须遵循这个 64 KB 规则
+
+Windows kernel-mode code isn’t subject受影响 to the same restrictions. It can reserve memory on a single-page granularity (although this is not exposed to device drivers for the reasons detailed earlier). This level of granularity is primarily used to pack TEB allocations more densely. Because this mechanism is internal only, this code can easily be changed if a future platform requires different values. Also, for the purposes of supporting 16-bit and MS-DOS applications on x86 systems only, the memory manager provides the MEM_DOS_LIM flag to the MapViewOfFileEx API, which is used to force the use of single-page granularity.
+
+Finally, when a region of address space is reserved, Windows ensures that the size and base of the region is a multiple of the system page size, whatever that might be. For example, because x86 systems use 4 KB pages, if you tried to reserve a region of memory 18 KB in size, the actual amount reserved on an x86 system would be 20 KB. If you specified a base address of 3 KB for an 18 KB region, the actual amount reserved would be 24 KB. Note that the VAD for the allocation would then also be rounded to 64 KB alignment/length, thus making the remainder of it inaccessible.
+
+
+## Shared memory and mapped files
+
+As is true with most modern operating systems, Windows provides a mechanism to share memory among processes and the operating system.   
+Shared memory can be defined as memory that is visible to more than one process or that is present in more than one process virtual address space. For example, if two processes use the same DLL, it would make sense to load the referenced code pages for that DLL into physical memory only once and share those pages between all processes that map the DLL, as illustrated in Figure 5-2.
+
+![](./picture/figure5-2.png)
+
+1. Each process would still maintain its private memory areas to store private data but the DLL code and unmodified data pages could be shared without harm.
+2.  As we’ll explain later, this kind of sharing happens automatically because the code pages in executable images—EXE and DLL files, and several other types like screen savers (SCR), which are essentially DLLs under other names—are mapped as execute-only and writable pages are mapped as copy-on-write. (See the “Copy-on-write” section later in this chapter for more information.)
+3. Figure 5-2 shows two processes, based on different images, that share a DLL mapped just once to physical memory. The images (EXE) code itself is not shared in this case because the two processes run different images. The EXE code would be shared between processes that run the same image, such as two or more processes running Notepad.exe.
+
+**section objects**  
+The underlying primitives in the memory manager used to implement shared memory are called section objects, which are exposed as file-mapping objects in the Windows API. The internal structure and implementation of section objects are described later in this chapter in the section “Section objects.”
+
+This fundamental primitive in the memory manager is used to map virtual addresses whether in main memory, in the page file, or in some other file that an application wants to access as if it were in memory. A section can be opened by one process or by many. In other words, section objects don’t necessarily必定 equate等同 to shared memory.
+
+**mapped file**  
+A section object can be connected to an open file on disk (called a mapped file) or to committed memory (to provide shared memory). Sections mapped to committed memory are called page-file-backed sections because the pages are written to the paging file (as opposed to a mapped file) if demands on physical memory require it. (Because Windows can run with no paging file, page-file-backed sections might in fact be “backed” only by physical memory.) As with any other empty page that is made visible to user mode (such as private committed pages), shared committed pages are always zero-filled when they are first accessed to ensure that no sensitive data is ever leaked.
+
+To create a section object, call the Windows CreateFileMapping, CreateFileMappingFromApp, or CreateFileMappingNuma(Ex) function, specifying a previously opened file handle to map it to (or INVALID_HANDLE_VALUE for a page-file-backed section) and optionally a name and security descriptor.   
+If the section has a name, other processes can open it with OpenFileMapping or the CreateFileMapping* functions. Or you can grant access to section objects through either handle inheritance (by specifying that the handle be inheritable when opening or creating the handle) or handle duplication (by using DuplicateHandle). Device drivers can also manipulate section objects with the ZwOpenSection, ZwMapViewOfSection, and ZwUnmapViewOfSection functions.
+
+**view of the section**  
+A section object can refer to适用于 files that are much larger than can fit in the address space of a process. (If the paging file backs a section object, sufficient充足的 space must exist in the paging file and/or RAM to contain it.) To access a very large section object, a process can map only the portion of the section object that it requires (called a view of the section) by calling the MapViewOfFile(Ex), MapViewOfFileFromApp, or MapViewOfFileExNuma function and then specifying the range to map. Mapping views permits processes to conserve address space because only the views of the section object needed at the time must be mapped into memory.
+
+Windows applications can use mapped files to conveniently perform I/O to files by simply making them appear as扮演 data in memory within their address space. User applications aren’t the only consumers of section objects; the image loader uses section objects to map executable images, DLLs, and device drivers into memory, and the cache manager uses them to access data in cached files. (For information on how the cache manager integrates with the memory manager, see Chapter 14 in Part 2.) The implementation of shared memory sections, both in terms of address translation and the internal data structures, is explained in the section “Section objects” later in this chapter.
+
+## Protecting memory
+
+Windows provides memory protection so that no user 
+process can inadvertently or deliberately无意或故意 corrupt污染 the address space of another process or the operating system. Windows provides this protection in four primary ways.  
+1. All system-wide data structures and memory pools used by kernel-mode system components can be accessed only while in kernel mode. User-mode threads can’t access these pages. If they attempt to do so, the hardware generates a fault, which the memory manager reports to the thread as an access violation.
+2. Each process has a separate, private address space, protected from access by any thread belonging to another process. Even shared memory is not really an exception to this because each process accesses the shared regions using addresses that are part of its own virtual address space. **The only exception** is if another process has virtual memory read or write access to the process object (or holds SeDebugPrivilege) and thus can use the ReadProcessMemory or WriteProcessMemory function. Each time a thread references an address, the virtual memory hardware, in concert with the memory manager, intervenes and translates the virtual address into a physical one. By controlling how virtual addresses are translated, Windows can ensure that threads running in one process don’t inappropriately access a page belonging to another process.
+3. In addition to the implicit protection offered by virtual-to-physical address translation, all processors supported by Windows provide some form of hardware-controlled memory protection such as read/write, read-only, and so on. (The exact details of such protection vary according to the processor.) For example, code pages in the address space of a process are marked read-only and are thus protected from modification by user threads. Table 5-2 lists the memory-protection options defined in the Windows API. (See the documentation for the VirtualProtect, VirtualProtectEx, VirtualQuery, and VirtualQueryEx functions.)
+
+| Attribute                          | Description |
+|-----------------------------------|-------------|
+| `PAGE_NOACCESS`                   | 任何尝试读取、写入或执行此区域中的代码都会导致访问冲突（access violation）。 |
+| `PAGE_READONLY`                   | 任何写入操作（以及在不支持执行位的处理器上执行代码）都会导致访问冲突，但允许读取。 |
+| `PAGE_READWRITE`                  | 页面可读可写，但不可执行。 |
+| `PAGE_EXECUTE`                    | 任何写入此区域内存中代码的操作都会导致访问冲突，但允许执行（且在所有现有处理器上也允许读取）。 |
+| `PAGE_EXECUTE_READ`*              | 任何写入此区域内存的操作都会导致访问冲突，但允许执行和读取。 |
+| `PAGE_EXECUTE_READWRITE`*         | 页面可读、可写、可执行。任何访问尝试都会成功。 |
+| `PAGE_WRITECOPY`                  | 任何写入此区域内存的操作都会使系统为进程提供该页的私有副本。在不支持执行位的处理器上，尝试执行此区域中的代码会导致访问冲突。 |
+| `PAGE_EXECUTE_WRITECOPY`          | 任何写入此区域内存的操作都会使系统为进程提供该页的私有副本。允许读取和执行此区域中的代码（这种情况下不会创建副本）。 |
+| `PAGE_GUARD`                      | 任何对保护页（guard page）的读取或写入操作都会引发 `EXCEPTION_GUARD_PAGE` 异常，并关闭该页的保护状态。因此，保护页起到一次性警报的作用。注意：此标志可与表中除 `PAGE_NOACCESS` 外的任何页面保护属性组合使用。 |
+| `PAGE_NOCACHE`                    | 使用未缓存的物理内存。不推荐一般用途使用，适用于设备驱动程序（例如，映射无缓存的视频帧缓冲区）。 |
+| `PAGE_WRITECOMBINE`               | 启用写合并（write-combined）内存访问。启用后，处理器不会缓存内存写入（可能导致比缓存写入显著更多的内存流量），但会尝试聚合写请求以优化性能。例如，对同一地址的多次写入可能只保留最后一次；对相邻地址的独立写入也可能被合并为一次大写入。通常不用于普通应用程序，但对设备驱动程序有用（例如，将视频帧缓冲区映射为写合并模式）。 |
+| `PAGE_TARGETS_INVALID` 和<br>`PAGE_TARGETS_NO_UPDATE`<br>（Windows 10 和 Windows Server 2016） | 这些值用于控制这些页面中可执行代码的 Control Flow Guard (CFG) 行为。两个常量具有相同的数值，但在不同调用中使用，本质上作为开关：<br>- `PAGE_TARGETS_INVALID` 表示间接调用应使 CFG 检查失败并导致进程崩溃。<br>- `PAGE_TARGETS_NO_UPDATE` 允许通过 `VirtualProtect` 更改页面范围以允许执行时，不更新 CFG 状态。<br>有关 CFG 的更多信息，请参见第 7 章“安全性”。 |
+
+
+4. Shared memory section objects have standard Windows access control lists (ACLs) that are checked when processes attempt to open them, thus limiting access of shared memory to those processes with the proper rights. Access control also comes into play when a thread creates a section to contain a mapped file. To create the section, the thread must have at least read  access to the underlying file object or the operation will fail.
 
 
 
