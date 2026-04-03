@@ -1,6 +1,8 @@
+- [architecture overview(chapter2)](#architecture-overviewchapter2)
 - [Memory management](#memory-management)
   - [x64 架构的四级分页模型（PML4 -\> PDPT -\> PD -\> PT）](#x64-架构的四级分页模型pml4---pdpt---pd---pt)
   - [Introduction to the memory manager](#introduction-to-the-memory-manager)
+    - [Memory manager components](#memory-manager-components)
     - [Large and small pages](#large-and-small-pages)
   - [Page states and memory allocations](#page-states-and-memory-allocations)
   - [Shared memory and mapped files](#shared-memory-and-mapped-files)
@@ -10,7 +12,25 @@
   - [PTE-System page table entries(即页表PT中的一个条目)](#pte-system-page-table-entries即页表pt中的一个条目)
   - [Prototype PTEs](#prototype-ptes)
   - [x64 virtual address translation](#x64-virtual-address-translation)
+- [virtual Address](#virtual-address)
+  - [Virtual address space layouts](#virtual-address-space-layouts)
+  - [Virtual address descriptors(VDA)](#virtual-address-descriptorsvda)
+  - [Process VADs](#process-vads)
+  - [Rotate VADs](#rotate-vads)
+  - [Section Objects](#section-objects)
+  - [Kennel-mode heaps(System memory pools)](#kennel-mode-heapssystem-memory-pools)
+  - [扩展-image](#扩展-image)
+  - [扩展-Routine](#扩展-routine)
 
+
+
+
+# architecture overview(chapter2)
+
+![](./picture/figure2-1.png)
+
+**Kernel Mode:**
+1. Executive:是内核的最上层，它通过导出系统调用（Syscalls）为用户态提供服务.其管理着多个专门的子系统(如 Mm/IO Se(security Reference Monitor用于实施访问控制策略))
 
 # Memory management
 
@@ -24,6 +44,9 @@
 **每一段的原理基本上都可以应用到三件套项目中,但需要仔细衡量隐蔽性代价**(第一遍先理解对应概念,第二段再深入refactor三件套)
 
 加粗的字体一般是原文
+
+
+
 
 ## x64 架构的四级分页模型（PML4 -> PDPT -> PD -> PT）
 
@@ -345,10 +368,7 @@ A. 起跑点：CR3 寄存器
 ## Introduction to the memory manager
 
 By default, the virtual size of a process on 32-bit Windows is 2 GB.与大多数文献介绍的有一些区别,大多数都会说x86的进程虚拟内存是4GB,这里更加细致的解释为2GB,因为内核态会占用2GB  
-A 32-bit process can grow to be up to 3 GB on 32-bit Windows and to 4 
-GB on 64-bit Windows.   
-The process virtual address space size on 64-bit Windows 8 and Server 2012 is 8192 
-GB (8 TB) and on 64 bit Windows 8.1 (and later) and Server 2012 R2 (and later), it is 128 TB    
+A 32-bit process can grow to be up to 3 GB on 32-bit Windows and to 4 GB on 64-bit Windows. The process virtual address space size on 64-bit Windows 8 and Server 2012 is 8192 GB (8 TB) and on 64 bit Windows 8.1 (and later) and Server 2012 R2 (and later), it is 128 TB    
 win8以后的版本中,虽然寄存器是64位,但硬件只实现了48位的虚拟地址寻址,即256TB,在win8内核限制只允许用户态使用8TB,在win8.1之后用户态占用一半是128TB.  
 win10/11寻址从48位提到57位(总空间128PB),在某些版本中用户态空间被提升到256TB.  
 如果完全实现64位的虚拟地址寻址,总空间会扩大到16EB
@@ -357,10 +377,7 @@ win10/11寻址从48位提到57位(总空间128PB),在某些版本中用户态空
 >对红队的意义:在红队工具开发中应当注意用户空间的虚拟内存大小是2GB,如果寻址大约2GB可能会出现错误
 
 
-The maximum amount 
-of physical memory currently supported by Windows ranges from 2 GB to 24 TB, depending on which 
-version and edition of Windows you are running. Because the virtual address space might be larger or 
-smaller than the physical memory on the machine, the memory manager has **two primary tasks**:
+The maximum amount of physical memory currently supported by Windows ranges from 2 GB to 24 TB, depending on which version and edition of Windows you are running. Because the virtual address space might be larger or smaller than the physical memory on the machine, the memory manager has **two primary tasks**:
 * Translating, or mapping, a process’s virtual address space into physical memory so that when a thread running in the context of that process reads or writes to the virtual address space, the correct physical address is referenced. (The subset of a process’s virtual address space that is physically resident驻留 is called the working set. Working sets are described in more detail in the section “Working sets” later in this chapter.)  
    * version指内核或发布版本代号(Windows 11 (NT 10.0.2xxxx), Windows Server2022);edition指同一个version下的Home(家庭版)/Pro(专业版),不同的edition支持不同的内存上限(Windows 11 Home：上限 128 GB/Windows 11 Pro：上限 2 TB)
    * 支持的物理内存由cpu物理寻址位数(32/64)/内核支持的成本/操作系统版本,这三者最少的决定.
@@ -380,9 +397,55 @@ smaller than the physical memory on the machine, the memory manager has **two pr
    * 2026年,由于NVMe硬盘速度逼近ram及内存压缩技术的普及,windows现在倾向于现在ram中压缩非活动页面,而不是直接写回慢速硬盘.相关内容在memory compression进程中
    * 以上,分页是os在物理资源的有限性与虚拟需求无限性之间的妥协
 
-### Large and small pages
+### Memory manager components
 
-Memory management is done in distinct chunks called pages. This is because the hardware memory 
+位置:The memory manager is part of the Windows executive and therefore exists in the file Ntoskrnl.exe.No parts of the memory manager exist in the HAL(Hardware Abstraction layout).    
+
+The memory manager consists of the following components:  
+1. A set of executive system services for allocating, deallocating, and managing virtual memory, most of which are exposed through the Windows API or kernel-mode device driver interfaces
+   1. Ntoskrnl.exe是Windows os的核心可执行文件(PE结构)
+   2. Mm所有逻辑代码(c++)都被打包链接在此,其导出表中有大量Mm开头函数.(静态)
+   3. 当os引导boot时,内核加载器会将Ntoskrnl.exe映射到内核空间的内存地址中.此时Mm成为常驻内存的一段活跃代码,负责管理PTEs\Working Sets和虚拟地址空间
+2. A translation-not-valid无效转换 and access fault trap陷阱 handler for resolving hardware-detected memorymanagement exceptions and making virtual pages resident on behalf of a process.
+   1. “一个‘转换无效’与‘访问故障’陷阱处理程序，用于硬件检测到的内存管理异常,并代表进程使虚拟页面常驻内存
+   2. Access fault:violate 页表权限
+   3. resident:win下如果一个page是Resident的,代表该page在ram中,而不是磁盘的page file(pagefile.sys)中
+3. Six key top-level routines, each running in one of six different kernel-mode threads in the System process.**The balance set manager (KeBalanceSetManager, priority 17)** This calls an inner routine, the working set manager (MmWorkingSetManager), once per second as well as when free memory falls below a certain threshold. The working set manager drives the overall memory- management policies, such as working set trimming, aging, and modified page writing.
+   1. “平衡集管理器（KeBalanceSetManager，优先级为17）每秒会调用一次内部例程——工作集管理器（MmWorkingSetManager），当空闲内存低于特定阈值时也会调用。工作集管理器主导着全局内存管理策略，例如工作集裁剪（Trimming）、老化处理（Aging）以及已修改页面的写入（Modified Page Writing）。”
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### Large and small pages 
+
+Memory management is done in distinct chunks called pages.   
+This is because the hardware memory 
 management unit translates virtual to physical addresses at the granularity of a page.以页的细粒度   
 Hence, a page is 
 the smallest unit of protection at the hardware level. (The various page-protection options are de
@@ -640,8 +703,7 @@ Copy-on-write page protection is an optimization the memory manager uses to cons
 
 When a process maps a copy-on-write view of a section object that contains read/write pages, the memory manager delays the copying of pages until the page is written to instead of making a process private copy at the time the view is mapped. 
 
-
-
+...
 
 
 
@@ -803,3 +865,151 @@ extended page directory called the page map level 4 table(pml4) that contains th
 
 **All the “physical loca
 tions” in the preceding description are stored in these structures as PFNs.**
+
+# virtual Address
+
+**如何产生:**当调用VirtualAlloc或Rust中的Box::new时,Mm通常执行
+1. VAD树搜索:Windows使用vad管理进程的虚拟地址空间,申请内存时,Mm会在vad树中找到一块足够大的空洞
+2. ASLR(Address Space Layout Randomization)重定向:为了安全,生成的地址通常随机偏移/不固定
+3. Reserve and commit: vad树中标记的范围是reserve的,不生成页表条目.只有真正访问内存时,触发page fault,内核才会填充物理内存并建立分页结构
+
+**如何维护/翻译:**cpu的MMU(Memory Management Unit)自动完成,其维护关键在于CR3寄存器
+1. 每个进程都有独立的页表,切换进程时,内核会将该进程的PML4表的物理地址加载到CR3寄存器中
+2. 具体的翻译流程见[x64 架构的四级分页模型（PML4 -\> PDPT -\> PD -\> PT）](#x64-架构的四级分页模型pml4---pdpt---pd---pt)
+3. TLB (Translation Lookaside Buffer转译后备缓冲区)：为了加速翻译，CPU 会缓存最近转换过的VA->PA 映射。当 Windows 修改了页表（如释放内存）时，必须执行 invlpg指令或刷新 CR3 来 刷新 TLB，否则会出现“幽灵内存”访问
+4. 自映射（Self-Mapping）也成为递归分页（Recursive Paging）
+   1. 存在原因:内核需要修改页表,但cpu只能通过va访问内存.页表本身存储在ram中,如果要修改页表,内核必须先在页表所在物理页创建一个va,这会陷入死循环.win通过在pml4表中拿出一个条目指向它自己来解决这个问题
+  
+
+
+
+
+
+## Virtual address space layouts
+
+This section describes the components in the user and system address space
+
+Three main types of data are mapped into the virtual address space in Windows: 
+1. Per-process private code and data :
+   1.  a virtual address is always evaluated in the context of the current process and cannot refer to an address defined by any other process.Threads within the process can therefore never access virtual addresses outside this private address space. 
+   2.  Even shared memory is not an exception to this rule, because shared memory regions are mapped into each participating参与 process, and so are accessed by each process using per-process addresses. 
+   3.  Similarly, the cross-process memory functions (Read- ProcessMemory and WriteProcessMemory) operate by running kernel-mode code in the context of the target process. The process virtual address space, called page tables, is described in the “Address translation” section. Each process has its own set of page tables. They are stored  in kernel-mode-only accessible pages so that user-mode threads in a process cannot modify their own address space layout.
+2.  Session-wide code and data  
+  1. A session consists of the processes and other system objects such as the window station, desktops, and windows that represent a single user’s logon session.
+  2. Each session has a session-specific paged pool area used by the kernel-mode portion of the Windows subsystem (Win32k.sys) to allocate session-private GUI data structures. 
+  3. In addition, each session has its own copy of the Windows subsystem process (Csrss.exe) and logon process (Winlogon.exe). 
+  4. The Session Manager process (Smss.exe) is responsible for creating new sessions, which includes loading a session-private copy of Win32k.sys, creating the session-private object manager namespace (see Chapter 8 in Part 2 for more details on the object manager), and creating the session-specific instances of the Csrss.exe and Winlogon.exe processes. 
+  5. To virtualize sessions, all session-wide data structures are mapped into a region of system space called **session space**. When a process is created, this range of addresses is mapped to the pages associated with the session that the process belongs to.
+3. System-wide code and data :System space contains global operating system code and data structures visible by kernel-mode code regardless of which process is currently executing. 
+  1. System code This contains the OS image, HAL, and device drivers used to boot the system.
+  2. Nonpaged pool This is the non-pageable system memory heap.
+  3. Paged pool This is the pageable system memory heap.
+  4. System cache This is virtual address space used to map files open in the system cache. 
+  5. System page table entries (PTEs) This is the pool of system PTEs used to map system pages such as I/O space, kernel stacks, and memory descriptor lists. You can see how many system PTEs are available by using Performance Monitor to examine the value of the Memory: Free System Page Table Entries counter.
+  6. System working set lists These are the working set list data structures that describe the three system working sets: system cache, paged pool, and system PTEs.
+  7. System mapped views This is used to map Win32k.sys, the loadable kernel-mode part of the Windows subsystem, as well as kernel-mode graphics drivers it uses. (See Chapter 2 for more information on Win32k.sys.)
+  8. Hyperspace This is a special region used to map the process working set list and other per-process data that doesn’t need to be accessible in arbitrary process context. Hyperspace is also used to temporarily map physical pages into the system space. One example of this is invalidating page table entries in page tables of processes other than the current one, such as when a page is removed from the standby list.
+  9. Crash dump information This is reserved to record information about the state of a system crash.
+  10. HAL usage This is system memory reserved for HAL-specific structures.
+
+...
+
+
+## Virtual address descriptors(VDA)
+
+The memory manager uses a demand-paging algorithm to know when to load pages into memory, waiting until a thread references an address and incurs a page fault before retrieving the page from disk. Like copy-on-write, demand paging is a form of lazy evaluation—waiting to perform a task until it is required.
+
+The memory manager uses lazy evaluation not only to bring pages into memory but also to construct the page tables required to describe new pages. For example, when a thread commits a large region of virtual memory with VirtualAlloc, the memory manager could immediately construct the page tables required to access the entire range of allocated memory. But what if some of that range is never accessed? Creating page tables for the entire range would be a wasted effort. Instead, the memory manager waits to create a page table until a thread incurs a page fault. It then creates a page table for that page. This method significantly improves performance for processes that reserve and/or commit a lot of memory but access it sparsely.
+
+The virtual address space that would be occupied占用 by such as-yet-nonexistent page tables is charged to the process page file quota and to the system commit charge. This ensures that space will be available for them should they actually be created. With the lazy-evaluation algorithm, allocating even large blocks of memory is a fast operation. **When a thread allocates memory, the memory manager must respond with a range of addresses for the thread to use. To do this, the memory manager maintains another set of data structures to keep track of which virtual addresses have been reserved in the process’s address space and which have not. These data structures are known as Virtual Address Descriptors (VADs). VADs are allocated in non-paged pool**
+
+## Process VADs
+
+For each process, the memory manager maintains a set of VADs that describes the status of the process’s address space.   
+![](./picture/figure5-29.png)
+
+1. When a process reserves address space or maps a view of a section, the memory manager creates a VAD to store any information supplied by the allocation request, such as the range of addresses being reserved, whether the range will be shared or private, whether a child process can inherit the contents of the range, and the page protection applied to pages in the range.
+2. When a thread first accesses an address, the memory manager must create a PTE for the page containing the address. To do so, it finds the VAD whose address range contains the accessed address and uses the information it finds to fill in the PTE. If the address falls outside the range covered by the VAD or in a range of addresses that are reserved but not committed, the memory manager knows that the thread didn’t allocate the memory before attempting to use it and therefore generates an access violation.
+
+## Rotate VADs
+
+A video card driver must typically copy data from the user-mode graphics application to various other system memory, including the video card memory and the AGP port’s memory, both of which have different caching attributes as well as addresses.  
+
+主要关于图形界面的映射,暂时不需要
+
+
+
+## Section Objects
+
+As noted earlier in this chapter in the “Shared memory and mapped files” section, the section object, which the Windows subsystem calls a file mapping object, represents a block of memory that two or more processes can share. A section object can be mapped to the paging file or to another file on disk.
+
+The executive uses sections to load executable images into memory, and the cache manager uses them to access data in a cached file. (See Chapter 14 in Part 2 for more information on how the cache manager uses section objects.)   
+You can also use section objects to map a file into a process address space. The file can then be accessed as a large array by mapping different views of the section object and reading or writing to memory rather than to the file—an activity called mapped file I/O.   
+When the program accesses an invalid page (one not in physical memory), a page fault occurs and the memory manager automatically brings the page into memory from the mapped file or page file.   
+If the application modifies the page, the memory manager writes the changes back to the file during its normal paging operations. (Alternatively, the application can flush a view explicitly by using the Windows FlushViewOfFile function.)
+
+Like other objects, section objects are allocated and deallocated by the object manager. The object manager creates and initializes an object header, which it uses to manage the objects; the memory manager defines the body of the section object. (See Chapter 8 in Part 2 for more on the object manager). The memory manager also implements services that user-mode threads can call to retrieve and change the attributes stored in the body of section objects. The structure of a section object is shown in Figure 5-31. Table 5-14 summarizes the unique attributes stored in section objects.
+![](./picture/figure5-31.png)
+
+
+
+
+
+
+
+
+
+
+## Kennel-mode heaps(System memory pools)
+
+At system initialization, the memory manager creates two dynamically sized memory pools, or heaps, that most kernel-mode components use to allocate system memory:  
+1. Non-paged pool :This consists of ranges of system virtual addresses that are guaranteed to reside in physical memory at all times. Thus, they can be accessed at any time without incurring a page fault—meaning they can be accessed from any IRQL. One of the reasons a non-paged pool is required is because page faults can’t be satisfied at DPC/dispatch level or above. Therefore, any code and data that might execute or be accessed at or above DPC/dispatch level must be in non-pageable memory.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## 扩展-image
+
+> “映像” (Image)：在 Windows 内存管理中，Image 特指一个可执行文件（如
+  .exe、.dll 或
+  .sys）被加载并映射到进程虚拟地址空间后的内存表现形式。它不仅仅是磁盘上的原
+  始字节，而是经过加载器（Loader）根据 PE 报头重新排列和重定位后的状态。
+
+  ---
+
+  2. 背景知识 (Background)
+
+   * 从“文件”到“映像” (Raw to Mapped)：磁盘上的文件是紧凑排列的（对齐通常为
+     512 字节），而内存中的 Image 是展开排列的（对齐通常为 4 KB 或 64 KB）。
+   * Image Base (映像基址)：Image 在虚拟地址空间中的起始位置。每个 Image
+     都有一个首选基址，如果该位置被占用，加载器会进行重定位 (Relocation)。
+   * 共享性：如果多个进程加载同一个 DLL（如 kernel32.dll），Windows
+     物理内存中通常只存在一份该 Image
+     的只读部分，通过页表映射到不同进程的虚拟空间。
+
+  ---
+
+  3. 涉及 PE 的结构 (PE Structure Connection)
+
+  PE 结构中的几乎所有核心宏和结构体都带有 IMAGE_ 前缀，这证明了 PE
+  本质上就是为了描述 Image 而设计的：
+
+   * IMAGE_DOS_HEADER / IMAGE_NT_HEADERS：描述 Image 的身份和加载需求。
+   * SizeOfImage：在 OptionalHeader 中，规定了 Image
+     在内存中总共占用的虚拟空间大小。
+   * SectionAlignment：决定了 Image 内部各个节（Section）在内存中的展开间距。
+
+## 扩展-Routine
+
+例程、程序段:指一段执行特定任务的可执行代码。不同的语境下可能指一个完整线程/核心功能函数
