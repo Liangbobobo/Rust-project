@@ -11,16 +11,22 @@
   - [Copy-on-write](#copy-on-write)
   - [PTE-System page table entries(即页表PT中的一个条目)](#pte-system-page-table-entries即页表pt中的一个条目)
   - [Prototype PTEs](#prototype-ptes)
+  - [PFN](#pfn)
   - [x64 virtual address translation](#x64-virtual-address-translation)
 - [virtual Address](#virtual-address)
   - [Virtual address space layouts](#virtual-address-space-layouts)
-  - [Virtual address descriptors(VDA)](#virtual-address-descriptorsvda)
+  - [VDA(Virtual address descriptors)](#vdavirtual-address-descriptors)
+    - [Windbg查看VAD实例](#windbg查看vad实例)
   - [Process VADs](#process-vads)
   - [Rotate VADs](#rotate-vads)
   - [Section Objects](#section-objects)
   - [Kennel-mode heaps(System memory pools)](#kennel-mode-heapssystem-memory-pools)
   - [扩展-image](#扩展-image)
   - [扩展-Routine](#扩展-routine)
+  - [扩展-Priority优先级](#扩展-priority优先级)
+  - [扩展-Modified List](#扩展-modified-list)
+  - [扩展-内核分页池](#扩展-内核分页池)
+  - [扩展-mapping file映射文件](#扩展-mapping-file映射文件)
 
 
 
@@ -410,8 +416,22 @@ The memory manager consists of the following components:
    1. “一个‘转换无效’与‘访问故障’陷阱处理程序，用于硬件检测到的内存管理异常,并代表进程使虚拟页面常驻内存
    2. Access fault:violate 页表权限
    3. resident:win下如果一个page是Resident的,代表该page在ram中,而不是磁盘的page file(pagefile.sys)中
-3. Six key top-level routines, each running in one of six different kernel-mode threads in the System process.**The balance set manager (KeBalanceSetManager, priority 17)** This calls an inner routine, the working set manager (MmWorkingSetManager), once per second as well as when free memory falls below a certain threshold. The working set manager drives the overall memory- management policies, such as working set trimming, aging, and modified page writing.
-   1. “平衡集管理器（KeBalanceSetManager，优先级为17）每秒会调用一次内部例程——工作集管理器（MmWorkingSetManager），当空闲内存低于特定阈值时也会调用。工作集管理器主导着全局内存管理策略，例如工作集裁剪（Trimming）、老化处理（Aging）以及已修改页面的写入（Modified Page Writing）。”
+3. Six key top-level routines, each running in one of six different kernel-mode threads in the System process.**The balance set manager (KeBalanceSetManager, priority 17)** This calls an inner routine, the working set manager (MmWorkingSetManager), once per second as well as(和...一样) when free memory falls below a certain threshold某一门槛(阈值). The working set manager drives the overall memory- management policies, such as working set trimming, aging, and modified page writing.
+   1. “平衡集管理器（KeBalanceSetManager，优先级为17）是一个routine.每秒会调用一次内部例程——工作集管理器（MmWorkingSetManager），当空闲内存低于特定阈值时也会调用。工作集管理器主导着全局内存管理策略，例如工作集裁剪（Trimming）、老化处理（Aging）以及已修改页面的写入（Modified Page Writing）。”
+   2. priority,优先级,windows有0-31的优先级体系.16-31为实时优先级(real-time priority).17的priority17意味着该线程比几乎所有用户进程(一般为8)和大部分内核线程都高.因为它必须保证能绝对抢占cpu来处理内存危机.
+   3. Balance Set:当前驻留在物理内存中的进程工作集集合
+   4. 该线程归属:驻留在System进程(pid 4)中的系统线程;
+4. The process/stack swapper (KeSwapProcessOrStack, priority 23) This performs both process and kernel thread stack inswapping and outswapping. The balance set manager and the thread-scheduling code in the kernel awaken this thread when an inswap or outswap operation needs to take place.
+5. The modified page writer (MiModifiedPageWriter, priority 18) This writes dirty pages on the modified list back to the appropriate paging files. This thread is awakened when the size of the modified list needs to be reduced.
+   1. dirty page:指在内存中被修改过,但其内容尚未同步到硬盘(分页文件) 的页面
+   2. 线程：驻留在 System 进程 (PID 4) 中
+   3. Modified List：它是 PFN 数据库 的一部分。内核符号为nt!MmModifiedPageListHead
+   4. 由Mm管理,当 MmWorkingSetManager 决定修剪一个脏页时，它会将该页的 PFN条目 从进程的工作集移出，挂到 nt!MmModifiedPageListHead链表上
+   5. Modified List:连接ram和持久化存储的缓冲区.批量写入Batching时,磁盘IO极慢,内核不会每改一个字节就写一次硬盘,而是把这些脏页先收集到Modified List中.
+   6. 页面状态转移:Active (进程正在用) -> Modified (被修剪，数据还在RAM，但不可直接访问) -> Standby(数据已写回硬盘，随时可以被清空重用)
+   7. 唤醒阈值：当 Modified List 的长度超过 nt!MmModifiedPageMaximum 时，优先级18 的写入线程被唤醒;它会发起聚簇 IO (ClusteredI/O)，一次性将连续的页面写入硬盘，效率极高
+6. The mapped page writer (MiMappedPageWriter, priority 18) This writes dirty pages in mapped files to disk or remote storage. It is awakened when the size of the modified list needs to be reduced or if pages for mapped files have been on the modified list for more than 5 minutes. This second modified page writer thread is necessary because it can generate page faults that result in requests for free pages. If there were no free pages and only one modified page writer thread, the system could deadlock waiting for free pages.
+   1.  
 
 
 
@@ -745,6 +765,98 @@ System page table entries (PTEs) are used to dynamically map system pages such a
 
 ## Prototype PTEs
 
+
+##  PFN
+
+> “PFN（Page Frame Number，物理页帧号）是物理内存条被等分为 4KB
+  块后的索引编号。如果说虚拟地址是‘收货地址’，PTE 是‘物流单据’，那么 PFN
+  就是内存条上那个真实的、可以存储电荷的‘货架坑位’。”
+
+   * 物理实质：内存条（RAM）在硬件层面是按字节寻址的，但操作系统为了管理
+     方便，将其每 4096 字节（4KB）划分为一个“框（Frame）”。PFN
+     就是这些框的从 0 开始的顺序编号。
+   * 计算公式：物理地址 = PFN << 12（即 PFN 乘以 4096）。
+
+  ---
+
+  2. 存储位置与管理权 (Storage & Ownership)
+
+   * 存储位置：
+       * PFN 描述信息：存储在内核的全局数组 nt!MmPfnDatabase 中。每一个
+         PFN 条目都是一个 _MMPFN 结构体。
+       * PTE 存储位置：存储在由 CR3 寄存器引出的各级页表页中。
+   * 管理权：
+       * 硬件层面：MMU (内存管理单元) 负责根据 PTE 里的 PFN
+         编号去抓取物理电信号。
+       * 软件层面：内存管理器 (Mm) 负责在 MmPfnDatabase 中标记哪个 PFN
+         是“满的”，哪个是“空的”。
+
+  ---
+
+  3. 原子级精讲：PTE 与 PFN 的“钩子”机制 (Atomic Logic)
+
+  它们是如何联系到一起的？这是一个“硬件索引”与“软件账本”的协同：
+
+   1. 硬件层面的联系 (索引)：
+       * 你的 PTE (页表项) 的 位 12 到位 51 存储的就是这个 PFN 编号。
+       * 当 CPU 翻译地址时，它剥离出这 40
+         位数字，直接作为索引去物理内存条上寻址。这里不经过任何函数，是
+         纯硬件电路逻辑。
+   2. 软件层面的联系 (反向指针)：
+       * 在 PFN 数据库的 _MMPFN 结构体中，有一个关键字段叫 PteAddress。
+       * 核心逻辑：这是一个“回马枪”。PFN 记录了是谁（哪个虚拟地址的
+         PTE）正在占用它。
+       * 原子细节：只有建立了这种双向绑定，当 KeBalanceSetManager
+         想要收割这个 PFN 时，它才能顺着 PteAddress 找到对应的 PTE，并把
+         Present 位置 0。
+
+  ---
+
+  4. 与 PE 结构的血缘关联 (The PE Link)
+
+  PFN 决定了 PE 镜像在物理世界的“密度”：
+
+   * SectionAlignment (4KB)：
+       * 关联点：PE 文件要求在内存中按 4KB 对齐。
+       * 线性联动：这确保了 PE 的每一个节（Section）都能正好填满整数个
+         PFN 物理框。如果不满足 4KB 对齐，一个 PFN
+         就会包含两个不同权限的节，导致 PTE 无法设置硬件保护（如 NX
+         位）。
+   * IMAGE_SCN_MEM_SHARED：
+       * 关联点：如果 PE 节是共享的。
+       * 原子细节：此时，进程 A 的 PTE 和进程 B 的
+         PTE，虽然虚拟地址不同，但它们内部填写的 PFN
+         编号是完全一样的。它们在物理实质上指向同一个内存颗粒。
+
+  ---
+
+  5. Hacker 适用场景 (Hacker Scenarios)
+
+  场景：硬件级“李代桃僵” (PFN Remapping)
+   * 技巧：不改 VAD，不改 API 逻辑，只改 PTE。
+   * 红队战术：
+       1. 你申请了两块内存：Addr_A（存放正常代码）和 Addr_B（存放
+          Shellcode）。
+       2. 找到 Addr_A 对应的 PTE。
+       3. 原子操作：手动修改该 PTE 的位 12-51，将其原本指向的 PFN_A
+          替换为 PFN_B。
+   * 结果：
+       * VAD 树 依然认为 Addr_A 是合法的正常模块。
+       * EDR 扫描 虚拟地址 Addr_A
+         时，由于它的扫描缓存可能没刷新或者它信任 VAD
+         记录，它可能还在检查旧的页面属性。
+       * CPU 执行：当 CPU 跳到 Addr_A 时，硬件 MMU 会顺着你改过的 PFN
+         编号，直接去执行物理内存条上 PFN_B 位置的恶意代码。
+
+  ---
+
+  总结 (Atomic Summary)
+
+  PTE 是“虚拟世界的路标”，PFN 是“物理世界的领土”。
+
+   * PTE 指向 PFN：实现了从逻辑到物理的跨越。
+   * PFN 记录 PTE：实现了系统对物理资源的追溯。
+
 ## x64 virtual address translation
 
 **Each process has a top-level 
@@ -915,13 +1027,49 @@ Three main types of data are mapped into the virtual address space in Windows:
 ...
 
 
-## Virtual address descriptors(VDA)
+## VDA(Virtual address descriptors)
 
-The memory manager uses a demand-paging algorithm to know when to load pages into memory, waiting until a thread references an address and incurs a page fault before retrieving the page from disk. Like copy-on-write, demand paging is a form of lazy evaluation—waiting to perform a task until it is required.
+The memory manager uses a demand-paging algorithm to know when to load pages into memory, waiting until a thread references an address and incurs引起 a page fault before retrieving the page from disk. Like copy-on-write, demand paging is a form of lazy evaluation—waiting to perform a task until it is required.
 
 The memory manager uses lazy evaluation not only to bring pages into memory but also to construct the page tables required to describe new pages. For example, when a thread commits a large region of virtual memory with VirtualAlloc, the memory manager could immediately construct the page tables required to access the entire range of allocated memory. But what if some of that range is never accessed? Creating page tables for the entire range would be a wasted effort. Instead, the memory manager waits to create a page table until a thread incurs a page fault. It then creates a page table for that page. This method significantly improves performance for processes that reserve and/or commit a lot of memory but access it sparsely.
 
 The virtual address space that would be occupied占用 by such as-yet-nonexistent page tables is charged to the process page file quota and to the system commit charge. This ensures that space will be available for them should they actually be created. With the lazy-evaluation algorithm, allocating even large blocks of memory is a fast operation. **When a thread allocates memory, the memory manager must respond with a range of addresses for the thread to use. To do this, the memory manager maintains another set of data structures to keep track of which virtual addresses have been reserved in the process’s address space and which have not. These data structures are known as Virtual Address Descriptors (VADs). VADs are allocated in non-paged pool**
+
+> VAD（Virtual Address Descriptor，虚拟地址描述符）是 Windows内核用来管理进程虚拟地址空间分配情况的数据结构。它以自平衡二叉树（AVL Tree）的形式组织，记录了每一段被占用的虚拟地址范围及其属性（如保护级别、类型、是否共享等）。
+1. 它不是用户内存：VAD 结构体本身不占用用户进程的 128TB 空间
+2. 它是内核分配物：每一个 VAD 节点都是由内核从 分页池（Paged Pool）中申请的一块小内存
+3. 脆弱性：由于它在分页池中，这意味着 VAD结构体本身也可能被操作系统交换到硬盘（pagefile.sys）上
+4. 管理链条：EPROCESS -> VadRoot指向树的根部。每一个节点都是一个独立的物理内存块，通过指针相互连接形成二叉树
+
+**VAD实质:**是一个位于内核分页池paged pool中的结构体实例(_MMVAD或_MMVAD_SHORT).它是一段被内核显示分配的用于描述特定用户态虚拟地址区间属性的元数据元(metadata unit).VAD物理实质不是内存地址,而是内核空间中64/128字节结构体数据.用来记录每一块内存应该做什么的持久化备忘录
+  * 存储位置:内核分页池,意味着 VAD结构体本身也可能被操作系统交换到硬盘（pagefile.sys）上
+  * 大小:x64下一个基础_MMVAD_SHORT占64字节.如果是涉及文件映射的完整_MMVAD,占用128字节(随win版本微调)
+  * 管理权属于ntoskrnl.exe
+  * 每个进程的EPROCESS结构体中有一个VadRoot指针(偏移量在0x7d8附近,随版本变化),它存储了树根节点的内核虚拟地址
+
+### Windbg查看VAD实例
+
+1. 设置符号路径：.symfix .reload  
+2. 验证 VAD 符号：dt nt!_MMVAD_SHORT
+3. 打开一个notepad.exe
+4. 定位目标进程 !process 0 0 notepad.exe 从输出中找到PROCESS 后面的地址,这个地址就是Notepad.exe在内核中EPROCESS 结构体的指针,即该进程在内核非分页池中的虚拟坐标.所有的VAD都挂在这个坐标下的某个字段上
+5. VAD的根节点就在process偏移的某个位置上
+6. dt nt!_EPROCESS ffffd4076f0b4080 VadRoot:通过Mm找到VadRoot的root字段地址.这里没有root字段,只有VadRoot的偏移
+7. 使用!vad(process+VadRoot偏移)查看
+8. 
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ## Process VADs
 
@@ -1013,3 +1161,38 @@ At system initialization, the memory manager creates two dynamically sized memor
 ## 扩展-Routine
 
 例程、程序段:指一段执行特定任务的可执行代码。不同的语境下可能指一个完整线程/核心功能函数
+
+
+## 扩展-Priority优先级
+
+不同的优先级可以抢占cpu对免杀有很大的意义
+
+## 扩展-Modified List
+
+## 扩展-内核分页池
+
+理解了分页池（Paged Pool），你才能明白为什么有些内核数据（如VAD）会“莫名其妙”地消失，以及为什么在编写内核驱动时稍微不注意就会导致系统蓝屏
+
+> 分页池（Paged Pool）是内核空间中一个动态分配的内存区域。其核心特性是：该区域分配的页面可以被操作系统交换（Paging）到磁盘上的分页文件（pagefile.sys）中。它用于存储那些虽然属于内核、但不需要时刻驻留在物理内存中的数据结构。
+  * 内核内存极其宝贵。为了节省物理 RAM，Windows将内核内存分为两类：非分页池（Non-paged Pool，绝对不许落盘）和分页池（可以落盘）。VAD 树就住在分页池里
+  *  分页池是内核的“缓冲区”，进入它的标准只有一条：你是否允许 CPU为了读你而停下来等一下硬盘;VAD 树 允许，所以它在;PFN 数据库 不允许，所以它不在
+
+**存储位置与管理权 (Storage & Ownership)**  
+1. 虚拟位置：位于内核空间的特定地址段.内核符号：起始地址由 nt!MmPagedPoolBase 定义，结束地址由 nt!MmPagedPoolEnd定义
+  * nt!MmPagedPoolBase是windows内核定义的一个全局指针变量.存储了当前系统分页池paged pool区域在内核虚拟地址空间中的起始地址.存储在内核映像 ntoskrnl.exe 的 .data 节 中.win64下是一个 8 字节的 64 位值
+2. 管理权:由执行体分配器（Executive Pool Manager）管理
+  * API 接口：内核驱动通过调用 ExAllocatePoolWithTag 并指定 PoolType 为 PagedPool来申请
+  * 内存管理器（Mm）会追踪分页池的配额，防止某个驱动耗尽系统所有分页内存
+3. 约束
+  * 缺页响应机制：当内核访问分页池中已被换出到磁盘的数据时，会触发 Page Fault.处理这个异常需要执行磁盘 IO，这属于低优先级任务
+  * IRQL（中断请求级别）冲突：如果当前的 IRQL 大于或等于 DISPATCH_LEVEL (2)，绝对不能访问分页池.如果你在处理一个高优先级的硬件中断时，去访问一个被换出到磁盘的 VAD结构，系统会立即抛出经典的 IRQL_NOT_LESS_OR_EQUAL (0xA)蓝屏。因为在那个高优先级下，系统不允许停下来等磁盘读数据
+
+**与PE结构的关联:**
+1. 注册表映像:通过PE调用 RegOpenKey时，内核加载的注册表配置单元（Hives）就存储在分页池中
+2. PE文件对应的权限信息（谁能读、谁能改）在内核中被解析为安全描述符结构，同样存储在分页池中
+3. 描述 PE 虚拟布局的 _MMVAD 结构体就在这里。这意味着如果你的程序长时间不活动，描述你内存布局的“账本”可能已经躺在硬盘的 pagefile.sys 里了
+
+
+
+
+## 扩展-mapping file映射文件
