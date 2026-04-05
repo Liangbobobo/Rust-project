@@ -1,5 +1,6 @@
 - [architecture overview(chapter2)](#architecture-overviewchapter2)
 - [Memory management](#memory-management)
+  - [cpu寻址过程](#cpu寻址过程)
   - [x64 架构的四级分页模型（PML4 -\> PDPT -\> PD -\> PT）](#x64-架构的四级分页模型pml4---pdpt---pd---pt)
   - [Introduction to the memory manager](#introduction-to-the-memory-manager)
     - [Memory manager components](#memory-manager-components)
@@ -52,6 +53,9 @@
 加粗的字体一般是原文
 
 
+## cpu寻址过程
+
+x64保护模式下,cpu接触到的指针(RAX/RIP中的值)都被视为虚拟地址VA.cpu并不判断它是否是ram地址,而是将其放入MMU处理,如果翻译成功,就是ram地址,如果失败是一个缺页异常.在cpu视角下,指针没有地址/指令等区别都是二进制数据,具体应该如何解释依靠?
 
 
 ## x64 架构的四级分页模型（PML4 -> PDPT -> PD -> PT）
@@ -59,7 +63,7 @@
 1. Level 4 (PML4)：由 CR3 指向，顶级索引。(4kb * 512 * 512 *512=512GB)
 2. Level 3 (PDPT - Page Directory Pointer Table)：由 PML4指向，这就是书里说的“第三级结构”(4kb * 512 * 512=1GB)
 3. Level 2 (PD - Page Directory)：由 PDPT 指向(4kb*512=2MB)
-4. Level 1 (PT - Page Table)：由 PD 指向，最终指向物理页(4kb)
+4. Level 1 (PT - Page Table)：由 PD 指向，最终指向物理页(4kb).每个PTE中的低12位为标志位,高40位为PFN,代表物理页的编号.
 
 目前的 x64 硬件（Intel/AMD）只使用了其中的 48 位来进行地址转换（这被称为 Canonical Address）。这 48 位被精确地切割成五个部分  
 | 位偏移 (Bits) | 缩写 | 全称                     | 作用                           |
@@ -768,51 +772,27 @@ System page table entries (PTEs) are used to dynamically map system pages such a
 
 ##  PFN
 
-> “PFN（Page Frame Number，物理页帧号）是物理内存条被等分为 4KB
-  块后的索引编号。如果说虚拟地址是‘收货地址’，PTE 是‘物流单据’，那么 PFN
-  就是内存条上那个真实的、可以存储电荷的‘货架坑位’。”
-
-   * 物理实质：内存条（RAM）在硬件层面是按字节寻址的，但操作系统为了管理
-     方便，将其每 4096 字节（4KB）划分为一个“框（Frame）”。PFN
-     就是这些框的从 0 开始的顺序编号。
+> “PFN（Page Frame Number，物理页帧号）是物理内存条被等分为 4KB块后的索引编号。”
+* 物理实质：内存条（RAM）在硬件层面是按字节寻址的，但操作系统为了管理方便，将其每 4096 字节（4KB）划分为一个（Frame）。PFN就是这些框的从 0 开始的顺序编号
    * 计算公式：物理地址 = PFN << 12（即 PFN 乘以 4096）。
-
-  ---
-
-  2. 存储位置与管理权 (Storage & Ownership)
-
-   * 存储位置：
-       * PFN 描述信息：存储在内核的全局数组 nt!MmPfnDatabase 中。每一个
-         PFN 条目都是一个 _MMPFN 结构体。
-       * PTE 存储位置：存储在由 CR3 寄存器引出的各级页表页中。
+  1. 存储位置与管理权 (Storage & Ownership)
+    * 存储位置：
+    * PFN 描述信息：存储在内核的全局数组 nt!MmPfnDatabase 中。每一个PFN 条目都是一个 _MMPFN 结构体。
+    * PTE 存储位置：存储在由 CR3 寄存器引出的各级页表页中。
    * 管理权：
        * 硬件层面：MMU (内存管理单元) 负责根据 PTE 里的 PFN
          编号去抓取物理电信号。
-       * 软件层面：内存管理器 (Mm) 负责在 MmPfnDatabase 中标记哪个 PFN
-         是“满的”，哪个是“空的”。
-
-  ---
-
-  3. 原子级精讲：PTE 与 PFN 的“钩子”机制 (Atomic Logic)
-
-  它们是如何联系到一起的？这是一个“硬件索引”与“软件账本”的协同：
-
-   1. 硬件层面的联系 (索引)：
+       * 软件层面：内存管理器 (Mm) 负责在 MmPfnDatabase 中标记哪个 PFN是“满的”，哪个是“空的”。
+  2. 原子级精讲：PTE 与 PFN 的“钩子”机制 (Atomic Logic)它们是如何联系到一起的？这是一个“硬件索引”与“软件账本”的协同：
+     1. 硬件层面的联系 (索引)：
        * 你的 PTE (页表项) 的 位 12 到位 51 存储的就是这个 PFN 编号。
-       * 当 CPU 翻译地址时，它剥离出这 40
-         位数字，直接作为索引去物理内存条上寻址。这里不经过任何函数，是
-         纯硬件电路逻辑。
-   2. 软件层面的联系 (反向指针)：
+       * 当 CPU 翻译地址时，它剥离出这 40位数字，直接作为索引去物理内存条上寻址。这里不经过任何函数，是纯硬件电路逻辑。
+       * 软件层面的联系 (反向指针)：
        * 在 PFN 数据库的 _MMPFN 结构体中，有一个关键字段叫 PteAddress。
-       * 核心逻辑：这是一个“回马枪”。PFN 记录了是谁（哪个虚拟地址的
-         PTE）正在占用它。
-       * 原子细节：只有建立了这种双向绑定，当 KeBalanceSetManager
-         想要收割这个 PFN 时，它才能顺着 PteAddress 找到对应的 PTE，并把
-         Present 位置 0。
+       * 核心逻辑：这是一个“回马枪”。PFN 记录了是谁（哪个虚拟地址的PTE）正在占用它。
+       * 原子细节：只有建立了这种双向绑定，当 KeBalanceSetManager想要收割这个 PFN 时，它才能顺着 PteAddress 找到对应的 PTE，并把Present 位置 0。
 
-  ---
-
-  4. 与 PE 结构的血缘关联 (The PE Link)
+  3. 与 PE 结构的血缘关联 (The PE Link)
 
   PFN 决定了 PE 镜像在物理世界的“密度”：
 
