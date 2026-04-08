@@ -1,43 +1,58 @@
-<<<<<<< HEAD
-在 hypnus 项目中，alloc_callback
-  函数展示了低功耗免杀（RedOps）中极其核心的一个技术：动态代码生成与内存
-  跳板（Trampoline）。
 
-  你看到的这种“将字节数组写入内存并赋予执行权限”的操作，本质上是在手动构
-  建一个微型函数。
+## alloc_callback函数
 
-  ---
+在 hypnus 项目中，alloc_callback函数展示了低功耗免杀（RedOps）中极其核心的一个技术：动态代码生成与内存跳板（Trampoline）。
 
-  一、 变量与流程深度解析
+其实质是将字节数组写入内存并赋予执行权限的操作，本质上是在手动构建一个微型函数。
 
-  我们不跳过任何一个细节，逐行拆解这个函数：
 
-  1. 机器码数组 (callback)
+一、 变量与流程深度解析
 
-   1 let callback = &[
-   2     0x48, 0x89, 0xD1,       // mov rcx, rdx
-   3     0x48, 0x8B, 0x41, 0x78, // mov rax, [rcx + 0x78]
-   4     0xFF, 0xE0,             // jmp rax
-   5 ];
-   * 为什么是这些字节？ 这是 x86_64 的机器码。
-   * mov rcx, rdx: 在 Windows x64 调用约定中，rcx 是第 1 个参数，rdx
-     是第 2 个。线程池回调（如 TpAllocTimer）会将你传入的 Context
-     指针放在 rdx 中。这行指令将其移动到 rcx。
-   * mov rax, [rcx + 0x78]: 在 Windows 的 CONTEXT 结构体中，偏移量 0x78
-     正好是 Rax 寄存器
-     的存储位置。这行代码从结构体中取出预设的目标地址。
-   * jmp rax: 直接跳转。注意：它没有 ret
-     指令，因为它是一个跳板，目的是移交执行权。
+1. 机器码数组 (callback)
+```rust
+let callback = &[
+  0x48, 0x89, 0xD1,       // mov rcx, rdx
+  0x48, 0x8B, 0x41, 0x78, // mov rax, [rcx + 0x78]
+  0xFF, 0xE0,             // jmp rax
+];
+```
 
-  2. 内存分配 (NtAllocateVirtualMemory)
-   * NtCurrentProcess(): 一个伪句柄（值为 -1），代表当前进程。
-   * addr: 初始化为 null_mut()。内核执行后，它会存储分配到的起始地址。
-   * size: 传入时是 9 字节，但内核会按页面（Page，通常是
-     4KB）对齐，实际分配 4096 字节。
-   * MEM_COMMIT | MEM_RESERVE: 既预留虚拟空间又分配物理内存。
-   * PAGE_READWRITE (RW): 关键点。在写入代码时，内存必须是可写的。
+* 这些字节是 x86_64 的机器码
+* mov rcx, rdx: 在 Windows x64 调用约定中，rcx 是第 1 个参数，rdx是第 2 个。线程池回调（如 TpAllocTimer）会将你传入的 Context指针放在 rdx 中。这行指令将其移动到 rcx。
+* mov rax, [rcx + 0x78]: 在 Windo的存储位置。这行代码从结构体中取出预设的目标地址。
+* jmp rax: 直接跳转。注意：它没有 ret指令，因为它是一个跳板，目的是移交执行权
+  * ret一般与call配合使用,ret执行 rip=rsp;rsp=rsp+8.这两个原子动作,且会同步读取硬件影子栈并比对.即ret从rsp原子级弹出地址至rip并受cet一致性校验的栈依赖型返回指令
+  * jmp直接或间接重定向rip且不会触发rsp/cet的栈无关的转移指令.但其间接跳转受CFG约束
 
-  3. 写入与权限转换 (NtProtectVirtualMemory)
+2. 内存分配 (NtAllocateVirtualMemory)
+
+```rust
+ if !NT_SUCCESS(NtAllocateVirtualMemory(
+            NtCurrentProcess(), 
+            &mut addr, 
+            0, 
+            &mut size, 
+            MEM_COMMIT | MEM_RESERVE, 
+            PAGE_READWRITE
+        )) {
+            bail!(s!("failed to allocate stack memory"));
+        }
+```
+* NtCurrentProcess(): 一个伪句柄（值为 -1），代表当前进程。表示这块内存分配给当前进程
+* addr: 初始化为 null_mut(),表示不在乎具体内存地址,只需要一个空闲位置。内核执行后，它会存储分配到的内存的起始地址。在本文件中,该地址随后被存放9字节的trampoline机器码
+* 0:该字段用于指定分配地址的对齐要求.通常设为0,表示遵循os默认页面对齐(一般64k)不是4k吗?
+  * page size总是4kb,即页面大小是内存的物理单位和保护单位.虽然只申请9字节,size参数会被内核向上取整为4kb的倍数.
+  * 当给NtAllocateVirtualMemory 的addr参数传0,让os自选地址时,os返回的地址一定是64kb的倍数.这是为了减少vad树碎片化.这个函数本质上在vad上注册,之后mmu才会允许后续的写入和执行
+  * vad记录虚拟地址开始/解释/权限/私有/映射等信息.win规定,申请新内存时,其起始地址必须在64k的格子中.即vad中内存地址必须是64k的,但其代表的物理页面可以是4k的.且vad只代表有这么一个虚拟内存,当尝试(代码行为)访问这个位置时,cpu会触发page fault,内核从物理内存池中找到一个4k的页面.内核修改PTE将虚拟地址指向找到的这个物理页面.即PTE才是真正记录虚拟4k对应物理4k的地方.vad负责证明合法拥有该地址.edr一定会监测vad树. 
+  * 64k是vad树分配地址的起始对齐单位,vad记录该区域的属性和边界;4K 物理管理 是由页表（PTE）在 CPU 访问内存时动态完成的
+* size: 传入时是 9 字节，但内核会按页面（Page，通常是4KB）对齐，实际分配 4096 字节。
+* MEM_COMMIT | MEM_RESERVE: 既预留虚拟空间又分配物理内存。
+* PAGE_READWRITE (RW): 关键点。在写入代码时，内存必须是可写的。这里绝不能直接申请PAGE_EXECUTE_READWRITE(RWX).现在EDR会严格监控带有执行权限的内存分配.文件中先申请RW,再写入机器码,再通过NtProjectVirtualMemory改为RX(READ/Write)
+  * 相对可分配内存的VirtualAlloc(位于kernel.dll),NtAllocateVirtualMemory 位于 ntdll.dll，更接近内核,不易被EDR设置监控.且本项目使用hash值(NtAllocateVirtualMemory)动态解析其地址,IAT中没有该函数
+  * 这里的分配的每一字节虚拟地址,物理都必须经过cpu的mmu(内存管理单元)进行地址翻译.在NtAllocateVirtualMemory 中设置的PAGE_READWRITE,最终会变成第四级页表(PTE)中的一个R/W位.mmu如何索引到该页面?
+  * 软件层面,win内核使用VAD管理进程内存.当调用NtAllocateVirtualMemory 时,内核在vad树中增加一个节点(EDR会定期遍历该树,寻找孤儿内存(无对应磁盘文件/具有执行权限)).hypnus最初申请rw权限,此时在vad中就像是普通数据,不触发警报.再写入机器码后,才反转为rx
+
+  1. 写入与权限转换 (NtProtectVirtualMemory)
    * copy_nonoverlapping: 将那 9 个字节的“灵魂”拷贝进刚申请的空白页。
    * PAGE_EXECUTE_READ (RX):
      写入完成后，通过此函数将权限从“可读写”改为“可读可执行”。
@@ -46,7 +61,7 @@
          会报异常。这种“先写后改权限”的模式遵循了 W^X (不可同时写和执行)
          的安全原则。
 
-  4. 锁定内存 (NtLockVirtualMemory)
+  2. 锁定内存 (NtLockVirtualMemory)
    * VM_LOCK_1: 将这块页锁定在物理内存中。
    * 意义: 防止系统的内存管理器为了节省空间把这块代码置换（Page
      out）到硬盘的 swap
@@ -98,9 +113,8 @@
   码隐藏起来。这个跳板是唯一暴露在外面的“呼吸孔”，通过它，线程池可以在休
   眠结束时，精准地跳转回被加密/混淆后的主逻辑，而 EDR
   在扫描栈时只会看到一个极其简单的、看起来像系统组件调用的跳转逻辑。
-▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
- > 我是说这种在内存中直接将字节流当作指令的形式我不熟悉,请你深入帮我讲
-   解一下
+
+ > 我是说这种在内存中直接将字节流当作指令的形式我不熟悉,请你深入帮我讲解一下
 ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
 ✦ 这种“将字节流（Byte
   Stream）视为指令并执行”的技术，是底层开发、编译器设计以及
@@ -573,6 +587,34 @@ pub fn alloc_callback() -> Result<u64> {
 
 在win64下,通过动态生成并注入Gadget,解决线程池回调(Threadpoll Callback)和系统上下文切换(NtContinue)之间的不匹配问题
 
+
+## Thread Pool
+
+win中,线程池由ntdll.dll内部的TppWorkerThread工作者线程管理.  
+1. 当调用TpAllocTimer或TpAllocWait,指定的代码没有执行,只是在内核中
+
+
+1. 分配 (Allocation)：调用 TpAlloc*
+      创建任务对象。此时会绑定回调函数地址和用户自定义参数 (Context)。
+   2. 设置 (Setting)：调用 TpSet* 激活任务（如设置 5 秒后触发）。
+   3. 内核监控：任务进入内核队列。此时你的主代码不占用
+      CPU，没有任何行为特征。
+   4. 派发 (Dispatching)：条件满足，内核唤醒一个 ntdll!TppWorkerThread。
+   5. 回调执行：
+       * 寄存器分配：Instance -> RCX, Context -> RDX, Timer/Wait -> R8。
+       * 栈环境：代码运行在系统原生的、合法的线程栈上。
+   6. 清理 (Cleanup)：任务完成后，Worker 线程回到池中等待下一个任务
+
+## NtContinue
+
+``` NtContinue(PCONTEXT ContextRecord, BOOLEAN TestAlert)```
+
+Ntcontinue是ntdll.dll中的系统调用,是处理seh的核心.其作用不是调用函数,而是状态替换.在内核中把当前cpu所有的寄存器扔掉,换成ContextRecord中的值
+1. 无视堆栈,因为直接改写rsp.可以让cpu跳到一个伪造的堆栈空间
+2. 无视返回路径.没有ret
+3. 权限高:是内核级指令的用户态包装,只要参数合法,内核无条件执行跳转
+4. edr是否会监测该函数
+
 ### TpAllocTimer TpAllocWait NtContinue
 
 位置:ntdll.dll中的Tp系列和Nt系列函数
@@ -607,4 +649,4 @@ pub fn alloc_callback() -> Result<u64> {
     * 当 NtProtectVirtualMemory 执行完 ret 时，它会再次跳进 NtContinue。
     * NtContinue 接着加载 CONTEXT_2（加密内存）。
     * 结果：整个加解密过程在系统线程中像多米诺骨牌一样自动倒下，而你的主代码从头到尾都没参与。
->>>>>>> 3d7d112 (hypnus)
+

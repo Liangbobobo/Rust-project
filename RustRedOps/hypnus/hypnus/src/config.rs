@@ -74,15 +74,21 @@ impl Config {
     /// Allocates a small executable memory region used as a trampoline in thread pool callbacks.
     pub fn alloc_callback() -> Result<u64> {
         // Trampoline shellcode
+        // hypnus使用线程池触发混淆链,系统调用回调函数时,会将用户自定的参数(这里的context)放在rdx寄存器中.而调用的NtContinue需要的context放入rcx寄存器.是一种windows abi形式
+        // 
         let callback = &[
+            // 此时rdx存放的是TpAllocTimer传入的context,即伪造的context结构体.该句执行后,rcx就指向这个context,rcx符合NtContinue的第一个参数要求
             0x48, 0x89, 0xD1,       // mov rcx,rdx
+            // hypnus在初始化context时,将ntdll!NtContinue真实内存地址放入rax?
             0x48, 0x8B, 0x41, 0x78, // mov rax,QWORD PTR [rcx+0x78] (CONTEXT.RAX)
+            // rip=rax,避免操作栈.直接切入了NtContinue.在edr视角,os线程池直接调用NtContinue
             0xFF, 0xE0,             // jmp rax
         ];
 
         // Allocate RW memory for trampoline
         let mut size = callback.len();
         let mut addr = null_mut();
+        // Windows Native API如NtAllocateVirtualMemory其返回值类型是NTSTATUS(对应rust i32)
         if !NT_SUCCESS(NtAllocateVirtualMemory(
             NtCurrentProcess(), 
             &mut addr, 
@@ -98,6 +104,7 @@ impl Config {
         unsafe { core::ptr::copy_nonoverlapping(callback.as_ptr(), addr as *mut u8, callback.len()) };
 
         // Change protection to RX for execution
+        // 现代os中有一个原则,一块内存不能同时write和execute.因此需要先rw后rx
         let mut old_protect = 0;
         if !NT_SUCCESS(NtProtectVirtualMemory(
             NtCurrentProcess(), 
