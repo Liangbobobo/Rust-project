@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 在 hypnus 项目中，alloc_callback
   函数展示了低功耗免杀（RedOps）中极其核心的一个技术：动态代码生成与内存
   跳板（Trampoline）。
@@ -429,3 +430,181 @@
   指令集的直接“点穴”。普通函数是“按规矩办事”的平民，而这种动态字节流是“
   不留痕迹”的特种兵。它牺牲了可维护性、兼容性和稳定性（一旦出错就蓝屏）
   ，换取了极致的隐蔽性和对寄存器的绝对控制权。
+=======
+# Config Struct
+
+```rust
+#[derive(Default, Debug, Clone, Copy)]
+pub struct Config {
+    pub stack: StackSpoof,
+    pub callback: u64,
+    pub trampoline: u64,
+    pub modules: Modules,
+    pub wait_for_single: WinApi,
+    pub base_thread: WinApi,
+    pub enum_date: WinApi,
+    pub system_function040: WinApi,
+    pub system_function041: WinApi,
+    pub nt_continue: WinApi,
+    pub nt_set_event: WinApi,
+    pub rtl_user_thread: WinApi,
+    pub nt_protect_virtual_memory: WinApi,
+    pub rtl_exit_user_thread: WinApi,
+    pub nt_get_context_thread: WinApi,
+    pub nt_set_context_thread: WinApi,
+    pub nt_test_alert: WinApi,
+    pub nt_wait_for_single: WinApi,
+    pub rtl_acquire_lock: WinApi,
+    pub tp_release_cleanup: WinApi,
+    pub rtl_capture_context: WinApi,
+    pub zw_wait_for_worker: WinApi,
+}
+```
+
+Default:     
+允许通过Config::default()创建一个全零/默认值的实例
+
+Debug:  
+允许在调试模式下打印该结构其中字段的内容(Api地址等)
+
+Clone/Copy:  
+使Config像i32一样通过内存拷贝传递,不需要引用计数和所有权转移.在no_std环境下非常高效/安全
+
+## StackSpoof
+
+```rust
+/// Represents a reserved stack region for custom thread execution.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct StackSpoof {
+    /// Address of a `gadget_rbp`, which realigns the stack (`mov rsp, rbp; ret`).
+    gadget_rbp: u64,
+
+    /// Stack frame size for `BaseThreadInitThunk`.
+    base_thread_size: u32,
+
+    /// Stack frame size for `RtlUserThreadStart`.
+    rtl_user_thread_size: u32,
+
+    /// Stack frame size for `EnumResourcesW`.
+    enum_date_size: u32,
+
+    /// Stack frame size for `RtlAcquireSRWLockExclusive`.
+    rlt_acquire_srw_size: u32,
+
+    /// Type of gadget (`call [rbx]` or `jmp [rbx]`).
+    gadget: GadgetKind,
+}
+```
+
+收集并存储伪造一个“合法 Windows调用栈”所需的所有关键尺寸和跳转点
+
+## Config::new()
+
+```rust
+impl Config {
+    /// Create a new `Config`.
+    pub fn new() -> Result<Self> {
+        // Resolve hashed function addresses for all required APIs
+        let mut cfg = Self::winapis(Self::modules());
+        cfg.stack = StackSpoof::new(&cfg)?;
+        cfg.callback = Self::alloc_callback()?;
+        cfg.trampoline = Self::alloc_trampoline()?;
+
+        // Register Control Flow Guard function targets if enabled
+        if let Ok(true) = is_cfg_enforced() {
+            register_cfg_targets(&cfg);
+        }
+
+        Ok(cfg)
+    }
+```
+
+
+### LoadLibraryA
+
+模块进入地址空间有三种途径:  
+1. 系统预加载:如ntdll.dll
+2. 静态链接加载
+3. 动态手动加载:LoadLibraryA
+
+hypnus中使用伪造栈加载LoadLibraryA
+
+
+## Config::alloc_callback()
+
+```rust
+pub fn alloc_callback() -> Result<u64> {
+        // Trampoline shellcode
+        let callback = &[
+            0x48, 0x89, 0xD1,       // mov rcx,rdx
+            0x48, 0x8B, 0x41, 0x78, // mov rax,QWORD PTR [rcx+0x78] (CONTEXT.RAX)
+            0xFF, 0xE0,             // jmp rax
+        ];
+
+        // Allocate RW memory for trampoline
+        let mut size = callback.len();
+        let mut addr = null_mut();
+        if !NT_SUCCESS(NtAllocateVirtualMemory(
+            NtCurrentProcess(), 
+            &mut addr, 
+            0, 
+            &mut size, 
+            MEM_COMMIT | MEM_RESERVE, 
+            PAGE_READWRITE
+        )) {
+            bail!(s!("failed to allocate stack memory"));
+        }
+
+        // Write trampoline bytes to allocated memory
+        unsafe { core::ptr::copy_nonoverlapping(callback.as_ptr(), addr as *mut u8, callback.len()) };
+
+        // Change protection to RX for execution
+        let mut old_protect = 0;
+        if !NT_SUCCESS(NtProtectVirtualMemory(
+            NtCurrentProcess(), 
+            &mut addr, 
+            &mut size, 
+            PAGE_EXECUTE_READ as u32, 
+            &mut old_protect
+        )) {
+            bail!(s!("failed to change memory protection for RX"));
+        }
+```
+
+在win64下,通过动态生成并注入Gadget,解决线程池回调(Threadpoll Callback)和系统上下文切换(NtContinue)之间的不匹配问题
+
+### TpAllocTimer TpAllocWait NtContinue
+
+位置:ntdll.dll中的Tp系列和Nt系列函数
+作用:是Windows用户态最底层,直接和内核通信
+
+**TpAllocTimer(线程池计时器分配)**  
+功能：在 Windows 线程池引擎中创建一个计时器对象  
+1. 当你调用 TpAllocTimer时，你并不是在执行代码，而是在向系统注册一个“未来任务”。
+2. 这个任务会被交给 Windows 的 TppWorkerThread（工作者线程）
+3. 规避点：如果你的代码直接运行，EDR 的监测点就在你的线程里。但通过TpAllocTimer，真正的代码执行发生在系统的合法线程中，你的恶意线程可以完全处于睡眠或挂起状态。这实现了“身首异处”，让扫描器找不到代码的真正发起者
+4. 在 hypnus 中的角色：作为“引信”。它在 timer策略中负责在指定延迟后，由系统线程触发那个 9 字节的 Trampoline
+
+**TpAllocWait (线程池等待对象分配)**  
+功能：创建一个等待对象，当某个内核句柄（如 Event,Mutex）被触发时，执行回调  
+意图：事件驱动的异步触发  
+1. 与计时器不同，它是被动触发的.在 hypnus中，它被用来实现更复杂的混淆逻辑。例如，你可以让混淆链停在某个位置，直到另一个合法的系统动作触发了某个 Event，混淆链才继续往下走
+2. 这种基于事件的执行流极其难以追踪。因为它不符合常规程序的“顺序执行”逻辑。对于自动化分析沙箱来说，这种不确定的触发机制往往会导致超时而无法检测到恶意行为
+
+**NtContinue (上下文恢复与跳转)**
+1. 实现 Context Chaining（上下文串联）,上帝视角的执行流操纵
+2. 底层行为：它会强行覆盖当前 CPU 所有的寄存器状态（RIP, RSP, RAX...），让CPU 按照 ContextRecord 指向的状态重新开始执行
+3. 无视调用约定：常规的 call 或 jmp 只能修改 RIP。但 NtContinue可以一次性修改所有寄存器。这允许我们在不回到自己代码的前提下，在NtProtectVirtualMemory、SystemFunction040 等系统函数之间反复横跳
+4. 规避返回地址扫描：如果你用 call 调用API，栈上会留下你的返回地址。如果你用 NtContinue “降临”到 API内部，栈上可以完全没有你的痕迹（因为你可以自己伪造 RSP）
+
+**三者联动配合**  
+1. 准备阶段：Config::new 准备好一个 CONTEXT 数组。每个 CONTEXT都是一个动作（比如：第 1 个是修改权限，第 2 个是加密）。
+2. 注册阶段：调用 TpAllocTimer，告诉 Windows：“5 秒后，去执行我的Trampoline 地址，并把第一个 CONTEXT 指针传给它。”
+3. 引爆阶段：5 秒到，系统线程调用 Trampoline。Trampoline 把参数挪到RCX，然后 jmp NtContinue。
+4. 链式爆发：
+    * NtContinue 加载 CONTEXT_1，CPU 跳去执行 NtProtectVirtualMemory。
+    * 最精妙的点：在 CONTEXT_1 的伪造栈顶，预先存好了 NtContinue的入口地址。
+    * 当 NtProtectVirtualMemory 执行完 ret 时，它会再次跳进 NtContinue。
+    * NtContinue 接着加载 CONTEXT_2（加密内存）。
+    * 结果：整个加解密过程在系统线程中像多米诺骨牌一样自动倒下，而你的主代码从头到尾都没参与。
+>>>>>>> 3d7d112 (hypnus)
