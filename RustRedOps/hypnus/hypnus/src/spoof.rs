@@ -24,6 +24,8 @@ use crate::winapis::{
 };
 
 /// Provides access to the unwind (exception handling) information of a PE image.
+/// 
+/// 该pe完全用来处理exception handling
 #[derive(Debug)]
 pub struct Unwind {
     /// Reference to the parsed PE image.
@@ -38,7 +40,12 @@ impl Unwind {
 
     /// Returns all runtime function entries.
     pub fn entries(&self) -> Option<&[IMAGE_RUNTIME_FUNCTION]> {
+
+        // pe->->dosheader->ntheader
         let nt = self.pe.nt_header()?;
+
+        // ntheader->optionalheader->datadirectory(这是一个16个元素的数组,每个元素是Image_Data_Directory类型,其中第3个指向Image_Runtime_Function,这个结构体为异常目录)
+        // 异常目录是给os做stack walk栈回溯/seh用的,详细记录了每个函数的栈/寄存器使用情况,因此也叫image_runtime_function
         let dir = unsafe {
             (*nt).OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION]
         };
@@ -50,6 +57,7 @@ impl Unwind {
         let addr = (self.pe.base as usize + dir.VirtualAddress as usize) as *const IMAGE_RUNTIME_FUNCTION;
         let len = dir.Size as usize / size_of::<IMAGE_RUNTIME_FUNCTION>();
 
+        // Forms a slice from a pointer and a length
         Some(unsafe { from_raw_parts(addr, len) })
     }
 

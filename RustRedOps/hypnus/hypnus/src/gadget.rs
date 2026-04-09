@@ -205,6 +205,9 @@ impl GadgetKind {
             .entries()
             .context(s!("failed to parse .pdata unwind info"))?;
         
+        // 0xFF 0x13 : call rbp
+        // 0xFF 0x23 : jmp  rbp
+        // 在image_runtime_function异常目录中找到符合要求的gadget
         if scan_runtime(base, &[0xFF, 0x13], tables).is_some() {
             Ok(GadgetKind::Call)
         } else if scan_runtime(base, &[0xFF, 0x23], tables).is_some() {
