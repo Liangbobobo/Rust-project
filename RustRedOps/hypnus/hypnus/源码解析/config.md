@@ -1,3 +1,13 @@
+- [Config Struct](#config-struct)
+  - [StackSpoof](#stackspoof)
+  - [Config::new()](#confignew)
+    - [LoadLibraryA](#loadlibrarya)
+  - [Config::alloc\_callback()](#configalloc_callback)
+  - [Thread Pool](#thread-pool)
+  - [NtContinue](#ntcontinue)
+    - [TpAllocTimer TpAllocWait NtContinue](#tpalloctimer-tpallocwait-ntcontinue)
+
+
 
 ## alloc_callback函数
 
@@ -444,7 +454,8 @@ let callback = &[
   指令集的直接“点穴”。普通函数是“按规矩办事”的平民，而这种动态字节流是“
   不留痕迹”的特种兵。它牺牲了可维护性、兼容性和稳定性（一旦出错就蓝屏）
   ，换取了极致的隐蔽性和对寄存器的绝对控制权。
-=======
+
+
 # Config Struct
 
 ```rust
@@ -490,7 +501,7 @@ Clone/Copy:
 /// Represents a reserved stack region for custom thread execution.
 #[derive(Default, Debug, Clone, Copy)]
 pub struct StackSpoof {
-    /// Address of a `gadget_rbp`, which realigns the stack (`mov rsp, rbp; ret`).
+    /// Address of a `gadget_rbp`, which realigns重新对齐 the stack (`mov rsp, rbp; ret`).
     gadget_rbp: u64,
 
     /// Stack frame size for `BaseThreadInitThunk`.
@@ -510,7 +521,77 @@ pub struct StackSpoof {
 }
 ```
 
-收集并存储伪造一个“合法 Windows调用栈”所需的所有关键尺寸和跳转点
+收集并存储伪造一个“合法 Windows调用栈”所需的所有关键尺寸和跳转点  
+现代编译器,特别是MSVC优化编译,大多开启了FPO(Frame Pointer Omission),即RBP不再作为栈帧指针,而被当作普通通用寄存器使用,栈帧寻址完全依赖RSP.
+
+**那么hypnus中为什么仍然需要RBP**  
+虽然微软优化了RBP的使用,但EDR和Windows异常处理(如RtlVirtualUnwind)在回溯栈时,依然会兼容两种模式:
+1. Frame-based Unwinding(经典模式):依赖RBP链,很对遗留模块/非优化代码还在用
+2. Table-based Unwinding(现代模式):即pdata(procedure data)/xdata表.这是现代win64主流.编译器在PE文件中生产一张表,记录函数在每段偏移量下,RSP和RBP如何变化
+3. gadget_rbp 的真实角色：不是为了链，而是为了跳转.
+  * 用途:为了骗过EDR的栈回溯,在栈上构建了伪造的看起来合法的函数调用序列。当 Payload 执行完毕，当前rsp指向的是构造的虚假栈帧,而非原本的系统栈.你不能直接ret，因为此时的 RSP 已经指向了你伪造的栈区域.这里将rbp寄存器征用为合法的栈基址寄存器,进入payload前,RBP提前保存了构造的合法栈基址
+  * mov rsp, rbp: 栈平移.瞬间将栈指针 RSP恢复到你之前构造好的“伪造合法栈帧”的基址.
+  * ret: 直接跳转到你栈顶存放的那个“合法返回地址”（比如指向RtlUserThreadStart 内部）
+  * 所以，这个 RBP此时已经不是“帧指针”了，它被当成了一个“栈指针基址寄存器”来使用。这是一种对寄存器用途的“重定向”
+
+gadget_rbp 根本不是在构造 RBP 链，它是在向 Windows 的 pdata
+  异常展开引擎（Unwind Engine）进行一次“格式化演出”。
+
+  1. 明确一个事实：现代 Windows 根本不在乎 RBP 链
+  在 x64 环境下，微软强推基于 pdata 表的表驱动展开 (Table-based
+  Unwinding)。这意味着：
+   * 对于 pdata： EDR 根本不去理会 RBP 的值是多少。它只看当前的 RIP
+     指针，然后去 PE 文件的 .pdata 段中搜索这个 RIP
+     属于哪个函数范围，并根据对应的 xdata
+     结构读取“如何恢复上一层栈帧”的指令。
+   * 所以： 那个 gadget_rbp 代码片段 mov rsp, rbp; ret 在现代调试器或 EDR
+     看来，它仅仅是一个“将 RBP 的值赋给 RSP 的指令序列”。
+
+  2. 那为什么要叫它 gadget_rbp？
+  这其实是一个“反向误导”，或者是对该 Gadget 作用的简写：
+   * 它并不是要构造一个 RBP 链条。
+   * 它的真实意图是：“确保在执行 ret 之前，RSP
+     处于一个我（攻击者）定义好的、完全合法的状态。”
+   * 之所以叫 rbp，是因为在这个特定的 Gadget 中，程序逻辑把 RBP
+     当作了一个暂存区，用来存放“我想要恢复到的 RSP 基址”。
+
+  3. 如何处理 pdata 表（真正的欺骗逻辑）
+  既然不依赖 RBP 链，hypnus 是如何骗过 pdata 回溯器的呢？
+
+  真正的欺骗发生在 src/spoof.rs 中的 spoof 函数里，它的逻辑是这样的：
+
+   1. 静态伪造 pdata 契约：hypnus 在构造栈帧时，会模拟 RtlUserThreadStart
+      或其他系统函数的“栈帧布局”。
+   2. 堆栈模拟：它在栈上预留的空间大小（base_thread_size
+      等字段），严格匹配这些函数在 pdata 中定义的 Prologue 对栈的操作。
+   3. 诱导回溯：
+       * 当 EDR 回溯时，它读到当前的 RIP 指向 NtProtectVirtualMemory
+         的内部地址。
+       * 它去查 pdata，发现这个地址需要“弹出 0x28 字节的栈空间”。
+       * 关键点：你在构造栈帧时，已经预先填充了那 0x28
+         字节的数据（虽然是假的）。
+       * EDR
+         回溯器成功地“弹出”了这些假数据，并将回溯器认为的“上一层调用者地址”指
+         向了你伪造的下一个函数地址（比如 RtlUserThreadStart）。
+  4. 总结：Gadget 在此处的角色
+   * 针对 pdata 的处理：通过精确控制栈帧大小（_size 字段）来匹配 pdata
+     记录的展开信息。
+   * 针对 gadget_rbp
+     的处理：它是在你的“伪造栈帧”全部执行完，要回归真实的系统调用链末尾时，负
+     责执行最后一次“栈底校准”的指令。
+
+  它完全跳过了 RBP 链的逻辑，直接通过修改 RSP
+  来欺骗那个基于栈帧大小回溯的引擎。
+
+  ---
+
+  一句话总结：
+  hypnus 不走 RBP 链，它走的是 “精确栈帧覆盖”。它通过 gadget_rbp 执行 mov
+  rsp, rbp，并不是为了构造 RBP
+  链，而是为了在切换回系统调用栈时，通过这一行汇编指令，把因为之前伪造栈帧而
+  变得混乱的 RSP 指针，强行归位到你精心构建的、符合 pdata 预期的“合法栈顶”。
+
+  这是一种利用汇编指令在物理内存层面“重置坐标系”的技巧，而非维护某种链表结构
 
 ## Config::new()
 

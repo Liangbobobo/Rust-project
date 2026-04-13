@@ -33,6 +33,7 @@ pub struct Config {
     pub stack: StackSpoof,
     pub callback: u64,
     pub trampoline: u64,
+    // 以下字段在config::new中初始化
     pub modules: Modules,
     pub wait_for_single: WinApi,
     pub base_thread: WinApi,
@@ -56,9 +57,12 @@ pub struct Config {
 
 impl Config {
     /// Create a new `Config`.
+    /// 
+    /// Rust中不允许未初始化的结构体字段,即使该结构体#[derive(Default)].
     pub fn new() -> Result<Self> {
         // Resolve hashed function addresses for all required APIs
         let mut cfg = Self::winapis(Self::modules());
+        // 初始化config中需要在运行时计算的字段
         cfg.stack = StackSpoof::new(&cfg)?;
         cfg.callback = Self::alloc_callback()?;
         cfg.trampoline = Self::alloc_trampoline()?;
@@ -217,6 +221,10 @@ impl Config {
             rtl_acquire_lock: get_proc_address(ntdll, 160950224u32, Some(jenkins3)).into(),
             tp_release_cleanup: get_proc_address(ntdll, 2871468632u32, Some(jenkins3)).into(),
             zw_wait_for_worker: get_proc_address(ntdll, 2326337356u32, Some(jenkins3)).into(),
+            // 结构体更新语法（Struct Update Syntax）
+            // 为结构体中所有未被显式赋值的字段生成一个“默认值”(空/零地址)
+            // 风险:不会检查结构体字段是否被遗漏;如果运行时使用这个default的零/空地址调用函数,程序会crash(非法内存访问).这显然是运行时crash的温床,不要试图通过注释/记忆消除此风险,而是
+            // 1.使用option/result wrap每个字段 2. 在config::new后面加一个对config的verify()方法用以检测是否完整解析环境
             ..Default::default()
         }
     }

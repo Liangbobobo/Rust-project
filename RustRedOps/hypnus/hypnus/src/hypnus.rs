@@ -954,15 +954,21 @@ pub mod __private {
                 // Creates the context to be passed into the new fiber.
                 // 旧栈执行的代码无法直接访问新栈的变量,必须把数据放在heap上
                 let fiber_ctx = Box::new(FiberContext {
+                    
                     hypnus: Box::new(hypnus),
+                   
                     obf,
+                    
                     master,
                 });
 
                 // Creates a new fiber with 1MB stack, pointing to the `hypnus_fiber` function.
                 let fiber = CreateFiber(
+                    // 堆栈初始提交大小
                     0x100000, 
+                    // 由fiber执行的函数的指针
                     Some(hypnus_fiber), 
+                    // 指向传递给fiber的变量的指针
                     Box::into_raw(fiber_ctx).cast()
                 );
                 
