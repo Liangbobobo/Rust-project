@@ -934,12 +934,17 @@ impl Hypnus {
 
 #[doc(hidden)]
 pub mod __private {
+    // A pointer type that uniquely owns a heap allocation of type T.
+    // 用于在堆上分配内存,跨越纤程切换时的栈边界
     use alloc::boxed::Box;
+    // 导入父模块
     use super::*;
 
     /// Execution sequence using the specified obfuscation strategy.
     pub fn hypnus_entry(base: *mut c_void, size: u64, time: u64, obf: Obfuscation, mode: ObfMode) {
+        // mastetr是一个承载了fiber handle的变量,类型是*mut c_void
         let master = ConvertThreadToFiber(null_mut());
+        // 极端EDR下,会监控该api/系统资源枯竭导致thread to fiber失败.不检查master-null的情况,会出现蓝屏BSOD/Crash的情况
         if master.is_null() {
             return;
         }
@@ -947,6 +952,7 @@ pub mod __private {
         match Hypnus::new(base as u64, size, time, mode) {
             Ok(hypnus) => {
                 // Creates the context to be passed into the new fiber.
+                // 旧栈执行的代码无法直接访问新栈的变量,必须把数据放在heap上
                 let fiber_ctx = Box::new(FiberContext {
                     hypnus: Box::new(hypnus),
                     obf,
