@@ -942,7 +942,12 @@ pub mod __private {
 
     /// Execution sequence using the specified obfuscation strategy.
     pub fn hypnus_entry(base: *mut c_void, size: u64, time: u64, obf: Obfuscation, mode: ObfMode) {
-        // mastetr是一个承载了fiber handle的变量,类型是*mut c_void
+        // mastetr是一个承载了fiber handle的变量,类型是*mut c_void.这里通过调用win api ConvertThreadToFiber将该thread转为fiber
+        // 在Winapis struct中pub ConvertThreadToFiber: ConvertThreadToFiberFn
+        // 接着在Winapis中的winapi()通过get_proc_address找到对应的函数地址.
+        // 是一种抽象类型定义/真实内存地址的绑定过程(称为动态api解析)
+        // indirect syscall:跳转到ntdll内部的一段代码,利用dll内部原本存在的syscall指令调用对应的寒湖是
+        // direct syscall:将SSN系统调用号加载到exa寄存器执行syscall
         let master = ConvertThreadToFiber(null_mut());
         // 极端EDR下,会监控该api/系统资源枯竭导致thread to fiber失败.不检查master-null的情况,会出现蓝屏BSOD/Crash的情况
         if master.is_null() {

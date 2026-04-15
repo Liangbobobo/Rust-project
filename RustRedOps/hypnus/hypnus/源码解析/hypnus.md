@@ -115,6 +115,80 @@ Rust 的内存所有权会影响Fiber切换
 let master = ConvertThreadToFiber(null_mut());
 ```
 这里master存储了此刻(正常代码)的所有cpu寄存器状态和栈位置.后面会跳到新建的栈中去执行任务,任务执行完通过SwitchToFiber(master) 瞬间跳回来.master就是一个本项目中thread/fiber之间的锚点
+1. ConvertThreadToFiber返回的是指向一个复杂结构体的地址
+2. 微软没有公开这个结构体的定义,业界主要通过React OS和内核逆向了解其具体结构
+3. hypnus中没有显式定义该结构,win的不同版本fiber的结构内部可能微调,写死该结构的适用性较小.
+4. hypnus通过win api SwitchToFiber/CreateFiber操作该结构.只有当需要直接篡改寄存器(比如修改rsp)时,才需要直接操作该结构的偏移
+5. hypnus通过操纵dinvk::types::CONTEXT的self.cfg.stack.spoof_context，实际上就是在间接修改FIBER 结构里存的那些“上下文”数据
+
+
+**为什么通过操作CONTEXT可以改变fiber:**
+1. CONTEXT是公开的: CONTEXT 是一个标准 API 数据结构，由 Windows SDK 提供。它是用来表达CPU 某一时刻的状态的
+    * 当系统发生中断、异常（SEH）、或者你调用 GetThreadContext /SetThreadContext 时，系统必须把这一堆寄存器数值传给你.它相当于 CPU 寄存器的“物理快照”
+2. FIBER是一个内核/库级调度对象。它的结构包含了很多调度器自用的私有字段（如链表节点、调度优先级、TEB指针等），微软为了防止开发者乱改这些调度逻辑（因为改了就容易蓝屏），所以没有把它放进公开文档
+3.  关键在于：我们并不需要直接修改那个不公开的 FIBER结构体的每一个字节，我们只需要利用 API 提供的缝隙.间接操纵,hypnus的做法
+4.  虽然我们不知道 FIBER 结构体在哪里（它是隐秘的），但 Windows给我们提供了一个公开函数 NtSetContextThread.只需要准备好一个公开的 CONTEXT 结构体（里面填好我们要伪造的 RSP 和RIP）
+5.  调用NtSetContextThread，告诉内核：“请把这个线程（或纤程）的寄存器状态覆盖为我填好的这个 CONTEXT”
+6.  本质：我们通过“官方提供的窗口”，强行向那个“隐秘的结构体”里写入了我们想写入的数据。我们不需要知道它具体的二进制偏移量，我们只需要调用API，让系统替我们去写入
+
+**直接操纵 (最顶尖红队的做法)**
+1. 通过 WinDbg 和 逆向分析（IDA），手动测算出：
+2. 在 Windows 10/11 的当前版本中，FIBER 结构体里保存 CONTEXT 的偏移量是0xXX
+3. 写 *(ptr + 0xXX) = my_context
+4. 这种方式不调用任何 API（彻底绕过 EDR 的 APIHook），直接修改内存。这是真正的“修改上下文”，但门槛极高，且随着系统更新，极易失效
+
+**ConvertThreadToFiber 的微观动作(调用该函数时,内存的变化序列)**
+1. TEB更新:
+    * 读取 `GS:[0x30]`（TEB）
+    * TEB 结构中，FiberData 字段（0x20 偏移处）被更新，指向新分配的FIBER 控制块.：这是线程被“打标”的瞬间，此线程现在被内核/ntdll视为一个纤程容器
+2. 内存分配：
+    * 系统调用 NtAllocateVirtualMemory 在进程堆空间中分配了一个 0x500字节左右的 FIBER 结构体（具体大小依赖 Windows 版本）
+    * 这个结构体包含了该线程当前的栈底 (StackBase)、栈顶 (StackLimit) 以及DeallocationStack
+    * ConvertThreadToFiber 不会分配那个 1MB的影子栈，它只负责把当前线程的原始栈收编进第一个 Fiber 对象（Fiber0）中
+
+**Fiber 保存的数据结构 (数据布局)**
+1. 调用 SwitchToFiber 时，系统在幕后交换的 FIBER 结构体（在 ntdll 中称为_FIBER），其内存布局逻辑如下
+
+| 字段名称          | 物理意义                                      | 对抗价值                                     |
+|-------------------|-----------------------------------------------|----------------------------------------------|
+| FiberContext      | 保存非易失性寄存器状态（rbp, rbx, r12-r15 等）。 | 核心：伪造调用栈的必经之地。                 |
+| StackBase / Limit | 栈的内存地址边界。                            | 检测点：EDR 检查 RSP 是否在此范围。          |
+| DeallocationStack | 该栈空间的基址，用于后续释放内存。            | 指纹：EDR 检查内存来源是否为私有内存。       |
+| ExceptionList     | 该纤程的 SEH 链表头指针。                     | 稳定性：保证异常能跨纤程处理。               |
+| FiberData         | 用户参数（lpParameter）。                     | 隐匿点：红队存放 Context 的地方。            |
+
+**FIBER 结构**
+1. 理解了Fiber的结构到底存了什么，你就掌握了Windows 上下文切换的物理本质
+
+
+
+
+**线程变纤程的内存真相：**  
+当 ConvertThreadToFiber 返回指针 P 时
+1. 内存分配与结构初始化  
+   1.1 Heap Allocation：系统调用 `NtAllocateVirtualMemory`，在进程的地址空间（通常是堆区域）中申请一块内存，大小固定（通常 `0x500` – `0x600` 字节，取决于 OS 版本）。这块内存被称为 FIBER 控制块。  
+   1.2 结构对齐：在这块内存的头部，系统写入了一些元数据（如 `FiberData` 偏移位置），为接下来的上下文保存做好对齐准备。
+
+2. TEB（线程环境块）的双重标记  
+   TEB 是操作系统管理线程的“核心账本”，纤程转换必须在此打上双重标记：  
+   2.1 FiberData 指针挂载：系统读取当前 CPU 的 `GS` 段寄存器找到 TEB（`GS:[0x30]`），将刚才分配的 FIBER 控制块地址写入 TEB 的 `FiberData` 字段（偏移 `0x20`）。  
+   2.2 标志位改写：同时修改 TEB 的 `SameTebFlags`（偏移 `0x17EE` 附近），将 `HasFiberData` 位（Bit 1）置为 `1`。这标志着内核调度器现在必须通过“纤程兼容模式”来对待这个线程。
+
+3. 上下文（Context）的物理镜像拷贝  
+   这是最关键的寄存器状态保存阶段：  
+   3.1 非易失性寄存器快照：系统将 CPU 的 `RBP`, `RBX`, `R12`, `R13`, `R14`, `R15` 这 6 个在 x64 ABI 中必须由被调用者维护的寄存器，直接 `memcpy` 进 FIBER 控制块的 `Context` 字段。  
+   3.2 RSP/RIP 锚定：  
+  - RSP (Stack Pointer)：将当前栈顶指针写入控制块。  
+  - RIP (Instruction Pointer)：将当前执行流的返回地址（调用 `ConvertThreadToFiber` 之后的那一行指令地址）写入 RIP。这样当此纤程再次被切换回时，程序会从刚才暂停的地方接着跑。
+
+4. 栈空间边界的逻辑关联  
+   4.1 边界数据提取：系统读取当前 TEB 中的 `StackBase` 和 `StackLimit`。  
+   4.2 写入控制块：将这两个地址写入 FIBER 控制块的固定偏移处。  
+   4.3 结果：此时，该纤程不仅记住了“我在哪（Context）”，还记住了“我能跑多大空间（Stack Boundaries）”。
+
+> Windows 纤程切换机制通过一个未公开的 FIBER控制块管理上下文。该控制块保存了受保护的 CPU寄存器镜像（CONTEXT）、栈边界信息和 SEH链表。转换（ConvertThreadToFiber）的本质是将当前线程的 TEB状态从‘原生线程’标记为‘纤程容器’，并初始化第一个 Fiber 块。免杀工具 hypnus通过直接篡改存放在内存中的 CONTEXT结构镜像，在系统进行寄存器加载时实施劫持，从而在不依赖内核 Hook的前提下实现了栈回溯欺骗
+
+
 
 **对应的函数原型**
 
