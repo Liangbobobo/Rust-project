@@ -195,6 +195,8 @@ pub struct ObfMode(pub u32);
 
 impl ObfMode {
     /// No additional obfuscation modes are used.
+    /// 
+    /// 0b0000:0b是二进制字面量标志;0000是u32的低4位,即这里只使用了低4位
     pub const None: Self = ObfMode(0b0000);
 
     /// Enables heap encryption.
@@ -204,16 +206,20 @@ impl ObfMode {
     pub const Rwx: Self = ObfMode(0b0010);
 
     /// Checks whether the flag contains another `ObfMode`.
+    /// 位与操作,如果self包含other所有位,self&other结果等于other本身;用于位计算
     fn contains(self, other: ObfMode) -> bool {
         (self.0 & other.0) == other.0
     }
 }
 
+/// 操作符 | 的重载
 impl core::ops::BitOr for ObfMode {
     type Output = Self;
 
     /// Combines two `ObfMode` flags using bitwise OR.
     fn bitor(self, rhs: Self) -> Self::Output {
+        // self.0是结构体内部u32数据
+        // ObfMode::Heap | ObfMode::Rwx=ObfMode(ObfMode::Heap.0 | ObfMode::Rwx.0)
         ObfMode(self.0 | rhs.0)
     }
 }

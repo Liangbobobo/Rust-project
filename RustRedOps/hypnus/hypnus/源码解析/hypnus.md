@@ -1,3 +1,4 @@
+- [struct ObfMode](#struct-obfmode)
 - [Fiber 纤程(Windows)](#fiber-纤程windows)
   - [适用场景](#适用场景)
   - [ConvertThreadToFiber](#convertthreadtofiber)
@@ -6,6 +7,66 @@
 - [扩展-Box::into\_raw/内部数据拷贝时发生的内部布局移动](#扩展-boxinto_raw内部数据拷贝时发生的内部布局移动)
 - [CONTEXT-暂存知识点,后续需要移动到其他文件中](#context-暂存知识点后续需要移动到其他文件中)
   - [进程 线程 纤程切换概览](#进程-线程-纤程切换概览)
+
+
+## struct ObfMode
+
+```rust
+/// Represents bit-by-bit options for performing obfuscation in different modes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct ObfMode(pub u32);
+
+impl ObfMode {
+    /// No additional obfuscation modes are used.
+    pub const None: Self = ObfMode(0b0000);
+
+    /// Enables heap encryption.
+    pub const Heap: Self = ObfMode(0b0001);
+
+    /// Allows RWX protected memory regions.
+    pub const Rwx: Self = ObfMode(0b0010);
+
+    /// Checks whether the flag contains another `ObfMode`.
+    fn contains(self, other: ObfMode) -> bool {
+        (self.0 & other.0) == other.0
+    }
+}
+```
+
+**`#[derive(Debug,Clone,Copy,PartialEq,Eq)]`**
+1. debug
+2. Clone
+3. copy
+4. 
+
+**`#[repr(transparent)]`**
+
+
+**pub struct ObfMode(pub u32)**
+1. 元组结构体:无结构体的字段名.
+2. 将u32包装在一个具名类型中,既有u32的性能,又有类型安全;防止将其他u32数字作为混淆模式传入
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
