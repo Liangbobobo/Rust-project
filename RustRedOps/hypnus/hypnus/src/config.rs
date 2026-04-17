@@ -233,7 +233,10 @@ impl Config {
 /// Get current stack pointer
 #[inline]
 pub fn current_rsp() -> u64 {
+    
     let rsp: u64;
+    // {}对应后面变量
+    // out:输出参数;reg:任意空闲通用寄存器作为中转;rsp:将中转寄存器里面的值给上面定义的rsp变量
     unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp) };
     rsp
 }
