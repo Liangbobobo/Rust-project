@@ -438,6 +438,8 @@ impl Hypnus {
             let mut h_thread = null_mut();
 
             // NtDuplicateObject,内核提供的handle克隆api.在内核句柄表(handle table)中,创建新索引条目,该条目指向一个存在的内核对象.可以跨进程克隆句柄,可以在同一进程中将受限/临时的句柄转为永久/有完全访问权限的实体句柄
+            // 其核心功能是将源进程表中的一个对象句柄索引，在目标进程（或同进程）的句柄表中创建一个新的有效条目，并根据权限掩码（ACCESS_MASK）赋予其相应的访问能力
+            // 在该项目中，此函数的作用是将当前线程的“伪句柄（Pseudo-handle）”转换为具备完整访问权限的“真实内核对象句柄”，从而为后续进行 APC注入和上下文操作提供合法且高权限的访问载体
             status = NtDuplicateObject(
                 // 源进程
                 NtCurrentProcess(),
@@ -462,10 +464,12 @@ impl Hypnus {
             // Base CONTEXT for spoofing
             ctx_init.Rsp = current_rsp();
 
-            // 
+            // ctx_init是payload.spoof_context不是针对某个函数/payload的伪造栈,而是伪造了整个回溯链
+            // EDR回溯的起点是rsp指向的栈槽位,即使rip里是payload地址,也不影响伪造栈.即,这里从payload之后开始一直伪装到回溯的根部
             let mut ctx_spoof = self.cfg.stack.spoof_context(self.cfg, ctx_init);
 
             // The chain will wait until `event` is signaled
+            // 将该伪造栈帧的 RIP 设置为系统函数NtWaitForSingleObject 的地址。即当该栈帧被“加载”到 CPU时，它就像是一个系统调用
             ctxs[0].jmp(self.cfg, self.cfg.nt_wait_for_single.into());
             ctxs[0].Rcx = events[1] as u64;
             ctxs[0].Rdx = 0;
