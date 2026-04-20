@@ -48,12 +48,17 @@ impl Gadget {
     /// Searches for usable `jmp <reg>` gadgets in memory based on predefined opcodes.
     pub fn new(cfg: &Config) -> Self {
         let mut gadgets = Vec::new();
+
+        // 三个dll的基址
         let modules = [
+            // cfg.modules实际上调用了config.rs中Config的关联函数modules->Moudles 并在该函数内部初始化了三个dll的基址.并从返回的Moudles结构体中找到对应dll的基址
+            // as *const u8以1字节为单位读取该指针指向的数据.源作为地址的指针仍然是u64大小的(win64下指针和地址永远64位)
             cfg.modules.ntdll.as_ptr() as *const u8,
             cfg.modules.kernel32.as_ptr() as *const u8,
             cfg.modules.kernelbase.as_ptr() as *const u8,
         ];
 
+        // 遍历三个dll
         for &base in modules.iter() {
             if let Some(range) = get_text_section(base as *mut c_void) {
                 if let Some(gadget) = find(base, range).first().copied() {
@@ -160,6 +165,8 @@ where
 }
 
 /// Extracts the `.text` section from a loaded module using PE header parsing.
+/// 
+/// 只有.text节中的数据才会被cpu作为指令执行.
 pub fn get_text_section(base: *mut c_void) -> Option<&'static [u8]> {
     if base.is_null() {
         return None;
