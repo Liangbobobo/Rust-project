@@ -1,3 +1,5 @@
+- [`ctxs[0]`](#ctxs0)
+- [section\_by\_name](#section_by_name)
 - [fn timer::NtDuplicateObject](#fn-timerntduplicateobject)
 - [fn timer::rax](#fn-timerrax)
 - [TPAllocTimer](#tpalloctimer)
@@ -5,6 +7,7 @@
 - [struct TP\_POOL\_STACK\_INFORMATION](#struct-tp_pool_stack_information)
 - [TpAllocPool(\&mut pool, null\_mut())](#tpallocpoolmut-pool-null_mut)
 - [win64 Event](#win64-event)
+- [Event Thread区别](#event-thread区别)
 - [Struct Hypnus::time::NtCreateEvent](#struct-hypnustimentcreateevent)
   - [与函数原型的映射解析](#与函数原型的映射解析)
 - [struct ObfMode](#struct-obfmode)
@@ -23,6 +26,36 @@
 
 
 [win64 threadpool](#win64-threadpool)
+
+
+## `ctxs[0]`
+
+`ctxs[0]`代表指定的conext
+
+进入这段之前已经:
+1. 找到了ntdll!NtWaitForSingleObject地址
+2. 通过Gadget::new从ntdll的二进制流中找到合法的`jmp <reg>`片段
+3. 通过NtDuplicateObject为主线程签发实态句柄
+4. 已经通过``` ctxs=[ctx_init; 10]```复印了十份相同的环境
+5. 通过创建`event[1]`,调用NtCreatEvent创建事件,调度对应的线程
+6. ctxs1`[0]`是影子线程Worker Thread唤醒后执行的第一个动作
+
+
+**分别调用:**
+gadget::CONTEXT::jmp->Gadget::new(cfg)->get_text_section(extract .text节)->section_by_name(find .text节)->sections(PE中所有节)
+
+
+
+
+1. 调用gadget::CONTEXT::jmp
+2. 在jmp内部通过Gadget::new(cfg):
+3. get_text_section
+4. jmp:修改`ctxs[0].rip`,将rip指向ntdll中 `jmp <reg>`片段
+
+
+## section_by_name
+
+**core::str::from_utf8_unchecked**
 
 
 
@@ -286,9 +319,21 @@ Event:一种由内核管理的同步原语（Synchronization Object）
 > 事件是“信号”，线程是“载体”
 
 
+## Event Thread区别
+
+win64下,Event\Thread都是内核对象,且都通过Handle管理.
+1. 物理本质:
+    * Thread是os的基本调度单位,一个Thread拥有一个私有的CPU寄存器集合(CONTEXT)和一个物理栈内存Stack
+    * Event是内核维护的一个同步原语.是内核非分页池的结构化内存Kevent.内部包含一个SignalState状态和一个WaitList排队者名单
+2. 权限和控制权差异
+    * 线程切换是由内核调度器强制执行的.线程本身不知道自己被切换了,它的寄存器状态被悄悄保存到内核栈中
+    * Event是由程序员通过指令显式触发.触发一个Event并不代表立即切换cpu.只向内核通知,当SignalState为1,将排队的thread改为就绪
 
 
 
+>设计事件（Event）的本质，是为了在操作系统层面实现‘被动通知机制’，从而替代高能耗、低可靠的‘主动查询机制’。它将‘等待’这个逻辑动作，从消耗 CPU指令的‘动态行为’，转化为由内核调度器托管的‘静态状态’，从而实现了计算资源的最优分配与多核环境下的原子同步
+
+> 线程是 CPU资源的消费者，通过寄存器与栈的动态流转实现程序逻辑；而事件是内核状态的载体，通过 SignalState 的物理翻转实现对线程执行流的逻辑阻断与重启。在 hypnus中，我们利用‘线程’去执行混淆，利用‘事件’去锁定这个线程的步拍，从而实现了一种受控的、可预期的‘幽灵执行流
 
 ## Struct Hypnus::time::NtCreateEvent
 

@@ -168,6 +168,8 @@ where
 /// 
 /// 只有.text节中的数据才会被cpu作为指令执行.
 pub fn get_text_section(base: *mut c_void) -> Option<&'static [u8]> {
+
+    // base是三个dll基址
     if base.is_null() {
         return None;
     }
@@ -175,8 +177,18 @@ pub fn get_text_section(base: *mut c_void) -> Option<&'static [u8]> {
     unsafe {
         let pe = PE::parse(base);
         let section = pe.section_by_name(obfstr::obfstr!(".text"))?;
+
+        // section.VirtualAddress该节区的RVA.此时ptr指向内存中.text的第一个字节
+        // 在物理层面，所有指针（MemoryAddress）在某一瞬间都只代表内存中一个特定字节（Byte）的物理位置,该位置被视为该数据块的起始/首地址,即首字节(该连续数据块的最低位置/下确界);而数据类型的宽度(如u64,8字节)不改变指针指向起始点的物理本质,仅作为cpu执行指令时读取后续连续字节宽度的参数
         let ptr = base.add(section.VirtualAddress as usize);
-        Some(core::slice::from_raw_parts(ptr.cast(), section.Misc.VirtualSize as usize))
+
+        Some(core::slice::from_raw_parts(
+
+        // 根据该函数返回地址-> Option<&'static [u8]>,infer 此处ptr.cast()应转为*const u8
+        ptr.cast(), 
+
+        // Misc是union,其中Misc.VirtualSize记录节区被加载到内存后的真实字节跨度,是cpu能看到的指令区域总长度,因为内存对齐的原因,可能比磁盘上的文件大.即该节区的逻辑大小,而非页中对齐后的物理大小
+        section.Misc.VirtualSize as usize))
     }
 }
 
