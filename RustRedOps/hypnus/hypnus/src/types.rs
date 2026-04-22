@@ -116,9 +116,12 @@ pub struct CFG_CALL_TARGET_INFO {
 }
 
 pub type LPFIBER_START_ROUTINE = Option<unsafe extern "system" fn(lpFiberParameter: *mut c_void)>;
-// 定义函数指针模板(类型别名)
+// 定义函数指针模板(类型别名 pub type =)
 // extern "system"指定调用约定calling convention,在win64下指定rustc以win的fastcall(rcx/rdx/r8/r9传参)形式准备该函数的调用栈.
-// 对应fn(lpParameter: *mut c_void) -> *mut c_void类型的函数.用于get_proc_address中
+// 对应fn(lpParameter: *mut c_void) -> *mut c_void类型的函数.
+// 这是FFI(Foreign Function Interface),rust与windws api底层交互的必经之路
+// 用于get_proc_address中,通过hash/函数名遍历dll找到对应函数在内存中的物理地址(u64数值).
+// ：将这个 u64 地址，通过 core::mem::transmute 强转为我们刚刚定义的 ConvertThreadToFiberFn 类型
 pub type ConvertThreadToFiberFn = unsafe extern "system" fn(lpParameter: *mut c_void) -> *mut c_void;
 pub type ConvertFiberToThreadFn = unsafe extern "system" fn() -> i32;
 pub type SwitchToFiberFn = unsafe extern "system" fn(lpFiber: *mut c_void);

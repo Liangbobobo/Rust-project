@@ -1,5 +1,8 @@
 - [`ctxs[0]`](#ctxs0)
+- [关于PE文件的节区Section](#关于pe文件的节区section)
+- [IMAGE\_SECTION\_HEADER](#image_section_header)
 - [section\_by\_name](#section_by_name)
+- [dinvk::helper::section()](#dinvkhelpersection)
 - [fn timer::NtDuplicateObject](#fn-timerntduplicateobject)
 - [fn timer::rax](#fn-timerrax)
 - [TPAllocTimer](#tpalloctimer)
@@ -23,6 +26,7 @@
 - [win64 threadpool](#win64-threadpool)
   - [系统默认线程池](#系统默认线程池)
 - [扩展-handle句柄](#扩展-handle句柄)
+- [扩展- `AsRef<[u8]>`](#扩展--asrefu8)
 
 
 [win64 threadpool](#win64-threadpool)
@@ -44,7 +48,7 @@
 **分别调用:**
 gadget::CONTEXT::jmp->Gadget::new(cfg)->get_text_section(extract .text节)->section_by_name(find .text节)->sections(PE中所有节)
 
-
+1
 
 
 1. 调用gadget::CONTEXT::jmp
@@ -52,12 +56,47 @@ gadget::CONTEXT::jmp->Gadget::new(cfg)->get_text_section(extract .text节)->sect
 3. get_text_section
 4. jmp:修改`ctxs[0].rip`,将rip指向ntdll中 `jmp <reg>`片段
 
+## 关于PE文件的节区Section
+
+静态的磁盘文件与动态的内存布局
+
+为什么要有节区:
+1. PE文件不是混在一起的二进制数据,而是被组织成功能隔离的区域.这种划分的本质原因是内存保护策略
+2. 代码区 (.text)：必须是只读 + 可执行，防止被恶意篡改
+3. 数据区 (.data)：必须是可读写，但通常不可执行
+4. 资源区 (.rsrc)：图片、图标等，只需只读
+5. 通过IMAGE_SECTION_HEADER，操作系统在加载程序时，能为不同的区域分配不同的页面保护属性 (Memory Protection)
+
+## IMAGE_SECTION_HEADER
+
+1. 位置:IMAGE_DOS_HEADER(e_lfanew)->IMAGE_NT_HEADERS(FileHeader字段存储节区数组的长度等信息)->IMAGE_SECTION_HEADER(其地址=NT Headers 起始地址 +sizeof(IMAGE_NT_HEADERS))
+2. 是一个定长（Fixed-size）的结构,每个40字节.存放独赢节区的元数据描述.包含Name(节区名字)\Raw Data(节区物理布局:节区数据在磁盘上起点,占用空间大小)\Virtual Mapping(内存映像:节区加载到内存后RVA,在内存中实际占用的内存空间)\Characteristics(权限与行为)
+3. 用于让加载器（Loader）以最快速度读取文件布局
+4. 在pe文件中IMAGE_SECTION_HEADER数组是IMAGE_NT_HEADERS之后的一块连续的内存区域.
+5. IMAGE_NT_HEADERS数组构成整个程序的内部布局蓝图.Windows加载器通过循环遍历这个数组,逐个解析每个节区信息,并根据节区信息向os申请内存\拷贝文件数据\赋予对应页面保护属性.
+6. 没有IMAGE_NT_HEADERS数组,pe文件就是一堆乱序
+7. IMAGE_NT_HEADERS是索引,section是实体
+
+
 
 ## section_by_name
 
 **core::str::from_utf8_unchecked**
 
+## dinvk::helper::section()
 
+IMAGE_DOS_HEADER->IMAGE_NT_HEADERS->IMAGE_SECTION_HEADER
+
+作者在这里其实做了一个假设：
+`size_of::<IMAGE_NT_HEADERS>()` 等于 OptionalHeader 的末尾地址。但在实际的 PE 规范中，IMAGE_NT_HEADERS 包含的 OptionalHeader的大小是可变的（由 FileHeader.SizeOfOptionalHeader 决定）。
+
+如果这个 PE 文件是一个非标准生成的，或者经过了某些“特殊处理”，简单的`size_of::<IMAGE_NT_HEADERS>()`可能无法定位到节表。成熟的解析逻辑通常会加上
+`FileHeader.SizeOfOptionalHeader` 进行计算。
+
+**(*nt).FileHeader.NumberOfSections**
+1. 代表pe文件的IMAGE_SECTION_HEADER有多少
+2. 加载器在加载 PE 时，如果不读取NumberOfSections，它甚至无法完成内存分配，程序根本启动不起来
+3. 只要程序正在运行（或者你正在分析一个 PE文件），这个数字必须是正确的。如果它被改坏了，程序在加载阶段就会因为“无效的 PE 格式”被系统拒绝运行
 
 ## fn timer::NtDuplicateObject
 
@@ -1038,3 +1077,28 @@ Windows 系统中，句柄 (Handle)是你与操作系统资源（文件、进程
     * 这是真句柄还是伪句柄
     * 我需要什么权限（Desired Access）.如果我0x1FFFFF(所有权限)，会不会太招摇
     * 调用结束后，我是否需要 NtClose.比如 NtDuplicateObject产生的克隆句柄如果不关闭，就是显著的内存泄露
+
+
+## 扩展- `AsRef<[u8]>`
+
+```rust
+pub trait AsRef<T: PointeeSized>: PointeeSized {
+    // Required method
+    fn as_ref(&self) -> &T;
+}
+```
+Used to do a cheap reference-to-reference conversion.  
+任何实现了这个trait的类型,都能无损\cheap的转换为另一个
+
+在 Rust 中，每当我们谈论一个指针或引用（如 &T 或 *const T）时，这个指针本身在内存中占据的大小并不总是固定的：
+   * 对于 Sized 类型（如 u32, f64）：指针只是一个普通的内存地址（1个机器字，64位系统下 8 字节）。
+   * 对于 DST（动态大小类型，如`[u8]`）：指针是一个胖指针，包含内存地址和元数据（对于切片是长度，对于 Trait Object 是虚表地址）
+
+**PointeeSized**:类型 T作为“被指向者（Pointee）”时，其指针携带的“元数据（Metadata）”本身必须是拥有固定大小（Sized）的
+1. 引用的合法性：as_ref 返回的是 &T。为了让编译器能够构造并传递这个&T，它必须知道如何处理这个引用的元数据
+2. 覆盖 ?Sized 的场景：以前我们用 T: ?Sized，意思是 T的大小可以不确定。而 PointeeSized是一层更深、更本质的约束——它不仅允许 T 的大小不确定（如`[u8]`），还保证了无论 T有多大，指向它的指针的元数据部分（即长度信息）是确定且可处理的
+3. hypnus中,`AsRef<[u8]>`代表:
+4. T 是 `[u8]`：它是一个动态大小类型，不满足Sized（因为它的大小取决于运行时）
+5. 它满足 PointeeSized：因为指向 `[u8]`的指针，其元数据是一个 usize 类型的“长度”。而 usize 是有固定大小的（64位系统下是 8 字节）
+6. 结果：编译器可以安全地为 .text 节构造出一个胖指针（地址 +长度），并将其通过 as_ref() 传递
+7. 如果 T 不满足 PointeeSized.那样的类型甚至无法通过引用 &T 来访问，在 Rust中几乎不存在这种类型，除非是某些极端的试验性编译器特性

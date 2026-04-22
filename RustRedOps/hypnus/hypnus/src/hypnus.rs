@@ -470,6 +470,7 @@ impl Hypnus {
 
             // The chain will wait until `event` is signaled
             // 将该伪造栈帧的 RIP 设置为系统函数NtWaitForSingleObject 的地址。即当该栈帧被“加载”到 CPU时，它就像是一个系统调用
+            // 
             ctxs[0].jmp(self.cfg, self.cfg.nt_wait_for_single.into());
             ctxs[0].Rcx = events[1] as u64;
             ctxs[0].Rdx = 0;

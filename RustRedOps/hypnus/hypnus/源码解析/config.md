@@ -458,21 +458,36 @@ let callback = &[
 
 # Config Struct
 
+Config是静态系统环境快照  
+CONTEXT是动态执行时的系统环境
+
+在 hypnus 中，Config 和 CONTEXT 字段的选择，本质上是“攻击链路对系统原语的需求” 与 “CPU 执行现场的寄存器约束”之间的精确映射
+
+
+构造 Config 时，字段选择遵循 “执行流链式劫持”的最小路径原则。它只保留那些能让 Payload “合法存在并自主切换”的字段。  
+这 22 个字段并不是随手抓来的，而是一个红队开发者在Windows 内核中反复试错后，筛选出的“执行流操纵最小集合
+
 ```rust
 #[derive(Default, Debug, Clone, Copy)]
 pub struct Config {
+  // 存储伪造系统函数（如RtlUserThreadStart）所需的栈帧位移.与后续的 CONTEXT.Rsp 操作直接挂钩
     pub stack: StackSpoof,
+    // 和trampoline解决 x64 下 rdx 与 rcx参数不匹配的“物理硬伤”，确保回调能成功进入 RtlCaptureContext
     pub callback: u64,
     pub trampoline: u64,
+    // 三个dll的基址
     pub modules: Modules,
     pub wait_for_single: WinApi,
     pub base_thread: WinApi,
     pub enum_date: WinApi,
     pub system_function040: WinApi,
     pub system_function041: WinApi,
+    // 核心引擎:每一个 CONTEXT结束时都会通过这个函数加载下一个 CONTEXT
     pub nt_continue: WinApi,
     pub nt_set_event: WinApi,
+    // 和base_thread一起提供合法的系统启动点地址，用于填充栈欺骗中的返回地址
     pub rtl_user_thread: WinApi,
+    // 隐匿开关。负责在执行前将内存改为 RWX，执行后改回 R
     pub nt_protect_virtual_memory: WinApi,
     pub rtl_exit_user_thread: WinApi,
     pub nt_get_context_thread: WinApi,
@@ -481,6 +496,7 @@ pub struct Config {
     pub nt_wait_for_single: WinApi,
     pub rtl_acquire_lock: WinApi,
     pub tp_release_cleanup: WinApi,
+    // 原始模板。获取线程初始“干净”状态的唯一手段
     pub rtl_capture_context: WinApi,
     pub zw_wait_for_worker: WinApi,
 }

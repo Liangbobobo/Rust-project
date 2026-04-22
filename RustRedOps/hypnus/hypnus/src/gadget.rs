@@ -11,9 +11,14 @@ use crate::config::Config;
 use crate::spoof::Unwind;
 
 /// List of short jump opcode patterns mapped to their corresponding register.
+/// 
+/// &[(&[u8], Reg)]对数组的引用,该数组的元素类型是(&[u8], Reg).其中第一个元组类型是&[u8](字节 slice),第二个是enum Reg
 const JMP_GADGETS: &[(&[u8], Reg)] = &[
+    // jmp rdi:跳转到rip存储的地址
     (&[0xFF, 0xE7], Reg::Rdi),
+    // jmp r10
     (&[0x41, 0xFF, 0xE2], Reg::R10),
+    // jmp r11
     (&[0x41, 0xFF, 0xE3], Reg::R11),
     (&[0x41, 0xFF, 0xE4], Reg::R12),
     (&[0x41, 0xFF, 0xE5], Reg::R13),
@@ -59,9 +64,14 @@ impl Gadget {
         ];
 
         // 遍历三个dll
-        for &base in modules.iter() {
+        for &base in modules.iter() {   
+            // 取出.text section 地址.if let{}模式匹配,如果匹配执行{}内部代码
+            // range为.text的slice,以字节(u8)为单位
             if let Some(range) = get_text_section(base as *mut c_void) {
-                if let Some(gadget) = find(base, range).first().copied() {
+
+                if let Some(gadget) = 
+                // base是三个dll的基址,以u8为单位进行读取
+                find(base, range).first().copied() {
                     gadgets.push(gadget);
                 }
             }
@@ -83,8 +93,21 @@ impl Gadget {
     ///
     /// Sets the `RIP` to the gadget address and writes the `target` value
     /// into the appropriate general-purpose register for indirect jump.
+    /// 
+    /// 通过设置rip将cpu引向位于三个dll中的指令,如jmp r10
+    /// 
+    /// 通过match将将真正的目标target,如NtProtectVirtualMemory地址存入cpu对应的register
+    /// 
+    /// 当cpu恢复执行,会先跳到self.addr,执行jmp r10.这时cpu会立即再次跳转到真正的恶意逻辑/系统调用中
+    /// 
+    /// 这时win下,实现ROP链(Return-Oriented Programming)调用的标准用法
+    /// 
+    /// 这里可用ctx.Rip = target;实现同样功能,但EDR会检查rip是否来自合法\已加载的模块的函数导出表
     fn apply(&self, ctx: &mut CONTEXT, target: u64) {
+        // 将找到的Gaddet地址存入当前Context的rip.addr在struct Gadget中
         ctx.Rip = self.addr;
+
+        // 匹配gadget中的register.将要执行的函数
         match self.reg {
             Reg::Rdi => ctx.Rdi = target,
             Reg::R10 => ctx.R10 = target,
@@ -101,19 +124,45 @@ impl Gadget {
 /// Only one gadget per register is recorded to avoid redundancy.
 fn find<B>(base: *const u8, region: &B) -> Vec<Gadget> 
 where
+    // 允许B大小在编译器未知
+    // 带有固定大小长度元数据(PointeeSized)的&[u8]
     B: ?Sized + AsRef<[u8]>,
 {
     let mut gadgets = Vec::new();
+    // 带有;的这种形式,是数组的初始化语法.表示有7个false的数组.
     let mut seen = [false; JMP_GADGETS.len()];
-    for (i, (pattern, reg)) in JMP_GADGETS.iter().enumerate() {
+    for (i, (pattern, reg)) in 
+    JMP_GADGETS
+    // 将slice转为迭代器 .iter()产生的是引用,即每次循环产生的是指向元组的指针&[(&[u8],Reg)]
+    .iter()
+    // 给.iter()产生的指针加上一个counter,组成一个新的元组.即(usize, &(&[u8], Reg))
+    .enumerate() {
+        // seen[i]作为是否找到对应gaddet标志/开关,如果找到末尾会seen[i] = true;
         if seen[i] {
+            // 对于找到的gaddet,不再继续执行下面的代码,转而进入下一个循环
             continue;
         }
 
-        if let Some(pos) = memchr::memmem::find(region.as_ref(), pattern) {
+        // find():Returns the index of the first occurrence of the given needle
+        // region是.text的slice
+        if let Some(pos) = memchr::memmem::find
+        // memchr::memmem::find()函数要求第一个函数是&[u8]类型.而region是一个满足AsRef<[u8]>的类型B,所以这里需要使用as_ref()转为&[u8](即slice,字节切片)
+        (region.as_ref(), pattern) {
             // Calculates absolute address based on module base
             gadgets.push(Gadget {
-                addr: base as u64 + (region.as_ref().as_ptr() as usize - base as usize + pos) as u64,
+                // 这里as_ptr()作用在slice上:Returns a raw pointer to the slice's buffer.即返回region(.text节区)在内存中的起始指针,就是第一个字节的物理内存地址(*const u8)
+                addr: base as u64 + (
+                    // .text节在当前内存的起始绝对物理地址
+                    region.as_ref().as_ptr() as usize 
+                    - 
+                    // 模块(如dll)在内存中的基址.
+                    base as usize //减去后得到.text节的RVA
+
+                    // pos来自memchr::memmem::find():是pattern在region内部的起始索引位置.即节头到gaddet的距离
+                    + pos) as u64,
+
+                // JMP_GADGETS.iter()后reg就是&Reg,是指向Reg枚举的引用
+                // *reg就是取值操作.发生了一次物理意义上的按位拷贝（Bitwise Copy）.Reg是一个有Copy trait的枚举
                 reg: *reg,
             });
 
@@ -164,7 +213,7 @@ where
     }
 }
 
-/// Extracts the `.text` section from a loaded module using PE header parsing.
+/// Extracts the `.text` section from a loaded module using PE header parsing.返回.text内容的slice(即包含.text节起始地址和长度的flat pointer)
 /// 
 /// 只有.text节中的数据才会被cpu作为指令执行.
 pub fn get_text_section(base: *mut c_void) -> Option<&'static [u8]> {
