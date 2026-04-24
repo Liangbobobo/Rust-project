@@ -218,7 +218,7 @@ where
 /// 只有.text节中的数据才会被cpu作为指令执行.
 pub fn get_text_section(base: *mut c_void) -> Option<&'static [u8]> {
 
-    // base是三个dll基址
+    // base是三个dll基址,用于查找节区信息
     if base.is_null() {
         return None;
     }

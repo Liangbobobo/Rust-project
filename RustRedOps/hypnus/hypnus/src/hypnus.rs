@@ -470,20 +470,26 @@ impl Hypnus {
 
             // The chain will wait until `event` is signaled
             // 将该伪造栈帧的 RIP 设置为系统函数NtWaitForSingleObject 的地址。即当该栈帧被“加载”到 CPU时，它就像是一个系统调用
-            // 
+            //  jmp内部调用Gadget::new,在三个dll中搜索预设的jmp <reg>机器码;jmp内部调用apply()将找到的物理地址与目标api注入到CPONTEXT和寄存器中
             ctxs[0].jmp(self.cfg, self.cfg.nt_wait_for_single.into());
             ctxs[0].Rcx = events[1] as u64;
             ctxs[0].Rdx = 0;
             ctxs[0].R8  = 0;
 
-            // Temporary RW access
+            // Temporary RW access;将原本r/x的shellcode内存转为rw读写状态
             let mut old_protect = 0u32;
+            // 将全局配置拷贝到当前栈帧.因为NtProtectVirtualMemor要求传入的是变量地址(指针的指针).且会为了对齐页面边界动态修改这两个变量的值
             let (mut base, mut size) = (self.base, self.size);
+            // 
             ctxs[1].jmp(self.cfg, self.cfg.nt_protect_virtual_memory.into());
             ctxs[1].Rcx = NtCurrentProcess() as u64;
+            // 这里的base不是shellcode的地址,是存放shellcode地址的那个变量的地址(即&base).因为NT API 需要能够修改base值对齐内存页
+            // 在Trait Asu64中,重新定义的as_u64()方法,以契合此处Nt api的参数要求
             ctxs[1].Rdx = base.as_u64();
             ctxs[1].R8  = size.as_u64();
+            // shellcode通常以 PAGE_EXECUTE_READ 运行,下一步要执行XOR加密就必须把内存改为write.否则会触发access violation导致蓝屏
             ctxs[1].R9  = PAGE_READWRITE as u64;
+            // NtProtectVirtualMemory 有 5 个参数,后续有通过((ctxs[1].Rsp + 0x28) as *mut u64).write(old_protect.as_u64())在栈上读取第五个参数的代码
 
             // Encrypt region
             ctxs[2].jmp(self.cfg, self.cfg.system_function040.into());
@@ -535,6 +541,9 @@ impl Hypnus {
             self.cfg.stack.spoof(&mut ctxs, self.cfg, Obfuscation::Timer)?;
 
             // Patch old_protect into expected return slots
+            // ctxs[]中每个元素都是地址独立的1.2kb块().修改各个元素中的数据不会相互影响.主线程()在执行NtSetEvent(event[1])前,已经完成各个数组的数据加载.worker唤醒后按照顺序串行/只读的执行.无论放在哪里都不影响执行
+            // 这里只是写入数据,而没有开始执行.在执行的时候,ctxs的各个数组也是串行执行的.所以即使把((ctxs[1].Rsp + 0x28) as *mut u64).write(old_protect.as_u64());放到后面,也不影响执行
+            // 但放在这里明显有工程上的用意.必须等self.cfg.stack.spoof(...)执行后,才能拿到ctxs[1].Rsp 的最终物理数值.ctxs[1].Rsp 在不同阶段是一直变化的
             ((ctxs[1].Rsp + 0x28) as *mut u64).write(old_protect.as_u64());
             ((ctxs[7].Rsp + 0x28) as *mut u64).write(old_protect.as_u64());
 
@@ -1123,6 +1132,13 @@ trait Asu64 {
 
 impl<T> Asu64 for T {
     fn as_u64(&mut self) -> u64 {
+        // self代表调用这个方法的变量本身(比如base);由于函数参数就是&mut self.此时传入的就是对这个变量的引用.物理层面,self对应的寄存器中就是base自身的物理地址.base存储的是指向shellcode的一级指针
+        //self as *mut _ 从引用(rust的有保证的引用)变为raw pointer;_ 让编译器自动推导类型(如base是u64,这里就是*mut u64);跨越了rust编译器的安全边界(不再检查这块内存的生命周期),拿到了这块内存的物理访问权.这里提取了指针变量base 的指针
+        // as *mut c_void将所有类型指针转为c_void无类型指针;以此符合Windows c的接口标准(FFI)
+        // 假设base 值:0x7FF12345 (Shellcode 的地址);内存位置：0x0012FF40 (变量在栈上的位置)
+        // 这里返回的是一个指针本身的值(即物理地址),即逻辑上指针的地址等价于二级指针
+        // 关键误区在于,base作为一个变量,它的value代表该变量内部的值,它的address代表其在内存中(栈)的位置.这里取了base的address,而不是value.取到后这里存的是base的地址,要获得value,发生了两次跳转.所以叫二级指针
+        // gemini总结:变量 base遵循物理实体的‘址/值’双重性：其内部存储的一级指针（Value）指向攻击载荷，其在栈上的物理坐标（Address）则构成了访问该指针的唯一入口。as_u64()的原子逻辑是提取该变量的‘物理坐标’而非其‘存储内容’。这一动作在逻辑拓扑上强制增加了一个跳转层级，使得原本的一级地址变量被具现化为功能性的二级指针（Double Indirection），从而实现了与内核 API 在内存重定位与结果反馈机制上的物理对齐
         self as *mut _ as *mut c_void as u64
     }
 }

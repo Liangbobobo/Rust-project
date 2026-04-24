@@ -1,3 +1,4 @@
+- [NtWaitForSingleObject](#ntwaitforsingleobject)
 - [`ctxs[0]`](#ctxs0)
 - [关于PE文件的节区Section](#关于pe文件的节区section)
 - [IMAGE\_SECTION\_HEADER](#image_section_header)
@@ -30,6 +31,51 @@
 
 
 [win64 threadpool](#win64-threadpool)
+
+
+
+## NtWaitForSingleObject
+
+```c
+/**
+ * The NtWaitForSingleObject routine waits until the specified object is in the signaled state or the time-out interval elapses.
+ *
+ * \param Handle The handle to the wait object.
+ * \param Alertable The function returns when either the time-out period has elapsed or when the APC function is called.
+ * \param Timeout A pointer to an absolute or relative time over which the wait is to occur. Can be null. If a timeout is specified,
+ * and the object has not attained a state of signaled when the timeout expires, then the wait is automatically satisfied.
+ * If an explicit timeout value of zero is specified, then no wait occurs if the wait cannot be satisfied immediately.
+ * \return NTSTATUS Successful or errant status.
+ * \sa https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntwaitforsingleobject
+ */
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtWaitForSingleObject(
+    _In_ HANDLE Handle,
+    _In_ BOOLEAN Alertable,
+    _In_opt_ PLARGE_INTEGER Timeout
+    );
+```
+
+
+作用:
+1. 挂起执行流：它通过系统调用告知内核调度器，当前线程不再具备“执行资格”
+2. 放弃 CPU 资源：该线程会被移出物理 CPU 的核心，寄存器状态（RIP, RSP, RAX等）被封存在内核栈中
+3. 原子等待：它在内核中进入一个高效的睡眠循环。只有当目标对象（如`events[1]`）的 SignalState 变为 1 时，内核才会重新激活它
+4. hypnus 利用它的核心原因：创造一个绝对静止的内存取证真空:
+5. 消除执行特征：当线程停在 NtWaitForSingleObject时，它不执行任何用户态指令。EDR 的行为监控引擎（Behaviora lEngine）无法通过“指令序列分析”来判定它是恶意代码
+6. 合法的“避风港”：在 Windows 系统中，成千上万个合法的系统线程（如svchost.exe）都在调用这个函数。将恶意执行流“停”在这里，相当于把一滴水藏进了大海
+7. 内存翻转的安全期：由于线程在内核里“冻结”了，它的栈和堆此时是静态的。这给了主线程一个完美的物理时机去执行 XOR 加密（Heap Obfuscation），而不用担心发生内存访问冲突
+8. 利用uwd作为堆栈欺骗的“归位锚点”,是整个控制流劫持的“中转站”
+9. 利用 ret 指令的物理特性：
+10. 当 NtWaitForSingleObject 完成使命准备“回家”时，它会执行汇编指令 ret;常规逻辑：ret 应该跳回调用它的那行代码
+11. 由于我们是用 jmp 杀进来的，并在栈上预先填入了一个“受硬件认可的假地址”（如 BaseThreadInitThunk 内的某个位置）
+12. 欺骗硬件检查 (CET Bypass)：
+13. 此时 CPU 的硬件影子栈正在盯着这个 ret;由于 uwd 已经通过 .pdata解析，精准地把物理数据栈（RSP）对齐到了影子栈预期的那个合法位置
+14. NtWaitForSingleObject执行完后，顺着我们铺好的路，合法地跳进了我们的 Gadget 陷阱中
+
+> NtWaitForSingleObject 的实质是一个‘执行流的逻辑断点’。在 hypnus 与 uwd的配合下，它扮演了三个角色：第一，它是‘身份洗白器’，将恶意线程转化为合法的系统等待线程；第二，它是‘同步锁’，确保内存加密与执行流切换的时序一致性；第三，也是最核心的，它是‘劫持跳板’，它利用系统原生函数的合规返回动作，在硬件影子栈不感知的状态下，将执行权移交给后续的混淆链条
 
 
 ## `ctxs[0]`
