@@ -68,6 +68,8 @@ impl Unwind {
 }
 
 /// Represents a reserved stack region for custom thread execution.
+/// 
+/// 
 #[derive(Default, Debug, Clone, Copy)]
 pub struct StackSpoof {
     /// Address of a `gadget_rbp`, which realigns the stack (`mov rsp, rbp; ret`).
