@@ -243,7 +243,11 @@ pub fn get_text_section(base: *mut c_void) -> Option<&'static [u8]> {
 
 /// Extension trait to allow injecting gadgets into a CONTEXT struct dynamically.
 pub trait GadgetContext {
-    /// Modifies the current CONTEXT instance by injecting a jump gadget.
+    /// Modifies the current CONTEXT instance by injecting a jump gadget.然后将第三个参数target作为地址
+    /// 
+    /// 第一个参数&mut self;第二个Config,第三个u64
+    /// 
+    /// jmp() 函数的作用是通过修改 CONTEXT 结构体中的指令指针 RIP 指向合法的系统 Gadget地址，并同步将真实跳转目标（target）注入到特定的辅助寄存器（如R10-R15）中，从而在不直接触发恶意跳转特征的前提下，利用寄存器间接跳转机制为受控线程构造出一个既能隐蔽切换执行流、又能规避 EDR 返回地址校验的虚假执行现场
     fn jmp(&mut self, cfg: &Config, target: u64);
 }
 

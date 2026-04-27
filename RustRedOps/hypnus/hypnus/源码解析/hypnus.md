@@ -1,3 +1,5 @@
+- [SystemFunction041](#systemfunction041)
+- [SystemFunction040](#systemfunction040)
 - [NtWaitForSingleObject](#ntwaitforsingleobject)
 - [`ctxs[0]`](#ctxs0)
 - [关于PE文件的节区Section](#关于pe文件的节区section)
@@ -31,6 +33,21 @@
 
 
 [win64 threadpool](#win64-threadpool)
+
+
+## SystemFunction041
+
+在 Windows 内核中，SystemFunction041 是 RtlDecryptMemory 的导出名
+1. 核心功能：它是 SystemFunction040 (加密) 的对称函数
+2. 对称性：它使用相同的内，将乱码还原回原始字节
+3. 原子性：由于该操作是原地（In-place）进行的，解密后的数据会直接覆盖掉原来的加密区域
+
+
+## SystemFunction040
+
+位于cryptbase.dll 中  
+本质：它是微软内部使用的 RtlEncryptMemory 函数的公开导出别名
+
 
 
 

