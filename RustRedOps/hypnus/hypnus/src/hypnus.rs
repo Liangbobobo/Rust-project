@@ -227,7 +227,7 @@ impl core::ops::BitOr for ObfMode {
 /// Structure responsible for centralizing memory obfuscation techniques
 #[derive(Clone, Copy, Debug)]
 struct Hypnus {
-    /// Base memory pointer to be manipulated or operated on.
+    /// Base memory pointer to be manipulated or operated on.用户想要混淆的内存区域的首地址指针
     base: u64,
 
     /// Size of the memory region.

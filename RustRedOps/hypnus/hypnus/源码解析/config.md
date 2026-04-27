@@ -458,19 +458,25 @@ let callback = &[
 
 # Config Struct
 
+> Config 充当了项目的“环境确定性引擎”，它通过预先解析 API地址、测量系统栈帧元数据并分配执行跳板，将不可控的操作系统环境固化为一套精确的物理坐标字典，为后续异步混淆链提供绝对可靠的跳转依据
+
 Config是静态系统环境快照  
 CONTEXT是动态执行时的系统环境
 
 在 hypnus 中，Config 和 CONTEXT 字段的选择，本质上是“攻击链路对系统原语的需求” 与 “CPU 执行现场的寄存器约束”之间的精确映射
 
-
 构造 Config 时，字段选择遵循 “执行流链式劫持”的最小路径原则。它只保留那些能让 Payload “合法存在并自主切换”的字段。  
 这 22 个字段并不是随手抓来的，而是一个红队开发者在Windows 内核中反复试错后，筛选出的“执行流操纵最小集合
+
+
+类型是:`Once<Config>`:
+1. 在异步环境下(线程池或纤程),spin::Once确保Config只会被初始化以此,且没有互斥锁的开销
+2. 通过init_config(),在真正需要混淆时才去扫描内存,解析hash.降低消耗和敏感性
 
 ```rust
 #[derive(Default, Debug, Clone, Copy)]
 pub struct Config {
-  // 存储伪造系统函数（如RtlUserThreadStart）所需的栈帧位移.与后续的 CONTEXT.Rsp 操作直接挂钩
+  // 存储伪造系统函数（如RtlUserThreadStart）所需的全部栈帧尺寸.在后续的 CONTEXT.Rsp 中用于制作栈大小,并在栈上填入各个假的返回地址.让edr扫描时得到伪造好的调用链.
     pub stack: StackSpoof,
     // 和trampoline解决 x64 下 rdx 与 rcx参数不匹配的“物理硬伤”，确保回调能成功进入 RtlCaptureContext
     pub callback: u64,
@@ -513,6 +519,9 @@ Clone/Copy:
 
 ## StackSpoof
 
+> Windows x64 架构下，EDR 会通过栈回溯（Stack Walk）来检查当前代码的合法性。StackSpoof的每一个字段，都是为了在内存中完美模拟出一个“出身正统”的系统线程
+
+
 ```rust
 /// Represents a reserved stack region for custom thread execution.
 #[derive(Default, Debug, Clone, Copy)]
@@ -540,74 +549,76 @@ pub struct StackSpoof {
 收集并存储伪造一个“合法 Windows调用栈”所需的所有关键尺寸和跳转点  
 现代编译器,特别是MSVC优化编译,大多开启了FPO(Frame Pointer Omission),即RBP不再作为栈帧指针,而被当作普通通用寄存器使用,栈帧寻址完全依赖RSP.
 
-**那么hypnus中为什么仍然需要RBP**  
+**那么hypnus中gadget_rbp为什么仍然用了RBP** 
+
 虽然微软优化了RBP的使用,但EDR和Windows异常处理(如RtlVirtualUnwind)在回溯栈时,依然会兼容两种模式:
 1. Frame-based Unwinding(经典模式):依赖RBP链,很对遗留模块/非优化代码还在用
 2. Table-based Unwinding(现代模式):即pdata(procedure data)/xdata表.这是现代win64主流.编译器在PE文件中生产一张表,记录函数在每段偏移量下,RSP和RBP如何变化
-3. gadget_rbp 的真实角色：不是为了链，而是为了跳转.
+
+gadget_rbp:栈重新定向的物理桥梁.其指向一段机器码地址,该机器码执行mov rsp, rbp; ret  
+在hypnus中,需要频繁的在伪造的返回地址和真实的执行逻辑之间跳转.
+1. 当混淆链执行到一个任务时(如NtProtect...)结束后,cpu会执行ret
+2. 项目中手动指定了rsp,标准的ret会让cpu跑飞
+3. 在alloc_memory中手动分配了一段内存写入mov rsp ,rbp; ret  .通过这个指令,强制将当前rsp重置到基址指针rbp的位置,实现栈帧的平滑回退
+4. 在spoof.rs中,这个地址被填入ctx.rbp
+5. gadget_rbp 的真实角色：不是为了链，而是为了跳转.
   * 用途:为了骗过EDR的栈回溯,在栈上构建了伪造的看起来合法的函数调用序列。当 Payload 执行完毕，当前rsp指向的是构造的虚假栈帧,而非原本的系统栈.你不能直接ret，因为此时的 RSP 已经指向了你伪造的栈区域.这里将rbp寄存器征用为合法的栈基址寄存器,进入payload前,RBP提前保存了构造的合法栈基址
   * mov rsp, rbp: 栈平移.瞬间将栈指针 RSP恢复到你之前构造好的“伪造合法栈帧”的基址.
   * ret: 直接跳转到你栈顶存放的那个“合法返回地址”（比如指向RtlUserThreadStart 内部）
   * 所以，这个 RBP此时已经不是“帧指针”了，它被当成了一个“栈指针基址寄存器”来使用。这是一种对寄存器用途的“重定向”
 
-gadget_rbp 根本不是在构造 RBP 链，它是在向 Windows 的 pdata
-  异常展开引擎（Unwind Engine）进行一次“格式化演出”。
+**再次展开这里用到的rbp作用**:
 
-  1. 明确一个事实：现代 Windows 根本不在乎 RBP 链
-  在 x64 环境下，微软强推基于 pdata 表的表驱动展开 (Table-based
-  Unwinding)。这意味着：
-   * 对于 pdata： EDR 根本不去理会 RBP 的值是多少。它只看当前的 RIP
-     指针，然后去 PE 文件的 .pdata 段中搜索这个 RIP
-     属于哪个函数范围，并根据对应的 xdata
-     结构读取“如何恢复上一层栈帧”的指令。
-   * 所以： 那个 gadget_rbp 代码片段 mov rsp, rbp; ret 在现代调试器或 EDR
-     看来，它仅仅是一个“将 RBP 的值赋给 RSP 的指令序列”。
+gadget_rbp 根本不是在构造 RBP 链，它是在向 Windows 的 pdata异常展开引擎（Unwind Engine）进行一次“格式化演出”。
 
-  2. 那为什么要叫它 gadget_rbp？
-  这其实是一个“反向误导”，或者是对该 Gadget 作用的简写：
-   * 它并不是要构造一个 RBP 链条。
-   * 它的真实意图是：“确保在执行 ret 之前，RSP
-     处于一个我（攻击者）定义好的、完全合法的状态。”
-   * 之所以叫 rbp，是因为在这个特定的 Gadget 中，程序逻辑把 RBP
-     当作了一个暂存区，用来存放“我想要恢复到的 RSP 基址”。
+1. 明确一个事实：现代 Windows 根本不在乎 RBP 链.在 x64 环境下，微软强推基于 pdata 表的表驱动展开 (Table-based Unwinding)。这意味着：
+  * 对于 pdata： EDR 根本不去理会 RBP 的值是多少。它只看当前的 RIP指针，然后去 PE 文件的 .pdata 段中搜索这个 RIP属于哪个函数范围，并根据对应的 xdata结构读取“如何恢复上一层栈帧”的指令。
+  * 所以： 那个 gadget_rbp 代码片段 mov rsp, rbp; ret 在现代调试器或 EDR看来，它仅仅是一个“将 RBP 的值赋给 RSP 的指令序列”。
 
-  3. 如何处理 pdata 表（真正的欺骗逻辑）
-  既然不依赖 RBP 链，hypnus 是如何骗过 pdata 回溯器的呢？
+2. 那为什么要叫它 gadget_rbp.这其实是一个“反向误导”，或者是对该 Gadget 作用的简写：
+  * 它并不是要构造一个 RBP 链条。
+  * 它的真实意图是：“确保在执行 ret 之前，RSP处于一个我（攻击者）定义好的、完全合法的状态。”
+  * 之所以叫 rbp，是因为在这个特定的 Gadget 中，程序逻辑把 RBP当作了一个暂存区，用来存放“我想要恢复到的 RSP 基址”。
 
-  真正的欺骗发生在 src/spoof.rs 中的 spoof 函数里，它的逻辑是这样的：
+3. 如何处理 pdata 表（真正的欺骗逻辑）既然不依赖 RBP 链，hypnus 是如何骗过 pdata 回溯器的.真正的欺骗发生在 src/spoof.rs 中的 spoof 函数里，它的逻辑是这样的：
+  * 静态伪造 pdata 契约：hypnus 在构造栈帧时，会模拟 RtlUserThreadStart或其他系统函数的“栈帧布局”。
+  * 堆栈模拟：它在栈上预留的空间大小（base_thread_size 等字段），严格匹配这些函数在 pdata 中定义的 Prologue 对栈的操作
+  * 诱导回溯：
+    * 当 EDR 回溯时，它读到当前的 RIP 指向 NtProtectVirtualMemory的内部地址。
+    * 它去查 pdata，发现这个地址需要“弹出 0x28 字节的栈空间”
+    * 关键点：你在构造栈帧时，已经预先填充了那 0x28字节的数据（虽然是假的）。
+    * EDR回溯器成功地“弹出”了这些假数据，并将回溯器认为的“上一层调用者地址”指向了你伪造的下一个函数地址（比如 RtlUserThreadStart）。
 
-   1. 静态伪造 pdata 契约：hypnus 在构造栈帧时，会模拟 RtlUserThreadStart
-      或其他系统函数的“栈帧布局”。
-   2. 堆栈模拟：它在栈上预留的空间大小（base_thread_size
-      等字段），严格匹配这些函数在 pdata 中定义的 Prologue 对栈的操作。
-   3. 诱导回溯：
-       * 当 EDR 回溯时，它读到当前的 RIP 指向 NtProtectVirtualMemory
-         的内部地址。
-       * 它去查 pdata，发现这个地址需要“弹出 0x28 字节的栈空间”。
-       * 关键点：你在构造栈帧时，已经预先填充了那 0x28
-         字节的数据（虽然是假的）。
-       * EDR
-         回溯器成功地“弹出”了这些假数据，并将回溯器认为的“上一层调用者地址”指
-         向了你伪造的下一个函数地址（比如 RtlUserThreadStart）。
-  4. 总结：Gadget 在此处的角色
-   * 针对 pdata 的处理：通过精确控制栈帧大小（_size 字段）来匹配 pdata
-     记录的展开信息。
-   * 针对 gadget_rbp
-     的处理：它是在你的“伪造栈帧”全部执行完，要回归真实的系统调用链末尾时，负
-     责执行最后一次“栈底校准”的指令。
 
-  它完全跳过了 RBP 链的逻辑，直接通过修改 RSP
-  来欺骗那个基于栈帧大小回溯的引擎。
+**总结：Gadget 在此处的角色**
+* 针对 pdata 的处理：通过精确控制栈帧大小（_size 字段）来匹配 pdata记录的展开信息。
+* 针对 gadget_rbp的处理：它是在你的“伪造栈帧”全部执行完，要回归真实的系统调用链末尾时，负责执行最后一次“栈底校准”的指令。它完全跳过了 RBP 链的逻辑，直接通过修改 RSP来欺骗那个基于栈帧大小回溯的引擎。
 
-  ---
 
-  一句话总结：
-  hypnus 不走 RBP 链，它走的是 “精确栈帧覆盖”。它通过 gadget_rbp 执行 mov
-  rsp, rbp，并不是为了构造 RBP
-  链，而是为了在切换回系统调用栈时，通过这一行汇编指令，把因为之前伪造栈帧而
-  变得混乱的 RSP 指针，强行归位到你精心构建的、符合 pdata 预期的“合法栈顶”。
 
-  这是一种利用汇编指令在物理内存层面“重置坐标系”的技巧，而非维护某种链表结构
+>hypnus 不走 RBP 链，它走的是 “精确栈帧覆盖”。它通过 gadget_rbp 执行 mov rsp, rbp，并不是为了构造 RBP链，而是为了在切换回系统调用栈时，通过这一行汇编指令，把因为之前伪造栈帧而变得混乱的 RSP 指针，强行归位到你精心构建的、符合 pdata 预期的“合法栈顶”。这是一种利用汇编指令在物理内存层面“重置坐标系”的技巧，而非维护某种链表结构
+
+**源码示例:**
+gadget_rbp机制通过以下四个物理步骤实现，将“伪造栈”产生的混乱状态完美还原至“真实执行流”：
+
+1. 机器码预置 (Code Injection)  
+  对应函数： StackSpoof::alloc_memory (位于 spoof.rs)  
+  实现逻辑： 在初始化阶段，申请一块PAGE_EXECUTE_READ 内存，将指令 mov rsp, rbp;ret (机器码 0x48 0x89 0xEC 0xC3) 写入其中。其物理地址被封装为二级指针，存储在Config.stack.gadget_rbp 字段中。
+
+2. 物理坐标备份 (Context Snapshot)
+  对应函数： StackSpoof::spoof (位于 spoof.rs)  
+  实现逻辑： 在构建异步混淆链循环中，将当前线程真实的栈顶地址ctx.Rsp（即程序正常的返回坐标）备份到 ctx.Rbp寄存器中，将其作为物理层面的“归位锚点”。
+
+3. 指令链条关联 (Register Linking)
+  对应函数： StackSpoof::spoof (位于 spoof.rs)  
+  实现逻辑： 将步骤 1 中准备好的“二级指针地址”填入 ctx.Rbx 寄存器。此时，Rbx 充当了传送门的钥匙，它指向那段能修改 Rsp 的机器码。
+
+4. 栈帧平滑回退 (Stack Realignment)
+  执行位置： 混淆链任务结束时的 ret 跳转 (由 Hypnus::timer/wait/foliage 编排)  
+  实现逻辑： 当混淆任务（如 NtProtect...）执行完毕，触发 ROP 跳转至系统 DLL 中的 `call [rbx]`指令。
+   * CPU 读取 Rbx 进入注入的机器码，执行 mov rsp, rbp
+   * 物理结果： Rsp 瞬间抛弃了下移 10 个页面的“伪造深渊”，重新指向了 Rbp中备份的“家”的地址。随后的 ret指令便能从真实栈顶弹出下一条合法指令，实现从隐匿态到执行态的无缝切换。
+
 
 ## Config::new()
 
