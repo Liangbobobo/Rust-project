@@ -334,7 +334,10 @@ impl Hypnus {
             let mut timer_ctx = null_mut();
 
             // CONTEXT_FULL,记录cpu全貌
-            // win64下,P1Home-P6Home是shadow space.
+            // win64下,P1Home-P6Home是shadow space.P1Home就是rcx.后续当trampoline执行jmp [rcx],由于rcx指向ctx_init.rcx取出来的值就是p1home内容.结果cpu就跳进RtlCaptureContext
+            // 这里只申请内存并预设捕获用到的函数,没有实际捕获状态
+            // 主线程在自己stack上开辟了1.2k空间,根据sizeof(CONTEXT)算出来的,没有显式allcoc
+            // ctx_init 是一个物理存在的 CONTEXT结构体实例，其核心作用是作为异步获取的 “原始线程状态模板”.即一个硬件状态容器,显示通过异步调用从os偷到合法的线程指纹,随后将其作为蓝图分发给后续的混淆步骤
             let mut ctx_init = CONTEXT {
                 ContextFlags: CONTEXT_FULL,
                 // 这里仍处于impl Hypnus中,因此self为Hypnus结构体
@@ -348,7 +351,10 @@ impl Hypnus {
             // 1.唤醒线程池(TpSetTimer)
             // The trampoline moves RDX to RCX and jumps to CONTEXT.P1Home (RtlCaptureContext),
             // ensuring a clean transition with no extra instructions before context capture.
-            // 在windows内存中注册一个定时器任务对象
+
+            // 在windows内存中注册一个定时器任务对象.TpAllocTimer是纯内存操作,再堆里填好结构体,拿到一个句柄.但任务不会执行,内核甚至不知道它的存在.
+            //TpSetTimer才是提交任务.实质是内核系统调用,将TpAllocTimer产生的句柄交给内核的任务队列。只有执行了这一步，内核才会开始倒计时，并在时间到期时通过 IOCP 唤醒线程
+            // TpAllocTimer物理实质:：在当前进程的堆内存中，开辟一块空间，填充一个_TP_TIMER 结构体
             status = TpAllocTimer(
                 // 输出参数,内核把新创建的的定时器对象TP_TIMER的物理内存地址填入
                 &mut timer_ctx, 
@@ -356,7 +362,7 @@ impl Hypnus {
                 self.cfg.trampoline as *mut c_void, 
                 // 堆栈上定义的CONTEXT
                 &mut ctx_init as *mut _ as *mut c_void, 
-                // 执行环境TP_CALLBACK_ENVIRON_V3
+                // 执行环境TP_CALLBACK_ENVIRON_V3.这个任务属于哪个线程池（env）
                 &mut env
             );
             

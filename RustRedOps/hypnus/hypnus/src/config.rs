@@ -29,11 +29,15 @@ pub fn init_config() -> Result<&'static Config> {
 
 /// Stores resolved DLL base addresses and function pointers.
 /// 
-/// 在 Config 中，利用硬编码机器码 gadget_rbp (mov rsp, rbp; ret)作为栈指针重定位（Stack Pivot）指令，实现从真实执行流向伪造堆栈空间的物理切入。通过 trampoline汇编桥接校准线程池 RDX 到 RCX 的参数约定冲突，并结合通过 PEB动态解析出的系统调用号与 API 静态地址构建底层原语仓库。此外，Config 在初始化阶段会执行 CFG (Control Flow Guard) 目标注册，将 NtContinue等关键跳转点“洗白”进系统白名单以规避内核拦截。最终，Config作为全局单例化的隐匿执行环境被封装，用于驱动针对指定攻击载荷（base 和 size 表示）的混淆状态机，在 time事件触发后完成“权限切换-内存加密-伪造栈休眠-还原回归”的闭环隐匿流程
+/// 在 Config 中，利用硬编码机器码 gadget_rbp (mov rsp, rbp; ret)作为栈指针重定位（Stack Pivot）指令，实现从伪造栈切回真实执行流,并确保cpu精确跳转到预设返回地址.切入伪造堆栈的是NtContinue
+/// 
+/// 通过 trampoline汇编桥接校准线程池 RDX 到 RCX 的参数约定冲突，并结合通过 PEB动态解析出的系统调用号与 API 静态地址构建底层原语仓库。此外，Config 在初始化阶段会执行 CFG (Control Flow Guard) 目标注册，将 NtContinue等关键跳转点“洗白”进系统白名单以规避内核拦截。最终，Config作为全局单例化的隐匿执行环境被封装，用于驱动针对指定攻击载荷（base 和 size 表示）的混淆状态机，在 time事件触发后完成“权限切换-内存加密-伪造栈休眠-还原回归”的闭环隐匿流程
 #[derive(Default, Debug, Clone, Copy)]
 pub struct Config {
     pub stack: StackSpoof,
+    // 触发NtContinue的rx内存地址.负责按照伪造好的context逻辑跑下去
     pub callback: u64,
+    // 执行RtlCaptureContext的rx内存地址.在混淆链启动获取快照时被调用
     pub trampoline: u64,
     // 以下字段在config::new中初始化
     pub modules: Modules,
@@ -83,7 +87,7 @@ impl Config {
         // hypnus使用线程池触发混淆链,系统调用回调函数时,会将用户自定的参数(这里的context)放在rdx寄存器中.而调用的NtContinue需要的context放入rcx寄存器.是一种windows abi形式
         // 
         let callback = &[
-            // 此时rdx存放的是TpAllocTimer传入的context,即伪造的context结构体.该句执行后,rcx就指向这个context,rcx符合NtContinue的第一个参数要求
+            // 此时rdx存放的是TpAllocTimer(hypnus.rs的timer函数中)传入的context,即伪造的context结构体.该句执行后,rcx就指向这个context,rcx符合NtContinue的第一个参数要求
             0x48, 0x89, 0xD1,       // mov rcx,rdx
             // hypnus在初始化context时,将ntdll!NtContinue真实内存地址放入rax?
             0x48, 0x8B, 0x41, 0x78, // mov rax,QWORD PTR [rcx+0x78] (CONTEXT.RAX)
