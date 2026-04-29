@@ -1,3 +1,7 @@
+- [十个ctxs功能](#十个ctxs功能)
+- [NtSetEvent2](#ntsetevent2)
+- [TpAllocTimer中的trampoline](#tpalloctimer中的trampoline)
+- [threadpool workerfactory worker](#threadpool-workerfactory-worker)
 - [SystemFunction041](#systemfunction041)
 - [SystemFunction040](#systemfunction040)
 - [NtWaitForSingleObject](#ntwaitforsingleobject)
@@ -13,6 +17,7 @@
 - [TP\_CALLBACK\_ENVIRON\_V3](#tp_callback_environ_v3)
 - [struct TP\_POOL\_STACK\_INFORMATION](#struct-tp_pool_stack_information)
 - [TpAllocPool(\&mut pool, null\_mut())](#tpallocpoolmut-pool-null_mut)
+- [三个event\[\]](#三个event)
 - [win64 Event](#win64-event)
 - [Event Thread区别](#event-thread区别)
 - [Struct Hypnus::time::NtCreateEvent](#struct-hypnustimentcreateevent)
@@ -35,7 +40,75 @@
 - [扩展- `AsRef<[u8]>`](#扩展--asrefu8)
 
 
+## 十个ctxs功能
+
+event`[0]`绑定的是RtCaptureContext(通过ctx_init\TpAllocTimer(中NtSetEvent2)).主线程在 NtWaitForSingleObject(`event[0]`) 这里停一下，是为了确保ctx_init 这个“容器”已经被填满了真实的 CPU 数据。没有这一步，后面 10 个 ctxs都是空壳.当RtCaptureContext执行完之后,才将event`[0]`(初始设为阻塞)设为点亮
+
+event`[1]`绑定的是`ctx[0]`的寄存器
+
+
+`ctx[0]`:等待`events[1]`,目的是在混淆链条第一步堵塞,等执行完old_protect写入内存后,在放后面的9个ctx执行.后续线程池（辅助线程）(在后面的for ctx in &mut ctxs中)会按照代码顺序执行下面的各个ctx
+
+
+
+
+
 [win64 threadpool](#win64-threadpool)
+
+##  NtSetEvent2
+
+```rust
+ status = TpAllocTimer(
+                // 第二个定时器handle
+                &mut timer_event,
+
+                // win api:将事件对象从无信号转为有信号 
+                // 如何从外部链接到本项目的:在winapis.rs中有对NtSetEvent2的定义(作为一个封装函数),其内部调用NtSetEvent接收一个event.因为标准的NtSetevent签名与线程池回调签名不匹配.
+                // 在混淆逻辑运行时,调用NtSetEvent2的是win线程池的工作线程(worker thread).当线程池触发定时器跳到NtSetEvent2时,工作线程内部会执行给寄存器赋值操作
+                NtSetEvent2 as *mut c_void,
+
+                //  函数开头创建的第一个事件handle
+                // 1. events[0]->TpAllocTimer;2. 定时器触发-> events[0] 被塞进 CPU 的 RDX 寄存器;3. NtSetEvent2 被调用 -> 它用 RDX中的handle,去内核
+                events[0], 
+                &mut env
+            );
+```
+
+核心目的是：当线程池完成“自拍（快照捕获）”这一动作后，通过触发一个事件，把陷入休眠的主线程“叫醒
+
+这里的 NtSetEvent2是对NtSetEvent(event, null_mut())的wrapper.但是 NtSetEvent2有四个参数.  
+这是一个经典的abi隐式传参.这个传参动作不是rust的,由Windows内核(线程池引擎)直接在cpu寄存器层面完成的.
+
+在混淆逻辑运行时,调用NtSetEvent2 的不是你的主程序，而是 Windows线程池的工作线程（Worker Thread）
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## TpAllocTimer中的trampoline
+
+当通过TpAllocTimer提交任务,os唤醒工作线程执行时,它遵循TpTimerCallback签名.在执行时对应的寄存器状态:
+1. RCX：存储的是 PTP_CALLBACK_INSTANCE (实例指针)
+2. RDX：存储的是 Context 指针（也就是在 TpAllocTimer 第三个参数传入的 &mutctx_init）
+3. R8：存储的是 PTP_TIMER 句柄
+
+而真正想要执行的是RtlCaptureContext,它只需要一个参数:  
+RCX:ContextRecord指针,要求把要写入的内存地址放在这里
+
+
+
+## threadpool workerfactory worker
+
+
 
 
 ## SystemFunction041
@@ -397,16 +470,19 @@ pub struct TP_POOL_STACK_INFORMATION {
 
 
 
+## 三个event[]
 
+1. `events[0]`：与 NtSetEvent2 绑定
+   * 绑定位置：在调用 TpAllocTimer创建第二个定时器任务时
+   * 作用过程：当定时器触发，线程池的工作线程跳入 NtSetEvent2，此时 CPU 的 RDX 寄存器里存的就是这个 `events[0]`。NtSetEvent2 内部通过 RDX 拿到句柄并点亮信号，主线程的 NtWaitForSingleObject(`events[0]`...) 随之解锁
 
+2. `events[1]：与 ctxs[0]` 的 RCX 寄存器绑定
+   * 绑定位置：在主线程配置第一个伪造上下文 `ctxs[0]` 时
+   * 作用过程：当混淆链启动，第一个任务 ctxs[0] 运行。因为它的 RCX 是`events[1]`，它会立即陷入等待。直到主线程完成所有配置，调用 NtSignalAndWaitForSingleObject(`events[1]`, ...)，手动点亮这个“发车信号”
 
-
-
-
-
-
-
-
+3. `events[2]：与 ctxs[9]` 的 RCX 寄存器绑定
+   * 绑定位置：在配置链条最后一环 `ctxs[9]` 时
+   * 作用过程：这是整个链条的“终点线”。当之前的加解密、休眠任务全部顺序跑完，执行到 `ctxs[9]` 时，它会按照 RDX 里的指令点亮 `events[2]`。此时，主线程的`NtSignalAndWaitForSingleObject(..., events[2], ...)`接收到信号，宣告整个混淆周期结束
 
 ## win64 Event
 

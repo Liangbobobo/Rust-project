@@ -237,6 +237,8 @@ impl Config {
 }
 
 /// Get current stack pointer
+/// 
+/// mov _,rsp
 #[inline]
 pub fn current_rsp() -> u64 {
     

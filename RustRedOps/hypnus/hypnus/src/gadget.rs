@@ -247,7 +247,9 @@ pub trait GadgetContext {
     /// 
     /// 第一个参数&mut self;第二个Config,第三个u64
     /// 
-    /// jmp() 函数的作用是通过修改 CONTEXT 结构体中的指令指针 RIP 指向合法的系统 Gadget地址，并同步将真实跳转目标（target）注入到特定的辅助寄存器（如R10-R15）中，从而在不直接触发恶意跳转特征的前提下，利用寄存器间接跳转机制为受控线程构造出一个既能隐蔽切换执行流、又能规避 EDR 返回地址校验的虚假执行现场
+    /// 在dll的.text中找到jmp <reg> 的gadget->将context.rip设为gadget的物理地址(这样当cpu恢复执行,第一步跳向的时合法的地址,而不是要调用的敏感的函数地址)->根据gadget将目标函数地址写入对register.
+    /// 
+    /// 当ntcontinue激活这个context后,cpu执行路径为cpu->ntdll!jmp <reg>->target函数:这样如果EDR在跳转瞬间检查rip,看到的是合法的ntdll指令,比从非导出函数/非法内存直接call敏感函数隐蔽
     fn jmp(&mut self, cfg: &Config, target: u64);
 }
 
