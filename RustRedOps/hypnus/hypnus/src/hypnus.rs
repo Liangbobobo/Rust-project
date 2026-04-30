@@ -342,13 +342,13 @@ impl Hypnus {
             let mut ctx_init = CONTEXT {
                 ContextFlags: CONTEXT_FULL,
                 // 这里仍处于impl Hypnus中,因此self为Hypnus结构体
-                // rtl_capture_context=RtlCaptureContext
+                // rtl_capture_context=RtlCaptureContext;P1Home=rcx
                 P1Home: self.cfg.
                 rtl_capture_context.as_u64(),
                 ..Default::default()
             };
 
-            // The trampoline is needed because thread pool passes the parameter in RDX, not RCX.要回调RtlCaptureContext,它的第一个参数对应的是线程池唤醒的rdx(即第二参数),所以需要trampoline将rdx移入rcx
+            // The trampoline is needed because thread pool passes the parameter in RDX, not RCX.要回调RtlCaptureContext,它的第一个参数对应的是线程池唤醒的rdx(即第二参数),所以需要trampoline将rdx移入rcx.这里如果用函数包装一下调整参数位置和这种trampoline的方式有啥优劣?
             // 唤醒线程池(TpSetTimer)
             // The trampoline moves RDX to RCX and jumps to CONTEXT.P1Home (RtlCaptureContext),
             // ensuring a clean transition with no extra instructions before context capture.

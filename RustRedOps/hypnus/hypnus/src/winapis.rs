@@ -404,6 +404,8 @@ pub fn TpSetPoolMaxThreads(Pool: *mut c_void, MaxThreads: u32) {
 }
 
 /// Wrapper for the `TpAllocTimer` API.
+/// 
+/// 
 #[inline]
 pub fn TpAllocTimer(
     Timer: *mut *mut c_void, 
