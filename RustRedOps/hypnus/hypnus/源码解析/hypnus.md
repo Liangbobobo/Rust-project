@@ -1,5 +1,7 @@
 - [十个ctxs功能](#十个ctxs功能)
 - [NtSetEvent2](#ntsetevent2)
+- [TPAllocTimer](#tpalloctimer)
+  - [第一个参数是指针的指针](#第一个参数是指针的指针)
 - [TpAllocTimer中的trampoline](#tpalloctimer中的trampoline)
 - [threadpool workerfactory worker](#threadpool-workerfactory-worker)
 - [SystemFunction041](#systemfunction041)
@@ -12,7 +14,6 @@
 - [dinvk::helper::section()](#dinvkhelpersection)
 - [fn timer::NtDuplicateObject](#fn-timerntduplicateobject)
 - [fn timer::rax](#fn-timerrax)
-- [TPAllocTimer](#tpalloctimer)
 - [hypnus.rs的执行流](#hypnusrs的执行流)
 - [TP\_CALLBACK\_ENVIRON\_V3](#tp_callback_environ_v3)
 - [struct TP\_POOL\_STACK\_INFORMATION](#struct-tp_pool_stack_information)
@@ -38,6 +39,11 @@
 - [IOCP (I/O Completion Port)和worker factory](#iocp-io-completion-port和worker-factory)
 - [扩展-handle句柄](#扩展-handle句柄)
 - [扩展- `AsRef<[u8]>`](#扩展--asrefu8)
+
+
+
+
+
 
 
 ## 十个ctxs功能
@@ -83,6 +89,166 @@ event`[1]`绑定的是`ctx[0]`的寄存器
 
 
 
+## TPAllocTimer
+
+```c
+// winbase:CreateThreadpoolTimer
+/**
+ * Allocates a timer object.
+ *
+ * \param[out] Timer A pointer to a variable that receives the new timer object.
+ * \param[in] Callback The callback function to execute when the timer expires.到期/期满
+ * \param[in,out] Context Optional application-defined程序定义好的 data to pass to the callback function.
+ * \param[in] CallbackEnviron Optional callback environment for the callback.
+ * \return NTSTATUS Successful or errant status.
+ * \sa https://learn.microsoft.com/en-us/windows/win32/api/threadpoolapiset/nf-threadpoolapiset-createthreadpooltimer
+ */
+NTSYSAPI
+NTSTATUS
+NTAPI
+TpAllocTimer(
+    _Out_ PTP_TIMER *Timer,
+    _In_ PTP_TIMER_CALLBACK Callback,
+    _Inout_opt_ PVOID Context,
+    _In_opt_ PTP_CALLBACK_ENVIRON CallbackEnviron
+    );
+
+
+```
+
+
+```rust
+
+TpAllocTimer(
+                // 输出参数,内核把新创建的的定时器对象TP_TIMER的物理内存地址填入
+                &mut timer_ctx, 
+                // 垫片
+                self.cfg.trampoline as *mut c_void, 
+                // 堆栈上定义的CONTEXT.执行时，RDX 寄存器里要装什么（例如伪造的 CONTEXT 结构体地址）
+                &mut ctx_init as *mut _ as *mut c_void, 
+                // 执行环境TP_CALLBACK_ENVIRON_V3
+                &mut env
+            );
+```
+
+**作用:**Allocates a timer object.在进程的堆内存heap中开辟一块空间,存放一个TP_TIMER结构体.
+1. TpAllocTimer 所分配的 Timer Object（定时器对象）并非一个孤立的数据结构，它是 Windows 现代线程池（Thread Pool API） 架构中连接用户态逻辑与内核态硬件中断的精密桥梁
+2. 在 Windows 中，“Timer Object”在不同的层级有不同的形态，TpAllocTimer操纵的是用户态的包装对象，但它背后由内核态对象支撑
+3. 你在 Rust 中调用 TpAllocTimer 时，它实际上在进程的用户态堆（NT Heap）中分配了一个未文档化的内部结构体，通常被逆向工程师称为 _TP_TIMER 或 _TTP_TIMER（在 Windows 10/11 ntdll 中）.它的**核心作用是：状态追踪与信息绑定**.这个结构体包含:
+    *用户态实体_TP_TIMER:
+       * Callback 指针：定时器触发时要执行的代码地址（在 hypnus 中是那个 trampoline 汇编）
+       * Context 指针：用户自定义的数据（hypnus 中的伪造 CONTEXT）
+       * Environment 绑定：指向 _TP_POOL 和清理组（Cleanup  Group），决定这个定时器属于哪个线程池
+       * 状态机标志：记录这个定时器是处于“未激活”、“倒计时中”还是“正在执行回调”的状态
+     * 内核态实体KTIMER:
+       * 单靠用户态的堆内存是无法计时的。Windows真正的计时能力在内核（Ntoskrnl.exe）。用户态的 _TP_TIMER最终要依赖内核层的调度器（Dispatcher）对象 KTIMER。KTIMER 是一种可以处于“有信号（Signaled）”或“无信号（Nonsignaled）”状态的内核同步对象.它直接与操作系统的硬件时钟系统挂钩
+4. TpAllocTimer 本身只是准备了用户态的数据结构，但当它配合 TpSetTimer 激活时，它撬动了 Windows 操作系统最核心的四个底层机制：
+ 1. 硬件定时器与时钟中断 (Hardware Interrupts)
+  OS 的计时依赖于主板上的硬件：RTC（实时时钟）、HPET（高精度事件定时器）或 CPU
+  的 TSC（时间戳计数器）。
+   * 这些硬件会以固定的频率（默认约 15.6 毫秒，可通过 timeBeginPeriod 提升至 1
+     毫秒）向 CPU 发送硬件中断（IRQL: CLOCK_LEVEL）。
+   * Windows
+     内核的时钟中断处理程序（KeUpdateSystemTime）会捕获这个节拍，更新系统时间，
+     并检查有没有哪个 KTIMER 到期了。
+
+  2. DPC (延迟过程调用 - Deferred Procedure Call)
+  由于硬件中断的处理必须极快，内核不能在中断上下文里直接去执行复杂的线程池逻辑。
+   * 当内核发现一个 KTIMER 到期时，它会生成一个 DPC（IRQL: DISPATCH_LEVEL）
+     并挂入队列。
+   * 这个 DPC 的作用是：在 CPU
+     稍闲时，把“定时器到期”这个事件，打包成一个数据包。
+
+  3. IOCP (I/O 完成端口 - KQUEUE) 与 Worker Factory
+  这是 Windows 10/11 现代线程池的灵魂。
+   * 每一个 Windows 线程池（TP_POOL）在内核中都对应一个 Worker Factory
+     (工作者工厂) 对象。
+   * Worker Factory 的底层核心是一个 I/O 完成端口 (IOCP，在内核中叫 KQUEUE)。
+   * 当 DPC 执行时，它会将“定时器到期”的数据包（I/O Completion
+     Packet）直接插入到这个 IOCP 的队列中。
+
+  4. ZwWaitForWorkViaWorkerFactory (线程唤醒机制)
+  还记得 hypnus 代码里的 ctx_spoof.Rip = cfg.zw_wait_for_worker.as_u64(); 吗？
+   * 线程池里平时有一些闲置的 Worker 线程，它们都在调用
+     ntdll!ZwWaitForWorkViaWorkerFactory（底层是
+     NtWaitForWorkViaWorkerFactory）处于休眠状态，死死盯着那个 IOCP。
+   * 一旦定时器的包进入 IOCP，内核调度器就会唤醒其中一个休眠的 Worker
+     线程，把包交给它。
+
+  ---
+
+  三、 完整生命周期：从 TpAllocTimer 到代码执行
+
+  现在，我们把所有的碎片拼接起来，看一条完整的执行流。这正是 hypnus 想要利用的
+  OS 逻辑：
+
+   1. 阶段 1：装填弹药 (TpAllocTimer)
+       * 在用户态的堆里创建 _TP_TIMER 对象，把 hypnus 伪造的 CONTEXT 和
+         Trampoline 地址封进这个结构体里。内核此时对此一无所知。
+   2. 阶段 2：拉开引信 (TpSetTimer)
+       * ntdll 内部的线程池管理器调用底层 Native API（如 NtSetTimerEx
+         或向线程池的统一定时器管理线程发送 ALPC 消息）。
+       * 内核在队列中激活一个 KTIMER 对象，设置其到期时间（例如 100 毫秒后）。
+   3. 阶段 3：静默倒计时 (Hardware & Kernel)
+       * CPU 产生硬件中断 -> 内核时钟节拍增加。
+       * 100 毫秒到了，KeUpdateSystemTime 发现 KTIMER 过期。
+   4. 阶段 4：信号投递 (DPC & IOCP)
+       * 内核触发 DPC，DPC 将一个表示“任务就绪”的完成包压入当前线程池绑定的
+         Worker Factory（IOCP 队列）。
+   5. 阶段 5：唤醒与执行 (Worker Thread)
+       * 系统线程池中的某个 Worker 线程被内核从 ZwWaitForWorkViaWorkerFactory
+         状态唤醒。
+       * Worker 线程从 IOCP 中取出包，根据指针找到了我们在阶段 1 创建的
+         _TP_TIMER 结构体。
+       * Worker 线程提取出里面的 Callback 地址（我们的蹦床）和
+         Context（伪造的寄存器快照），将 Context 放入 RDX，执行 call Callback。
+       * 蹦床执行 mov rcx, rdx; jmp rax，彻底劫持执行流进入
+         NtContinue，免杀逻辑正式启动！
+
+  四、 为什么在免杀 (RedOps) 中它如此致命？
+
+  了解了以上 OS 底层细节，你就能明白为什么 hypnus 要用它：
+
+   1. 真正的“异步断层”：我们不是自己写了个循环或者
+      Sleep()，我们是把执行权交给了内核的 DPC 和系统的 Worker Factory。这导致
+      EDR 在进行线程调用栈回溯（Stack Walking）时，看到的栈底永远是干净的
+      ntdll!RtlUserThreadStart ->
+      ntdll!TppWorkerThread，完全追溯不到是哪段恶意代码触发了这个回调。
+   2. 滥用系统信任设施：Worker Factory 和 IOCP 是 Windows
+      IIS、RPC、系统内部组件高并发通信的基础。EDR 无法粗暴地 Hook 或阻止基于
+      Worker Factory 的唤醒行为，否则整个 Windows 都会崩溃。
+
+  综上所述，TpAllocTimer 创建的不是一个简单的倒计时器，而是一个接入 Windows
+  最核心的中断驱动与 IOCP
+  调度生态的入场券。这正是高级免杀技术对操作系统底层设施的一种“合法滥用”。
+
+
+**特性:**
+1. 一个纯粹的内存准备动作。它只在用户态堆内存中创建并初始化了数据结构，不会启动任何计时器，内核甚至不知道它的存在
+2. 它绝对不会阻塞当前线程
+3. 所属模块：ntdll.dll（Windows Native API 层）,Undocumented
+4. CreateThreadpoolTimer（位于kernel32.dll / kernelbase.dll），其底层实际上就是对 ntdll!TpAllocTimer 的封装
+
+
+### 第一个参数是指针的指针
+
+1. 其原型中的第一个参数Out_ PTP_TIMER *Timer，在 Rust 中是 *mut *mut c_void(即指针的指针);
+2. 其原型的第一个参数类型*Timer在c中含义:因为c函数参数都是值传递,如果是Timer,那么在c中是指针的拷贝,函数内部把新分配的堆地址赋给这个拷贝,函数结束后,拷贝销毁,调用者外部的变量依然是null
+3. 一个变量物理实质是内存中的值,那么就分为内存地址和内存地址中的值,指针就是地址,解引用指针就值.根据源码TpAllocTimer函数外部定义了一个变量timer(假设其地址是0x1000,值是0).
+4. 假设TpAllocTimer第一个参数不是*Timer而是Timer(对应rust中的`*mut c_void`和`*mut *mut c_void`):首先需要理解在c的视角下,c函数是值传递,那么接收到参数timer(timer=0)后,在自己的栈上创建一个参数副本,值就是外部传入实参0,内部会为这个实参重新分配地址(假设是栈地址0x2000).TpAllocTimer函数在堆上分配了真实的定时器对象,假设是栈地址0x9000;由于第一个参数是被赋值的.根据TpAllocTimer的定义那么该参数副本会被赋值0x9000,当函数退出清理自身栈参数副本0x2000被销毁,其被赋值的0x9000也不存在了,这就出现了内存泄露.
+5. 回到*Timer的情况,传入的是&timer(物理地址0x1000,值0),那么传入的就不再是0,而是0x1000.同样TpAllocTimer会在栈上拷贝一份该传入的地址0x1000的副本(假设该副本地址是0x2000,其值就是0x1000).然后TpAllocTimer创建定时器对象(假设地址是堆0x9000),并将0x9000这个地址存入地址0x1000指向的内存.函数销毁,0x2000被清理,但是在函数外部的变量中的值已经被修改了.
+6. 以上,在传参后TpAllocTimer赋值给第一个参数阶段,一级指针情况下,外部变量的值在传入TpAllocTimer后被拷贝了一份,之后的操作都是对这份拷贝的操作,之后这个拷贝被赋值为TpAllocTimer产生的计时器对象地址,当函数结束被拷贝的值被清理,外部变量没有改变;在二级指针情况下,外部变量的指针被拷贝进来,之后TpAllocTimer产生的计时器对象地址被赋值给这个拷贝进来的指针指向的内存中的值.函数结束二级指针被销毁,但是一级指针和二级指针共同指向的内存中的值已经被改变了.
+7. 在Timer的情况下在函数内部是赋值给值,在*Timer情况下赋值给一级指针导致最后赋值给一级指针指向的内存中;即传值只改复印件，传址能改原文件。要想让内核帮你分配对象并带回来，就必须交出你变量的物理坐标（二级指针），让内核顺着坐标强行写入
+8. 函数原型的`*Timer`代表一个指针内部的值,在rust中应该用*mut *mut c_void来表示.该原型前的_Out_,是微软sal源代码注释语言标注.其代表告诉调用者:在自己的栈上准备一个空指针(`*mut c_void`),然后将该空指针的物理地址传过来(`*mut *mut c_void`)
+9. 这里就引申出c是值传递,rust也是值传递.c/rust,函数传参永远只有一种方式:值传递/拷贝.无论其参数是指针\&引用或者其他类型,其实质都是值传递,当参数是指针或引用,物理实质就是把内存地址当作普通数值拷贝给函数.
+10. Rust 能够通过 FFI（外部函数接口）与 C无缝对接的原因——因为它们在内存物理层面的价值观是完全一致的：一切皆为“值拷贝”，只不过有时拷贝的是数据本身，有时拷贝的是数据的物理坐标.
+11. C 的指针(*)：编译器不管你传进来的地址对不对，也不管你什么时候解引用，完全信任程序员
+12.  Rust 的引用 (& / &mut)：物理上依然是指针，但 Rust 编译器（Borrow Checker）在编译时给这个地址加了严格的“生命周期”和“读写权限”审查。它确保传进去的这个地址一定是有效的，且符合“借用规则”。
+13.  Rust 的原生指针 (*mut / *const)：当你在 Rust 里写 FFI 调用 Windows API时（就像 hypnus 里这样），Rust 放弃了审查，退化成了和 C一模一样的裸指针行为，此时生死自负（所以必须包在 unsafe 块里）
+14. Rust 独创的“引用（& / &mut） + 生命周期（Lifetime） +所有权（Ownership）”机制，其根本目的，就是为了在保留 C语言这种“直接传递内存地址（传值）”的极高运行效率的同时，在编译阶段彻底堵死它带来的安全黑洞 
+15. 一级指针*mut c_void,代表内存中实际创建的TP_TIMER对象的地址(假设 0x000001FF4500)
+16. 二级指针*mut *mut c_void,接收上个堆地址的变量的物理地址,即栈地址(即接收0x000001FF4500的变量的物理地址,假设0x000000AABBCC)
+17. TpAllocTimer在堆上分配对象(假设地址0x1FF4500),然后用调用者传进来的栈地址0xAABBCC,将 0x1FF4500写入到0xAABBCC
 
 
 
@@ -305,22 +471,6 @@ pub fn NtDuplicateObject(
 
 hypnus的混淆链,利用的是没有call的跳转和劫持ret的技术
 
-
-
-## TPAllocTimer
-
-```rust
-TpAllocTimer(
-                // 输出参数,内核把新创建的的定时器对象TP_TIMER的物理内存地址填入
-                &mut timer_ctx, 
-                // 垫片
-                self.cfg.trampoline as *mut c_void, 
-                // 堆栈上定义的CONTEXT.执行时，RDX 寄存器里要装什么（例如伪造的 CONTEXT 结构体地址）
-                &mut ctx_init as *mut _ as *mut c_void, 
-                // 执行环境TP_CALLBACK_ENVIRON_V3
-                &mut env
-            );
-```
 
 
 

@@ -79,7 +79,7 @@ pub struct RTL_HEAP_WALK_ENTRY {
     pub DataSize: usize,
     pub OverheadBytes: u8,
     pub SegmentIndex: u8,
-    pub Flags: u16,
+    pub Flags: u16,// 原型中这里是一个结构体,大小是2字节.
     pub Anonymous: RTL_HEAP_WALK_ENTRY_0,
 }
 

