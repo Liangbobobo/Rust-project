@@ -930,9 +930,9 @@ impl Hypnus {
             // Create a manual-reset synchronization event to be signaled after execution
             let mut event = null_mut();
             let mut status = NtCreateEvent(
-                &mut event, 
-                EVENT_ALL_ACCESS, 
-                null_mut(), 
+                &mut event,// 输出参数 
+                EVENT_ALL_ACCESS, // 该事件对象的最高权限(这里既需要能wait,又需要修改set/reset),因此直接请求了ALL_ACCESS最高权限
+                null_mut(), // 设置对象的安全属性和名称.
                 EVENT_TYPE::SynchronizationEvent, 
                 0
             );

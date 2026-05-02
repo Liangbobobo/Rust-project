@@ -1,48 +1,63 @@
-- [十个ctxs功能](#十个ctxs功能)
-- [NtSetEvent2](#ntsetevent2)
-- [TPAllocTimer](#tpalloctimer)
-  - [第一个参数是指针的指针](#第一个参数是指针的指针)
-- [TpAllocTimer中的trampoline](#tpalloctimer中的trampoline)
-- [threadpool workerfactory worker](#threadpool-workerfactory-worker)
-- [SystemFunction041](#systemfunction041)
-- [SystemFunction040](#systemfunction040)
-- [NtWaitForSingleObject](#ntwaitforsingleobject)
-- [`ctxs[0]`](#ctxs0)
-- [关于PE文件的节区Section](#关于pe文件的节区section)
-- [IMAGE\_SECTION\_HEADER](#image_section_header)
-- [section\_by\_name](#section_by_name)
-- [dinvk::helper::section()](#dinvkhelpersection)
-- [fn timer::NtDuplicateObject](#fn-timerntduplicateobject)
-- [fn timer::rax](#fn-timerrax)
-- [hypnus.rs的执行流](#hypnusrs的执行流)
-- [TP\_CALLBACK\_ENVIRON\_V3](#tp_callback_environ_v3)
-- [struct TP\_POOL\_STACK\_INFORMATION](#struct-tp_pool_stack_information)
-- [TpAllocPool(\&mut pool, null\_mut())](#tpallocpoolmut-pool-null_mut)
-- [三个event\[\]](#三个event)
-- [win64 Event](#win64-event)
-- [Event Thread区别](#event-thread区别)
-- [Struct Hypnus::time::NtCreateEvent](#struct-hypnustimentcreateevent)
-  - [与函数原型的映射解析](#与函数原型的映射解析)
-- [struct ObfMode](#struct-obfmode)
-- [Fiber 纤程(Windows)](#fiber-纤程windows)
-  - [适用场景](#适用场景)
-  - [ConvertThreadToFiber](#convertthreadtofiber)
-- [mod \_\_private](#mod-__private)
-- [扩展-关于Pin代替Box](#扩展-关于pin代替box)
-- [扩展-Box::into\_raw/内部数据拷贝时发生的内部布局移动](#扩展-boxinto_raw内部数据拷贝时发生的内部布局移动)
-- [CONTEXT-暂存知识点,后续需要移动到其他文件中](#context-暂存知识点后续需要移动到其他文件中)
-  - [进程 线程 纤程切换概览](#进程-线程-纤程切换概览)
-- [扩展-关于handle的概念](#扩展-关于handle的概念)
-- [win64 threadpool](#win64-threadpool)
-  - [系统默认线程池](#系统默认线程池)
-- [线程池和事件](#线程池和事件)
-- [IOCP (I/O Completion Port)和worker factory](#iocp-io-completion-port和worker-factory)
-- [扩展-handle句柄](#扩展-handle句柄)
-- [扩展- `AsRef<[u8]>`](#扩展--asrefu8)
+- [foliage](#foliage)
+  - [APC异步过程调用](#apc异步过程调用)
+  - [十个ctxs功能](#十个ctxs功能)
+  - [NtSetEvent2](#ntsetevent2)
+  - [TPAllocTimer](#tpalloctimer)
+    - [第一个参数是指针的指针](#第一个参数是指针的指针)
+  - [TpAllocTimer中的trampoline](#tpalloctimer中的trampoline)
+  - [threadpool workerfactory worker](#threadpool-workerfactory-worker)
+  - [SystemFunction041](#systemfunction041)
+  - [SystemFunction040](#systemfunction040)
+  - [NtWaitForSingleObject](#ntwaitforsingleobject)
+  - [`ctxs[0]`](#ctxs0)
+  - [关于PE文件的节区Section](#关于pe文件的节区section)
+  - [IMAGE\_SECTION\_HEADER](#image_section_header)
+  - [section\_by\_name](#section_by_name)
+  - [dinvk::helper::section()](#dinvkhelpersection)
+  - [fn timer::NtDuplicateObject](#fn-timerntduplicateobject)
+  - [fn timer::rax](#fn-timerrax)
+  - [hypnus.rs的执行流](#hypnusrs的执行流)
+  - [TP\_CALLBACK\_ENVIRON\_V3](#tp_callback_environ_v3)
+  - [struct TP\_POOL\_STACK\_INFORMATION](#struct-tp_pool_stack_information)
+  - [TpAllocPool(\&mut pool, null\_mut())](#tpallocpoolmut-pool-null_mut)
+  - [三个event\[\]](#三个event)
+  - [win64 Event](#win64-event)
+  - [Event Thread区别](#event-thread区别)
+  - [Struct Hypnus::time::NtCreateEvent](#struct-hypnustimentcreateevent)
+    - [与函数原型的映射解析](#与函数原型的映射解析)
+  - [struct ObfMode](#struct-obfmode)
+  - [Fiber 纤程(Windows)](#fiber-纤程windows)
+    - [适用场景](#适用场景)
+    - [ConvertThreadToFiber](#convertthreadtofiber)
+  - [mod \_\_private](#mod-__private)
+  - [扩展-关于Pin代替Box](#扩展-关于pin代替box)
+  - [扩展-Box::into\_raw/内部数据拷贝时发生的内部布局移动](#扩展-boxinto_raw内部数据拷贝时发生的内部布局移动)
+  - [CONTEXT-暂存知识点,后续需要移动到其他文件中](#context-暂存知识点后续需要移动到其他文件中)
+    - [进程 线程 纤程切换概览](#进程-线程-纤程切换概览)
+  - [扩展-关于handle的概念](#扩展-关于handle的概念)
+  - [win64 threadpool](#win64-threadpool)
+    - [系统默认线程池](#系统默认线程池)
+  - [线程池和事件](#线程池和事件)
+  - [IOCP (I/O Completion Port)和worker factory](#iocp-io-completion-port和worker-factory)
+  - [扩展-handle句柄](#扩展-handle句柄)
+  - [扩展- `AsRef<[u8]>`](#扩展--asrefu8)
 
 
+# foliage
 
+**优势:**
+1. 不污染当前线程池：timer 和 wait 会占用进程的 Thread Pool，如果 EDR去审计线程池的回调队列，可能会发现异常。foliage是开辟独立线程，业务线程和混淆线程物理隔离
+2. 替身线程只存在于休眠混淆期间。休眠结束，线程死亡。EDR就算在事后想回溯是谁解密了内存，也根本找不到那个线程的句柄
+3. 极度连贯：APC 队列由 Windows 内核调度，一旦唤醒，10个步骤行云流水，没有任何用户态的干预逻辑
 
+## APC异步过程调用
+
+APC (Asynchronous Procedure Call) 是 Windows内核提供的一种机制，允许程序将一个函数“强行塞进”某个线程的任务队列中。当这个线程闲下来（进入Alertable 警觉状态，比如正在调用 SleepEx或等信号）时，系统会打断它，强制它先去执行队列里的 APC函数，执行完了再回来
+
+本项目中:
+1. 常规APC参数:NtQueueApcThread(目标线程, 要执行的函数地址,传给函数的参数)
+2. hypnus中:调用是：NtQueueApcThread(目标线程, NtContinue的地址,我们伪造的CONTEXT地址)
+    * 此时执行APC时,实际上执行了NtContinue(&CONTECXT).NtContinue瞬间重置cpu的所有硬件寄存器.这意味着,每个APC并没有真正执行一个函数,而是进行一次暴力的硬件状态传递
 
 
 
@@ -651,19 +666,25 @@ Event:一种由内核管理的同步原语（Synchronization Object）
 
 
 **Event如何挂起/恢复线程**
-1. 挂起机制:比如调用NtWaitForSingleObject(event, ...) 时
-    * CPU从ring3陷入ring0
-    * 内核读取该事件的signalstate,如果是0
-    * 内核将当前线程的KTHREAD结构从os的就绪队列中移除.cpu不在给这个线程分配任何微秒的时间片
-    * 内核将该线程的wait block标识插入该事件的WaitListHead等待列表中
-    * 线程进入Waiting状态,此时线程在物理上冻结
 
-2. 恢复机制:当另一个线程或本项目的异步调用链执行NtSetEvent(event) 时
-    * 置位：内核将 SignalState 改为 1
-    * 扫描等待链表：内核查看该事件的 WaitListHead。发现你刚才挂起的那个线程
-    * 唤醒：内核将该线程从事件的等待链表中取下，重新塞回操作系统的就绪队列（Ready Queue）
-    * 重获 CPU：调度器在下一次扫描时发现该线程已 Ready，于是把 CPU交还给它。线程从 NtWaitForSingleObject 的下一行指令继续运行
+event本身不具备主动控制任何东西的能力，它只是一块死内存。真正控制线程调度的是 Windows 内核的核心组件——微内核分发器（Kernel Dispatcher）. Event 只是调度器用来做决策的数据依据.
 
+1. 在内核(ring0)视角下没有handle只有数据结构.Thread在内核中是用KTHREAD表示的庞大结构体;Event在内核中是用Kevent表示的小结构体,其内部有一个关键头部DISPATCHER_HEADER,该头部包含SignalState(当前信号值,0表示无信号,>0表示有信号)/WaitListHead(双向链表的表头,表示等待名单)
+
+2. 挂起机制:比如调用WaitForSingleObject(Event...)或NtWaitForSingleObject(event, ...) 时,底层最终会调用内核函数KeWaitForSingleObject.该底层内核函数会:
+    * 创建桥梁(KWAIT_BLOCK):内核并不会把THREAD直接塞进Event名单.而是在线程栈或内核池中临时创建一个等待块KWAIT_BLOCK的结构体.该结构体有三个指针,一个指回线程KTHREAD,一个指向事件KEVENT,一个用与连接链表
+    * 登记:内核把KWAIT_BLOCK挂载到KEVENT的WaitListHead双向链表.此时,Event知道有一个线程通过这个块连接了,等待绿灯
+    * 上下文切换(context switch):这是调度核心,Dispatcher将当前KTHREAD状态从running改为waiting.接着触发一次软中断,强制cpu保存当前线程所有寄存器状态,然后去os的Read Queue中找一个其他线程来运行.此时,你的线程在物理层面被踢出cpu
+
+3. 恢复机制(Event唤醒线程,即SetEvent的内核操作):当另一个线程(比如源码中的混淆线程)调用了SetEvent.底层会进入内核函数KeSetEvent,调度器开始接管
+    * 置位：内核将KEVENT中的 SignalState 改为 1
+    * 扫描等待链表：内核顺着KEVENT中WaitListHead链表查找发现之前挂在在其上的KWAIT_BLOCK.并继续向下找到木马线程KTHREAD
+    * 内核把KWAIT_BLOCK从Event中摘除解除绑定(如果这是一个自动重置事件,内核会顺手把SignalState重新改为0)
+    * 重新排队:内核将该被唤醒的kTHREAD状态从Waiting改为Ready.然后内核把该线程塞进某个cpu核心的就绪队列
+    * 被塞进就绪队列,不意味着线程立即跑代码,它还得等cpu
+    * 当KeSetEvent执行完毕返回或发生下一个时钟中断,内核会检查当前cpu的就绪队列.如果调度器发现刚才被唤醒的木马CPU优先级比当前正在CPU上跑的线程高,调度器会立刻preempt当前线程.
+    * 内核恢复木马线程之前保存的寄存器状态,把rip指向WaitForSingleObject之后的代码
+    * 此时木马线程重新占用cpu,继续向下执行
 
 
 >在 hypnus 的这段代码中，events句柄代表的是三个独立的内核同步对象（KEVENT），它们充当异步任务链的‘时序锁’；而线程句柄（如h_thread）则代表受操纵的执行上下文（ETHREAD）。这两者的配合实现了：由‘事件’作为逻辑节拍，指挥‘线程’在影子栈中完成复杂的混淆动作
