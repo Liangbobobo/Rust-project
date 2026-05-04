@@ -64,7 +64,11 @@ pub struct Config {
 impl Config {
     /// Create a new `Config`.
     /// 
+    /// new初始化了ntdll/keinel32/kernelbase/cryptbase的基址及在这个dll内部的函数地址(通过config的fn winapi和fn modules)
+    /// 
     /// Rust中不允许未初始化的结构体字段,即使该结构体#[derive(Default)].
+    /// 
+    /// 
     pub fn new() -> Result<Self> {
         // Resolve hashed function addresses for all required APIs
         let mut cfg = Self::winapis(Self::modules());
@@ -74,6 +78,7 @@ impl Config {
         cfg.trampoline = Self::alloc_trampoline()?;
 
         // Register Control Flow Guard function targets if enabled
+        // 
         if let Ok(true) = is_cfg_enforced() {
             register_cfg_targets(&cfg);
         }

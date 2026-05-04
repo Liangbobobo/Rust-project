@@ -18,6 +18,14 @@ use crate::types::*;
 static WINAPIS: Once<Winapis> = Once::new();
 
 /// Windows DLLs required during initialization.
+/// 
+/// 通过定义 struct Dll(*mut c_void),赋予内存地址专属语义标签(NewType模式). 类型Modules是一个包含多个dll地址的结构体,其内部将dll的地址又包装为struct DLL(u64).防止把其他参数当作模块基址放入
+/// 
+/// 能自动获得Into Trait()
+/// 
+/// rust中不能直接给语言内置的原始类型添加自定义方法(孤儿原则Orphan Rule)
+/// 
+/// 方便扩展/重构
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Modules {
     pub ntdll: Dll,
@@ -45,6 +53,7 @@ impl Dll {
     }
 }
 
+// 用于无损/绝对不会失败的类型转换.不用这个trait源码中需要用Dll(ntdll_ptr as u64)代替Dll::from(ntdll_ptr)进行转换
 impl From<*mut c_void> for Dll {
     fn from(ptr: *mut c_void) -> Self {
         Self(ptr as u64)
@@ -64,6 +73,8 @@ impl From<Dll> for u64 {
 }
 
 /// Wrapper for WinAPI function pointers stored as `u64`.
+/// 
+/// 底层Rust免杀开发(即任何系统编程中),见地址必套壳(newtype pattern):1. 内存中一切都是0/1,同一串0/1可表示基址/函数指针/数值/内存地址.套壳的struct Dll(u64) 和 struct WinApi(u64)函数签名中可指定类型,避免内存传参错误 2. 语义隔离,WinApi和DLL代表不同用途 3. 后续需要提取WinApi(u64)中u64的值(通过impl as_ptr等方法),虽然多了一步但不会增加开销(rust Zero-cost Abstraction零成本抽象的承诺)
 #[derive(Default, Debug, Clone, Copy)]
 #[repr(transparent)]
 pub struct WinApi(u64);
@@ -96,6 +107,7 @@ impl WinApi {
 
 impl From<*const c_void> for WinApi {
     fn from(ptr: *const c_void) -> Self {
+        // Self代表调用from的类型,这里因为在WinApi中,这里Self=WinApi
         Self(ptr as u64)
     }
 }

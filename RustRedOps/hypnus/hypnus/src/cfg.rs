@@ -28,8 +28,10 @@ const PROCESS_USER_MODE_IOPL: u32 = 16;
 /// Mitigation policy ID for Control Flow Guard (CFG)
 const ProcessControlFlowGuardPolicy: i32 = 7i32;
 
-/// Checks if Control Flow Guard (CFG) is enabled for the current process.
+/// Checks if Control Flow Guard (CFG) is enabled for the current process:向win内核询问,当前进程是否开启CFG控制流防护
 pub fn is_cfg_enforced() -> Result<bool> {
+    
+    // 
     let mut proc_info = EXTENDED_PROCESS_INFORMATION {
         ExtendedProcessInfo: ProcessControlFlowGuardPolicy as u32,
         ..Default::default()
