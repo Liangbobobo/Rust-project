@@ -1,3 +1,4 @@
+- [format\_args!](#format_args)
 - [\_print(format\_args!($($arg)\*));](#_printformat_argsarg)
 - [OutputDebugStringA](#outputdebugstringa)
 - [debug\_log!用途](#debug_log用途)
@@ -6,6 +7,11 @@
 
 
 本章不仅仅有项目的输出,也包含core::fmt的相关概念
+
+## format_args!
+
+
+
 
 ## _print(format_args!($($arg)*));
 
