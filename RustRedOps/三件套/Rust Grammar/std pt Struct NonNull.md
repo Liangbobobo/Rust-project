@@ -9,19 +9,24 @@ where
 *mut T but non-zero and covariant.
 
 This is often the correct thing to use when building data structures using raw pointers,   
-but is ultimately more dangerous to use because of its additional properties. If you’re not sure if you should use `NonNull<T>`, just use *mut T!
+but is ultimately最终/根本上 more dangerous to use because of its additional properties. If you’re not sure if you should use `NonNull<T>`, just use *mut T!
 1. Unlike *mut T, the pointer must always be non-null, even if即使 the pointer is never dereferenced. This is so that enums may use this forbidden value as a discriminant使用这个被禁用的值(0/null)作为判别式 – `Option<NonNull<T>>`has the same size as *mut T. However the pointer may still dangle垂悬 if it isn’t dereferenced.
    * 编译器保证`NonNull<T>`为non-null,但不保证解引用后的T是合法的地址
    * 在enum中这里的`Option<NonNull>`
 
-Discriminant (判别式/标签)：这是 Rust
-      枚举内部的一个隐藏字段，用来标记当前是哪个成员。NonNull
-      的优化在于把“0”这个地址直接借用来当成了 Option::None 的判别式。
-   3. Forbidden value (被禁止的数值)：在 NonNull 的世界里，数字 0
-      是被禁止存在的。一旦出现 0，整个类型系统的安全契约就崩塌了。
-   4. Dangle
-      (悬挂)：动词。指指针指向的内存已经被操作系统收回（比如堆被销毁了），虽然指
-      针数值不是 0，但它已经变成了无头苍蝇。
+Discriminant (判别式/标签)：这是 Rust枚举内部的一个隐藏字段，用来标记当前是哪个成员。NonNull的优化在于把“0”这个地址直接借用来当成了 Option::None 的判别式。
+   1. Forbidden value (被禁止的数值)：在 NonNull 的世界里，数字 0是被禁止存在的。一旦出现 0，整个类型系统的安全契约就崩塌了。
+   2. Dangle(悬挂)：动词。指指针指向的内存已经被操作系统收回（比如堆被销毁了），虽然指针数值不是 0，但它已经变成了无头苍蝇。
+
+
+## 使用NonNull的原因
+
+在构建底层数据结构时，几乎一面倒地推荐使用 `Option<NonNull<T>>`
+
+1. 无性能开销:`Option<NonNull<T>>` 和 *mut T在内存中占用的大小完全一样（在 64 位下都是 8 字节，None 就是物理上的0x00000000），它们在性能和内存开销上是绝对零差别的.
+2. 将“空指针检查”从人脑转移给编译器（类型驱动开发）:在 C/C++（或使用 *mut T）中，拿到一个指针，最可怕的噩梦是：“它到底是不是NULL？”如果忘了写 if (ptr != NULL)，直接去读写，就会引发段错误（Segfault）
+3. 类型协变性 (Covariance):协变性决定了具有生命周期的类型能否互相转换.简单的说协变就是长生命周期的子类型能否当作短生命周期的父类型使用.
+  * *mut T 在 Rust 中是 不变（Invariant）的.如`MyVec<*mut T>`，那么 `MyVec<&'static str> `绝对不能当做 `MyVec<&'a str>`
 
 
 ## 扩展-NonNull`<u8>`的含义
