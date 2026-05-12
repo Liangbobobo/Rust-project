@@ -3,5 +3,8 @@ name = "samoa"
 version = "0.1.0"
 edition = "2024"
 
+# 以下依赖rustc在编译时(2018以后版本)会自动把外部库名字挂载到整个项目的全局根命名空间
+# 使用:1. use windows_targets::link 后续直接用link!() 2. 不用use直接用windows_targets::link!(...)
 [dependencies]
 puerto={path = "../../dinvk-puerto/puerto"}
+windows-targets = "0.53.4"

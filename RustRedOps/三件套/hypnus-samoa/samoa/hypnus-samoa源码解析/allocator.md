@@ -1,4 +1,19 @@
 
+
+## ffi的调用方式见文件夹win api abi中rust-ffi方式
+
+
+## 为什么不能使用dinvk::get_proc_address 
+
+allocator.rs为啥不用dinvk::get_proc_address 这种可以完全抹除 IAT的调用方式:
+1. 会产生“鸡生蛋，蛋生鸡”的自举（Bootstrapping）死锁
+2. 使用let addr =  get_proc_address("RtlAllocateHeap");时
+3. 在执行 get_proc_address 的过程中，不管是遍历 PEB，还是计算哈希，只要底层的某一行代码（或者某个隐式调用的 Rust 标准库函数）需要分配哪怕 1 个字节的堆内存（比如拼接了一个局部字符串，或者用到了 Vec）
+4. 触发内存分配 ,Rust 呼叫全局分配器 alloc
+5. 全局分配器 alloc 启动，发现 RtlAllocateHeap 还没解析出来，于是再次呼叫get_proc_address
+6. 无限递归，瞬间栈溢出（Stack Overflow），木马在启动的第 0.001秒就崩溃了
+
+
 ## 必须使用私有堆
 
 hypnus在主线程休眠期间,将整个内存堆遍历一遍,对所有正在使用的数据进行了xor加密(hypnus.rs的fn obfuscate_heap)

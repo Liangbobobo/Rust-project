@@ -5,6 +5,9 @@
 // cargo expand --lib --tests error::tests::test_console_writer
 
 
+// 问题
+// 1. 这里分配了栈空间,存放的数据是否会被edr发现?
+
 use core::fmt::{self, Write};
 
 // 自定义栈/调用OutputDebugStringA;s是自定义的传入的字符串

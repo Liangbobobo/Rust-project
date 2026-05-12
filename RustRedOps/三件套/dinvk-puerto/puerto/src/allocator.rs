@@ -127,6 +127,7 @@ unsafe impl GlobalAlloc for WinHeap {
 // extern "system"这种方式,编译器(rustc)不关心函数在哪,只是记录本程序需要一个对应的外部函数,调用约定是system(x64的fastcall),编译器会在生成的.obj文件中留下一个未解析的外部符号.
 // 当运行cargo build或cargo test时,链接器(如MSVC的link.exe)会扫描你提供的所有库文件(lib文件)及rustc自动链接的一些win的基础库(如ntdll kernel32)等,发现对应的函数定义,链接器就会将这里的代码和ntdll里面的函数关联起来
 // windows-targets 宏只是指定了在哪个模块里面找,而extern会扫描所有模块.当出现重名函数时windows-targets 宏就很有优势了
+// ! 经过讨论,为了兼容性.应该改为使用windows_targets::link!
 unsafe  extern "system"{
     fn RtlFreeHeap(heap: HANDLE, flags: u32, ptr: *mut c_void) -> u32;// 为了兼容改为u32,详见winapi的分析
     fn RtlAllocateHeap(heap: HANDLE, flags: u32, size: usize) -> *mut c_void;
