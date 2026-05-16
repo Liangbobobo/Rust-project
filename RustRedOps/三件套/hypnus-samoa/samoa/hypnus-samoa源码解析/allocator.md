@@ -1,5 +1,61 @@
 
 
+## 新分配的内存alloc不刷零,dealloc必须强制刷零
+
+alloc 时不刷零（不加 HEAP_ZERO_MEMORY），而在 dealloc时必须强制刷零（write_bytes(ptr, 0)）
+
+核心原因：在 Rust 的语义和底层系统环境下，分配时刷零是 100% 的“冗余计算
+1. 操作系统底层的“天然保洁”：当你的木马第一次申请大内存，导致 Windows堆管理器不得不在底层向内核申请新的物理内存页（VirtualAlloc）时，现代操作系统（为了防止进程间的数据泄露）强制规定交付给用户层的新内存页必须是全零的。此时不需要你刷零，它已经是零了
+2. 命中空闲链表（Free List）的“前置保洁”：如果申请的内存是复用之前被释放的旧内存块，由于我们在 dealloc阶段已经执行了极其严格的强制刷零，此时拿到的旧内存块，里面依然是干干净净的全零
+3. Rust 编译器的“强制覆盖”要求：在 C 中，如果 malloc了一块内存，可以直接去读它，如果里面有前一个程序的脏数据，你就读到了乱码。但Rust中，只要你不写 unsafe，编译器在语法层面绝对禁止你读取未初始化的内存。这意味着，只要你通过 alloc拿到内存，你接下来的第一步动作，必定是用你真实的数据（比如解密后的 Shellcode或字符串）去覆盖/填充这块内存，然后才能使用它
+
+dealloc必须强制刷零:核心原因：不刷零，数据存活窗口期太长
+1.  Windows 的 NT 堆管理器（Heap Manager）为了追求极速，在执行 RtlFreeHeap时是非常“懒惰”的。它绝对不会去擦除你内存块里的实际数据（User Data），它仅仅是修改内存块头部的元数据，并把它挂载到一个叫“空闲链表（Free List）”的结构上，标记为“以后可用”
+2.  数据存活期:如果你不手动刷零，你解密出来的敏感数据（如 C2服务器地址、解密后的核心攻击代码、管理员密码等），会在进程的物理内存中原封不动地躺上几分钟  、几个小时、甚至直到宿主进程被关闭
+
+## layout.size()
+
+```rust
+core::alloc::layout
+pub struct Layout {
+    size: usize,
+    align: Alignment,
+}
+```
+
+代表:为了存放即将创建的数据结构，在物理内存中需要占据的精确字节数   
+这个数字是编译器在编译阶段通过精密计算得出来的，并不是程序员手写的
+
+举例说明:  
+1. Box::new(5u32) 即将一个u32放入堆时,u32占4字节,cpu要求其首地址必须能被4整除即对齐要求是alilgn=4.那么当前u32大小正好能被4整除,不需要padding,此时默认layout.size() = 4;layout.align() = 4
+2. `struct MyData {a: u64,  // 占 8 字节 b: u8,   // 占 1 字节 }`:将MyData放入堆中 Box::new(MyData { a: 1, b: 2 }) 时:其最大对齐要求是u64,即align=8(首地址能被8整除).但其大小为8+1=9字节.这时rust在该结构体最末尾padding 7字节数据,变为16字节对齐
+3. `Vec::<u8>::with_capacity(100)`:数组元素是u8(align=1),即可放在内存任何地址,且无padding
+
+源码中只用了layout.size,没有layout.align这个对齐要求:
+1. 在win64,调用RtlAllocateHeap 时,win的NT堆管理器内部有一个硬性规定：无论你申请多少字节，它返回给你的内存起始地址，永远、绝对是 16字节对齐的（MEMORY_ALLOCATION_ALIGNMENT = 16）
+2. 在绝大多数情况下,Rust最大基础对齐是8字节(对应64位指针).win对管理器要求的16字节对齐完全满足.因此源码没有layout.align
+3. 没有layout.align,只把size传给RtlAllocateHeap,表示rust代码层面没有任何逻辑去主动控制对齐.控制权转到win的堆管理器:它并不考虑上层业务想怎么对齐,只考虑如何方便os管理内存碎片\快速寻址\兼容cpu架构.win堆管理器在内核源码有个MEMORY_ALLOCATION_ALIGNMENT规则:在win32下,win堆内存管理器返回的内存地址永远是8字节对齐;win64下永远16字节对齐
+
+
+
+## NonNull::new_unchecked(handle)
+
+既然这里不检查是否非空,而是使用new_unchecked的意义:
+1. rustc的空指针优化.
+```rust
+static mut HEAP_HANDLE: Option<NonNull<c_void>> = None;
+static mut HEAP_HANDLE: Option<*mut c_void> = None;
+```
+其背后是rustc堆空指针的优化:在*mut c_void=Null情况下,为了表示Option::None,rustc理论上需要额外内存空间(一个tag字节)来区分Option::None和Option::Some(0x0)的情况.
+* `Option<T>`来表示内存时有三种状态:None\Some(0x000)\Some(0x7FF7),这三种分别表示没有指针/有一个是Null的指针/有一个正常的指针
+* `Option<NonNull<T>>`表示内存时只有两种状态:None\Some,由于`NonNul<T>`永不为空,于是用0x0000来表示None,在内存中写入非零地址时用Some表示.
+* `Option<NonNull<T>>` 确保这个 Rust全局变量在内存中的大小和结构，与纯 C 语言中的 void* handle = NULL; 一模一样
+* 且不产生任何因为Tag判别式带来的额外汇编检查指令
+
+2. rust中用None表示的指针不存在包括
+    * 未初始化的全局单例:`static mut HEAP_HANDLE: Option<*mut c_void> = None;`此时 None状态是:尚未调用RtlCreateHeap初始化时,该句柄是未初始化状态即指针不存在.隐含逻辑:如果我看到它是 None，我就知道我应该去执行初始化代码（去调用创建堆的函数）.和Some(NUll)这种表示初始化了但内容是0的状态区分
+  
+
 ## ffi的调用方式见文件夹win api abi中rust-ffi方式
 
 

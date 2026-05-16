@@ -5,6 +5,9 @@ edition = "2024"
 
 # 以下依赖rustc在编译时(2018以后版本)会自动把外部库名字挂载到整个项目的全局根命名空间
 # 使用:1. use windows_targets::link 后续直接用link!() 2. 不用use直接用windows_targets::link!(...)
+# p版用的是crates中dinvk/uwd的库,s版用的是本地库
 [dependencies]
 puerto={path = "../../dinvk-puerto/puerto"}
+uwd={path = "../../uwd/uwd"}
 windows-targets = "0.53.4"
+spin="0.11"

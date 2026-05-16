@@ -46,7 +46,7 @@ pub fn get_ntdll_address()->*mut c_void {
     // win64架构下,usize u64 *mut c_void都是8字节,在寄存器种的表示完全相同
     // u64 是为了完整容纳 64 位系统的内存地址，防止截断导致崩溃
     let addr = NTD
-    .call_once(|| retrieve_module_add(Some(3006804307u32), 
+    .call_once(|| get_module_address(Some(3006804307u32), 
     Some(fnv1a_utf16))
     // unwrap失败返回全为0的原始指针
     .unwrap_or(null_mut()) as u64) ;
@@ -74,12 +74,12 @@ pub fn get_ntdll_address()->*mut c_void {
 /// GS:[60h] (指针) -> PEB -> Ldr (指针) -> LDR_DATA -> InMemoryOrderLinks(链表) -> LDR_ENTRY -> BaseDllName (UTF16) -> Puerto 哈希比较 -> 返回DllBase
 /// 
 #[inline(always)]
-pub fn retrieve_module_add(
+pub fn get_module_address(
     module: hash_type, // 传入对应的模块的hash值
     hash_func: Option<fn(&[u16]) -> u32>,
 ) -> Option<HMODULE> {
     // 成功会返回u32类型的hash值,并赋值给左侧的hash变量
-    // 失败会返回None,并退出retrieve_module_add
+    // 失败会返回None,并退出get_module_address
     // 需要增加debug时的错误提示,使用debug_log!
     // let hash = hash_func?; // 源代码
 
@@ -373,7 +373,7 @@ pub fn get_forwarded_address(
                     // 注意：这里需要计算 hash
                     let dll_hash = fnv1a_utf16(real_dll_u16);
 
-                    let h_module = retrieve_module_add(Some(dll_hash), Some(fnv1a_utf16))?;
+                    let h_module = get_module_address(Some(dll_hash), Some(fnv1a_utf16))?;
 
                     let func_hash = fnv1a_utf16_from_u8(func_name_bytes);
 
@@ -386,7 +386,7 @@ pub fn get_forwarded_address(
 
                 let dll_hash = fnv1a_utf16_from_u8(dll_name_bytes);
 
-                let h_module = retrieve_module_add(Some(dll_hash), Some(fnv1a_utf16))?;
+                let h_module = get_module_address(Some(dll_hash), Some(fnv1a_utf16))?;
 
                 let func_hash = fnv1a_utf16_from_u8(func_name_bytes);
 
@@ -521,7 +521,7 @@ fn resolve_api_set_map<'a>(
    - 目的：高效、线程安全地获取 ntdll.dll 的内存基地址。
    - 逻辑：利用 spin::Once 确保哈希查找只执行一次并缓存结果。它是库获取底层 NT 函数的基石。
 
-2. retrieve_module_add(module_hash, hash_func)
+2. get_module_address(module_hash, hash_func)
    - 目的：在不调用 GetModuleHandle 的情况下，定位内存中已加载的 DLL 基址。
    - 逻辑：从 GS:[0x60] 读取 PEB，通过 Ldr 字段进入模块链表。Puerto 使用 fnv1a_utf16 直接在原始 UTF-16 字节流上哈希并比对，实现了零内存分配。
 
