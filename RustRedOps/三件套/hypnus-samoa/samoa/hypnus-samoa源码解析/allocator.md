@@ -1,4 +1,16 @@
 
+- [新分配的内存alloc不刷零,dealloc必须强制刷零](#新分配的内存alloc不刷零dealloc必须强制刷零)
+- [layout.size()](#layoutsize)
+- [NonNull::new\_unchecked(handle)](#nonnullnew_uncheckedhandle)
+- [ffi的调用方式见文件夹win api abi中rust-ffi方式](#ffi的调用方式见文件夹win-api-abi中rust-ffi方式)
+- [为什么不能使用dinvk::get\_proc\_address](#为什么不能使用dinvkget_proc_address)
+- [必须使用私有堆](#必须使用私有堆)
+- [static mut HEAP\_HANDLE](#static-mut-heap_handle)
+  - [单线程多线程](#单线程多线程)
+  - [static mut HEAP\_HANDLE引入spin::Once](#static-mut-heap_handle引入spinonce)
+- [IAT污染](#iat污染)
+- [分配/释放时清零](#分配释放时清零)
+
 
 ## 新分配的内存alloc不刷零,dealloc必须强制刷零
 
