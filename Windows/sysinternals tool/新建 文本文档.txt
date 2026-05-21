@@ -1,0 +1,10 @@
+资源管理器中输入:
+
+\\live.sysinternals.com\tools
+
+
+
+资源监视器
+
+resmon
+
