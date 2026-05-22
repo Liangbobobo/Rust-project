@@ -44,3 +44,15 @@ COM is based on two foundational principles.
 
 The term COM server typically refers to a Dynamic Link Library (DLL) or an executable (EXE) where 
 the COM classes are implemented.
+
+
+
+## P13
+
+**Windows doesn’t keep track of more than just the parent process ID**:不追踪更多,除了process ID
+
+进程之间唯一的纽带，只是一个记录下来的父进程 ID（Parent Process ID），而不是一个强制性的、有生命的依赖关系
+1. Windows 并没有维护一个活跃的、强制性的“进程树”结构。所谓的“父子进程”关系，其实只是在创建时记下的一条静态记录
+2. 实验中，关掉了中间的 cmd (父进程)，但它的子进程 Paint 仍然可以独立运行。这完美地证明了：操作系统不会因为父进程的终止，而自动去终止它的子进程。 每个进程的生命周期是独立管理的
+3. 一个后台进程的窗口（父进程）看似被关闭了，但其辅助服务（子进程）可能仍在后台运行，因为它们的生命周期本就不绑定
+
