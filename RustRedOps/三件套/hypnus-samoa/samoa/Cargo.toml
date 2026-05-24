@@ -8,6 +8,6 @@ edition = "2024"
 # p版用的是crates中dinvk/uwd的库,s版用的是本地库
 [dependencies]
 puerto={path = "../../dinvk-puerto/puerto"}
-uwd={path = "../../uwd/uwd"}
+uwd={path = "../../uwd-mariana/uwd"}
 windows-targets = "0.53.4"
 spin="0.11"

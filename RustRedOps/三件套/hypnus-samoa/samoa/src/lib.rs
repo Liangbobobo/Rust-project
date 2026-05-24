@@ -12,5 +12,6 @@ pub mod error;
 pub mod types;
 pub mod allocator;
 pub mod winapis;
+pub mod hypnus;
 
 

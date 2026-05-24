@@ -185,7 +185,8 @@ macro_rules! foliage {
 
 /// Enumeration of supported memory obfuscation strategies.
 /// 
-/// 驱动休眠混淆的底层调度方式(线程池/APC),并用于在fiber入口路由核心执行框架.无论选择Timer还是Foliage,核心主载荷的加密方式都是写死的(rop链中的SystemFunction040).
+/// 用于指定休眠混淆的底层调度方式(线程池/APC),并用于在fiber入口路由核心执行框架.
+/// 无论选择Timer还是Foliage,核心主载荷的加密方式都是写死的(rop链中的SystemFunction040).
 pub enum Obfuscation {
     /// The technique using Windows thread pool (`TpSetTimer`).
     Timer,
@@ -199,7 +200,7 @@ pub enum Obfuscation {
 
 /// Represents bit-by-bit options for performing obfuscation in different modes
 /// 
-/// 混淆中是否开启额外的内存操作特权(私有堆独立加密/主载荷的rwx权限妥协).ObfMode无法改变主代码段的加密方式,控制的时额外的内存操作特权.
+/// 混淆中是否开启额外的内存操作特权(私有堆独立加密/主载荷的rwx权限妥协).ObfMode无法改变主代码段的加密方式,控制的是额外的内存操作特权.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // 透明内存布局,强制ObfMode结构体的内部布局和定义的内部字段完全一致,避免rustc的优化(在物理内存中的大小/对齐/abi与u32一致,不能有多余padding).即固定ObfMode中u32的值和物理内存属性
 #[repr(transparent)]
