@@ -13,5 +13,6 @@ pub mod types;
 pub mod allocator;
 pub mod winapis;
 pub mod hypnus;
+pub mod config;
 
 
