@@ -14,5 +14,6 @@ pub mod allocator;
 pub mod winapis;
 pub mod hypnus;
 pub mod config;
+pub mod cfg;
 
 

@@ -1,5 +1,5 @@
 use crate::module::{get_ntdll_address};
-use crate::types::{CONTEXT, HANDLE, NtGetThreadContextFn, PEB,NtSetThreadContextFn};
+use crate::types::{CONTEXT, HANDLE, NTSTATUS, NtGetThreadContextFn, NtSetThreadContextFn, PEB};
 use crate::{dinvok};
 
 /// Returns the default heap handle for the current process from the PEB.
@@ -92,4 +92,14 @@ pub fn __readgsqword(offset:u64)->u64 {
     }
 
     out
+}
+
+#[inline(always)]
+pub fn NtCurrentProcess()->HANDLE {
+    -1isize as HANDLE
+}
+
+/// Evaluates to TRUE if the return value specified by `nt_status` is a success
+pub const fn NT_SUCCESS(nt_status:NTSTATUS)->bool {
+    nt_status>=0
 }

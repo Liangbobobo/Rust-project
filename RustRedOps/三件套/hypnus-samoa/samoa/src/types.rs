@@ -6,7 +6,8 @@ use puerto::types::{EVENT_TYPE,HANDLE,LARGE_INTEGER};
 pub type NTSTATUS = i32;
 
 
-
+// 以下常量来自win的winnt.h/windows.h,是win os的魔数(直接和内核对话,代表固定含义)
+// 详见 win相关/魔数
 pub const PAGE_READWRITE: u32 = 0x04;
 pub const PAGE_EXECUTE_READ: u64 = 0x20;
 pub const PAGE_EXECUTE_READWRITE: u64 = 0x40;
