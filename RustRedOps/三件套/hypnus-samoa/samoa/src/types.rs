@@ -19,6 +19,7 @@ pub const DUPLICATE_SAME_ACCESS: u32 = 0x00000002;
 pub const VM_LOCK_1: u32 = 0x0001;
 pub const HEAP_GROWABLE: u32 = 0x00000002;
 
+/// 映射官方PROCESS_MITIGATION_POLICY_INFORMATION结构体;用于检测当前进程是否开启CFG(Control Flow Guard)
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
 pub struct EXTENDED_PROCESS_INFORMATION {
@@ -26,6 +27,7 @@ pub struct EXTENDED_PROCESS_INFORMATION {
     pub ExtendedProcessInfoBuffer: u32,
 }
 
+/// 其pool字段指向,TpAllocPool创建的私有线程池.在TpAllocTimer设置的定时器,时间到了后,os底层会通过worker线程,在这个环境中唤醒并指ROP链
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TP_CALLBACK_ENVIRON_V3 {

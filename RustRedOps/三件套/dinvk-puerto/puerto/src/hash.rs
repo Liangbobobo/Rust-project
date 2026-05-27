@@ -29,7 +29,8 @@
 
 
 // 在 hash.rs 中增加一个处理模块名的逻辑，使其在哈希时自动忽略 .DLL后缀（类似于你做的大小写折叠）
-/// 直接传入&[u16]给hash函数
+/// PEB-Ldr(InMemoryOrderModuleList)链表中,模块名(BaseDllName)是UNICODE_STRING  结构体.且Windows NT 内核默认使用 UTF-16LE 编码处理底层字符串.即BaseDllName是每个字符占用两个字节的宽字符数组=&[u16](Rust)
+/// 直接传入&[u16](PEB里面的字符串格式)给hash函数
 pub  fn fnv1a_utf16(data: &[u16]) -> u32 {
     const FNV_OFFSET_BASIS: u32 = 0x3D91_4AB7; // 你自定义的种子
     const FNV_PRIME: u32 = 0xAD37_79B9;        // 你自定义的素数
@@ -59,6 +60,7 @@ pub  fn fnv1a_utf16(data: &[u16]) -> u32 {
 
 /// 针对 &[u8] 的 fnv1a 哈希，模拟将其视为 UTF-16 字节流进行哈希
 /// 这在处理 ASCII 字符串（如转发字符串中的模块名）并与 PEB 中的 UTF-16 哈希对比时非常有用
+/// 在模块内部找api时,解析的是PE文件的导出表的AddressOfNames  数组(导出表中的函数名强制规定必须是 ASCII 字符串=&[u8])
 pub fn fnv1a_utf16_from_u8(data: &[u8]) -> u32 {
     const FNV_OFFSET_BASIS: u32 = 0x3D91_4AB7;
     const FNV_PRIME: u32 = 0xAD37_79B9;

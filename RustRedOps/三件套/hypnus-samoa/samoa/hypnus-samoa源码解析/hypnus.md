@@ -17,7 +17,6 @@
 - [fn timer::NtDuplicateObject](#fn-timerntduplicateobject)
 - [fn timer::rax](#fn-timerrax)
 - [hypnus.rs的执行流](#hypnusrs的执行流)
-- [TP\_CALLBACK\_ENVIRON\_V3](#tp_callback_environ_v3)
 - [struct TP\_POOL\_STACK\_INFORMATION](#struct-tp_pool_stack_information)
 - [TpAllocPool(\&mut pool, null\_mut())](#tpallocpoolmut-pool-null_mut)
 - [三个event\[\]](#三个event)
@@ -148,7 +147,7 @@ TpAllocTimer(
                 self.cfg.trampoline as *mut c_void, 
                 // 堆栈上定义的CONTEXT.执行时，RDX 寄存器里要装什么（例如伪造的 CONTEXT 结构体地址）
                 &mut ctx_init as *mut _ as *mut c_void, 
-                // 执行环境TP_CALLBACK_ENVIRON_V3
+                // 执行环境
                 &mut env
             );
 ```
@@ -536,43 +535,7 @@ hypnus的混淆链,利用的是没有call的跳转和劫持ret的技术
 
 
 
-## TP_CALLBACK_ENVIRON_V3 
 
-```rust
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct TP_CALLBACK_ENVIRON_V3 {
-    pub Version: u32,
-    pub Pool: *mut c_void,
-    pub CleanupGroup: *mut c_void,
-    pub CleanupGroupCancelCallback: *mut c_void,
-    pub RaceDll: *mut c_void,
-    pub ActivationContext: isize,
-    pub FinalizationCallback: *mut c_void,
-    pub u: TP_CALLBACK_ENVIRON_V3_0,
-    pub CallbackPriority: i32,
-    pub Size: u32,
-}
-
-impl Default for TP_CALLBACK_ENVIRON_V3 {
-    fn default() -> Self {
-        Self {
-            Version: 3,
-            Pool: null_mut(),
-            CleanupGroup: null_mut(),
-            CleanupGroupCancelCallback: null_mut(),
-            RaceDll: null_mut(),
-            ActivationContext: 0,
-            FinalizationCallback: null_mut(),
-            u: TP_CALLBACK_ENVIRON_V3_0 { Flags: 0 },
-            CallbackPriority: 1,
-            Size: size_of::<TP_CALLBACK_ENVIRON_V3>() as u32,
-        }
-    }
-}
-```
-
-1. C语言二进制接口（ABI）的内存块
 
 ## struct TP_POOL_STACK_INFORMATION
 

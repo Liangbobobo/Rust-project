@@ -60,7 +60,7 @@ pub fn _print(args: fmt::Arguments) {
 //     };
 // }
 
-// 输出错误日志
+/// 输出错误日志,代替源码中bail!(s!("NtCreateEvent Failed"))输出错误信息
 #[macro_export]
 macro_rules! debug_log {
     ($($args:tt)*) => {
@@ -99,6 +99,7 @@ pub enum HypnusError {
 // 它们在 Rust 语法树中都是合法的表达式（分别对应路径表达式和调用表达式），
 // 所以用 `expr` 来捕获它们是完全正确的。
 
+/// 代替源码中anyhow::bail!
 #[macro_export]
 macro_rules! stealth_bail {
     // 修复点: 改为 $($args:tt)* 以接收多个参数 (字符串模板 + 多个变量)
