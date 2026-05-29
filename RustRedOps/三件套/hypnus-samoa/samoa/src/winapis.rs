@@ -1,6 +1,7 @@
 #![allow(unused)]
 
 // 本文件(mod)在项目中作用:
+// 提供其他模块用到的windows api/dll的rust定义:找到地址后通过transmute转为rust函数指针(主动调用native api的ffi安全wrapper)
 
 // 问题:
 
@@ -49,7 +50,7 @@ pub struct Winapis {
     pub SwitchToFiber: SwitchToFiberFn,
 }
 
-/// one-time initialization of the structure with resolved pointer
+/// one-time lazy initialization of the structure with resolved pointer.在调用winapis()时通过WINAPIS.call_once()时才真正初始化
 static WINAPIS:Once<Winapis>=Once::new();
 
 /// Returns a reference to the resolved winapis structure.同时实现Winapis结构体的初始化

@@ -15,5 +15,7 @@ pub mod winapis;
 pub mod hypnus;
 pub mod config;
 pub mod cfg;
+pub mod spoof;
+pub mod gadget;
 
 
