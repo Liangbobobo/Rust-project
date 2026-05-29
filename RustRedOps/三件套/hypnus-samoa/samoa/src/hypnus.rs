@@ -64,6 +64,8 @@ impl core::ops::BitOr for ObfMode {
     }
 }
 
+/// Structure responsible for centralizing memory obfuscation techniques
+/// 
 #[derive(Clone,Copy,Debug)]
 struct Hypnus{
 
