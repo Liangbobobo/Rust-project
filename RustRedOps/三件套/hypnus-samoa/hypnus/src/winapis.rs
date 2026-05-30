@@ -23,7 +23,7 @@ static WINAPIS: Once<Winapis> = Once::new();
 /// 
 /// 能自动获得Into Trait()
 /// 
-/// rust中不能直接给语言内置的原始类型添加自定义方法(孤儿原则Orphan Rule)
+/// rust中不能直接给语言内置的原始类型添加自定义方法(孤儿原则Orphan Rule:trait/type至少有一个在当前crate本地定义,才允许构建impl块)
 /// 
 /// 方便扩展/重构
 #[derive(Debug, Clone, Copy, Default)]
@@ -53,7 +53,7 @@ impl Dll {
     }
 }
 
-// 用于无损/绝对不会失败的类型转换.不用这个trait源码中需要用Dll(ntdll_ptr as u64)代替Dll::from(ntdll_ptr)进行转换
+/// 用于无损/绝对不会失败的类型转换.不用这个trait源码中需要用Dll(ntdll_ptr as u64)代替Dll::from(ntdll_ptr)进行转换
 impl From<*mut c_void> for Dll {
     fn from(ptr: *mut c_void) -> Self {
         Self(ptr as u64)
@@ -75,6 +75,7 @@ impl From<Dll> for u64 {
 /// Wrapper for WinAPI function pointers stored as `u64`.
 /// 
 /// 底层Rust免杀开发(即任何系统编程中),见地址必套壳(newtype pattern):1. 内存中一切都是0/1,同一串0/1可表示基址/函数指针/数值/内存地址.套壳的struct Dll(u64) 和 struct WinApi(u64)函数签名中可指定类型,避免内存传参错误 2. 语义隔离,WinApi和DLL代表不同用途 3. 后续需要提取WinApi(u64)中u64的值(通过impl as_ptr等方法),虽然多了一步但不会增加开销(rust Zero-cost Abstraction零成本抽象的承诺)
+/// 
 #[derive(Default, Debug, Clone, Copy)]
 #[repr(transparent)]
 pub struct WinApi(u64);

@@ -75,6 +75,11 @@ macro_rules! debug_log {
 
 // 实现hypnus中bail!的control flow功能
 use crate::types::NTSTATUS;
+/// 代替anyhow::Result,且?仍然可用于no_std
+/// 
+/// anyhow::Result可能需要保留自定义错误E(如anyhow::Result<T, MyCustomError> ).但samoa所有的异常在HypnusError,因此不需要保留定义的错误
+/// 
+/// 这里Result<T>的错误类型被硬编码为了 HypnusError.调用任何返回其他错误类型（如  core::str::Utf8Error)必须通过  .map_err()  将外部错误显式且手动地映射为  HypnusError的某个变体，然后才能使用  ? 详见注释
 pub type Result<T> = core::result::Result<T, HypnusError>;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -194,3 +199,9 @@ mod tests {
 // 注释3:Rust 中，HypnusError 中的InvalidArguments 这种不带任何数据的枚举变体，叫做单元变体（Unit Variant）.它们本身不携带任何附加信息不像 OsError(NTSTATUS)携带一个i32.所以不需要初始化.因为加了#[repr(C)]其物理实质变成一个 C 语言风格的Tagged  Union（标签联合体）
 // rust不允许使用未经初始化的变量.但这里只是声明/定义阶段,后续在使用时必须初始化.对于InvalidArguments这种不携带数据(单元变体)的变量在使用时写出全名就是一次完整的初始化,如stealth_bail!(HypnusError::InvalidArguments)
 // let my_error = HypnusError::OsError(0xC0000005); return Err(my_error);
+
+// 注释4:这是一个newtype后续使用时会直接展开为=号右侧的定义
+// 必须显式映射，否则编译器会因为类型不匹配（Mismatch Error Types）拒绝编译
+// let val = core::str::from_utf8(bytes).map_err(|_| HypnusError::InvalidArguments)?;
+// 强迫开发者在边界处对每一个外部错误进行显式的 OPSEC 评估，确保错误不会携带敏感的堆栈信息或导致非预期的 Panic
+// 这里Result<T>代表这个别名只允许使用者自定义成功时的返回类型T,=号右侧的HypnusError代表失败时的所有错误类型已经被固定锁死,无需也不允许调用者指定.

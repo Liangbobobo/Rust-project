@@ -71,6 +71,10 @@ impl Config {
     /// 
     pub fn new() -> Result<Self> {
         // Resolve hashed function addresses for all required APIs
+        // 这里的cfg为什么是Config类型.fn winapis在impl Config中,其返回值是Self.所以其类型是Config
+        // 编译器不允许存在部分初始化的结构体实例,所有字段必须在实例化的那一刻被全部填充.这里fn winapis使用了结构体更新语法.首先对Config派生Default.在该函数末尾使用..Default::default()来默认填充
+        // 第一阶段仅解析api地址,生成cfg实列,此时 stack, callback,trampoline 为 0
+        // 在后续new()中执行第二阶段的二次覆盖
         let mut cfg = Self::winapis(Self::modules());
         // 初始化config中需要在运行时计算的字段
         cfg.stack = StackSpoof::new(&cfg)?;

