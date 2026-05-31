@@ -102,7 +102,7 @@ impl StackSpoof {
 
     /// Allocates memory required for spoofed stack execution.
     pub fn alloc_memory(cfg: &Config) -> Result<Self> {
-        // Check that the algo module contains a gadget `call [rbx]` or `jmp [rbx]`
+        // Check that the algo module contains a gadget `call [rbp]` or `jmp [rbp]` from kernelbase
         let kind = GadgetKind::detect(cfg.modules.kernelbase.as_ptr())?;
 
         // Allocate gadget code

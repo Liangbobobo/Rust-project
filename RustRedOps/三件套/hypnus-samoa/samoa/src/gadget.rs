@@ -1,3 +1,7 @@
+use core::ffi::c_void;
+
+use crate::error::Result;
+
 
 
 
@@ -40,5 +44,16 @@ Call,
 
 /// jmp [rbx] gadget
 jmp,
+
+}
+
+impl GadgetKind {
+    /// scans the specified image base for a supported control-flow gadget
+pub fn detect(base:*mut c_void)->Result<Self> {
+    
+}
+
+
+
 
 }

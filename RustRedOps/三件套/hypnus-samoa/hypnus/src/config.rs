@@ -191,6 +191,7 @@ impl Config {
         let ntdll = get_ntdll_address();
         let kernel32 = get_module_address(2808682670u32, Some(murmur3));
         let kernelbase = get_module_address(2737729883u32, Some(murmur3));
+        
         let load_library = get_proc_address(kernel32, 4066094997u32, Some(murmur3));
         let cryptbase = {
             let mut addr = get_module_address(3312853920u32, Some(murmur3));

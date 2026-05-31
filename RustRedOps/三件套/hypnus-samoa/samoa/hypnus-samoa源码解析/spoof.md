@@ -1,3 +1,13 @@
+- [Struct StackSpoof](#struct-stackspoof)
+- [申请第二个4k内存](#申请第二个4k内存)
+- [RtlUserThreadStart](#rtluserthreadstart)
+- [uwd::ignoring\_set\_fpreg](#uwdignoring_set_fpreg)
+- [StackSpoof中用到的四个函数](#stackspoof中用到的四个函数)
+- [\*(ctx\_spoof.Rsp as \*mut u64) = cfg.rtl\_acquire\_lock.as\_u64().add(0x17);](#ctx_spoofrsp-as-mut-u64--cfgrtl_acquire_lockas_u64add0x17)
+- [let (add\_rsp\_addr, add\_rsp\_size)](#let-add_rsp_addr-add_rsp_size)
+
+
+
 ## Struct StackSpoof
 
 ```rust
