@@ -2,7 +2,10 @@ use core::ffi::c_void;
 
 use crate::error::Result;
 
-
+use puerto::{helper::PE};
+// 本模块在项目中作用:主线程进入休眠时,要构建一条ROP执行链(修改内存属性->加密->延时->解密).为了让执行流能在os dll中合法的反复横跳,不能直接使用call敏感api.
+// 而是在合法的os dll(如 ntdll.dll/kernerlbase.dll)的.text/.pdata节中找到如jmp r10/jmp r11这些间接跳转的指令碎片(gadget)
+// 本文件的作用就是去os 中搜寻/匹配然后提供这些碎片的地址
 
 
 
@@ -28,7 +31,7 @@ pub struct Gadget{
 /// absolute virtual address of the gadget
 pub addr:u64,
 
-/// the register used in the junp instruction
+/// the register used in the jump instruction
 pub reg:Reg,
 }
 

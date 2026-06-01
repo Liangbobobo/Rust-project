@@ -1,11 +1,15 @@
-use core::{ ffi::c_void};
-use crate::types::{IMAGE_DIRECTORY_ENTRY_EXPORT, IMAGE_DOS_HEADER, IMAGE_EXPORT_DIRECTORY, IMAGE_NT_HEADERS, IMAGE_NT_SIGNATURE};
+use core::{ffi::c_void, slice::from_raw_parts};
+use crate::types::{
+    IMAGE_DIRECTORY_ENTRY_EXPORT, IMAGE_DOS_HEADER, IMAGE_EXPORT_DIRECTORY, IMAGE_NT_HEADERS,
+    IMAGE_NT_SIGNATURE, IMAGE_SECTION_HEADER,
+};
 // 将PE结构体抽象出来,是整个项目更加清晰
 /// 
 /// 这是一种设计模式,“类型状态模式” (Type State / Newtype Pattern) 或者简单的 “封装抽象”
 /// 
 // 这样做1.含义清晰(代表一个pe文件格式的内存)2.可以关联方法 3.零成本抽象(该结构体编译后,在内存中布局和*mut c_void是一样的,无额外内存开销及性能损耗) 4. 后续方便扩展
 // #[derive(Debug)] // realse版本中不应该用,会增加特征字符串/增加二进制体积,且无实际用途
+#[derive(Debug)]
 pub struct PE {
     /// Base address of the loaded module.
     pub base: *mut c_void,
@@ -51,6 +55,24 @@ impl PE {
 
         }
         
+    }
+
+    /// Returns all section headers in the PE.
+    pub fn sections(&self) -> Option<&[IMAGE_SECTION_HEADER]> {
+        unsafe {
+            let nt = self.nt_header()?;
+            let first_section = (nt as *const u8)
+                .add(size_of::<IMAGE_NT_HEADERS>()) as *const IMAGE_SECTION_HEADER;
+            Some(from_raw_parts(first_section, (*nt).FileHeader.NumberOfSections as usize))
+        }
+    }
+
+    /// Finds a section by its name.
+    pub fn section_by_name(&self, name: &str) -> Option<&IMAGE_SECTION_HEADER> {
+        self.sections()?.iter().find(|sec| {
+            let raw_name = unsafe { core::str::from_utf8_unchecked(&sec.Name) };
+            raw_name.trim_end_matches('\0') == name
+        })
     }
        
 }

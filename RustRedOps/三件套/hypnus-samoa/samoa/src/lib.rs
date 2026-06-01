@@ -8,6 +8,8 @@
     non_upper_case_globals // 全局变量/常量名警告
 )]
 
+extern crate alloc;
+
 pub mod error;
 pub mod types;
 pub mod allocator;
