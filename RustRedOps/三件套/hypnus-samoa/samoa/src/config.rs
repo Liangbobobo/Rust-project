@@ -62,7 +62,7 @@ impl Config {
 
     /// Resolves the base addresses of key Windows modules (`ntdll.dll`, `kernel32.dll`, etc).
     fn modules() -> Modules {
-        // ntdll/kernel32/kernelbase
+        /// ntdll/kernel32/kernelbase的基址
         let ntdll = get_ntdll_address();
         // 失败后通过unwrap_or(null_mut())降级返回空指针(不painc退出),契合源码逻辑
         let kernel32 = get_module_address(Some(1303842461u32), Some(fnv1a_utf16));

@@ -61,6 +61,10 @@ pub fn _print(args: fmt::Arguments) {
 // }
 
 /// 输出错误日志,代替源码中bail!(s!("NtCreateEvent Failed"))输出错误信息
+/// 
+/// 返回值是()空元组;不改变代码的执行方向
+/// 
+/// 如果要终止当前函数执行,并向上传播错误.需要配合HypnusError::GadgetNotFound使用(例子在gadget.rs/tables中)
 #[macro_export]
 macro_rules! debug_log {
     ($($args:tt)*) => {
@@ -90,6 +94,7 @@ pub enum HypnusError {
     // 框架错误
     InvalidArguments,
     ApiNotFound,
+    ExceptionTableNotFound,
     GadgetNotFound,
     ModuleNotFound,
 
@@ -105,6 +110,8 @@ pub enum HypnusError {
 // 所以用 `expr` 来捕获它们是完全正确的。
 
 /// 代替源码中anyhow::bail!
+/// 
+/// 使用debug_log!打印自定义的err错误信息,并执行return终止当前函数,向上层调用者返回自定义的err
 #[macro_export]
 macro_rules! stealth_bail {
     // 修复点: 改为 $($args:tt)* 以接收多个参数 (字符串模板 + 多个变量)
