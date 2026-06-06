@@ -12,3 +12,4 @@ uwd={path = "../../uwd-mariana/uwd"}
 windows-targets = "0.53.4"
 spin="0.11"
 obfstr = "0.4.4"
+memchr = { version = "2.8.1", default-features = false }

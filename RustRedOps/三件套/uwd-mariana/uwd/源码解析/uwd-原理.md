@@ -1,4 +1,5 @@
 - [背景知识](#背景知识)
+  - [执行流](#执行流)
   - [win64 异常处理机制及对应的uwd源码](#win64-异常处理机制及对应的uwd源码)
     - [.pdata](#pdata)
     - [IMAGE\_RUNTIME\_FUNCTION](#image_runtime_function)
@@ -36,6 +37,22 @@
 
 
 # 背景知识
+
+## 执行流
+
+// 将敏感函数地址放入r11中,通过jmp r11直接跳转执行.当敏感函数执行后调用ret,只会弹出8字节的返回地址,不会主动清理堆栈上的影子空间和参数数据.此外,ret前,rsp指向栈顶的返回地址,即AddRspXGadget(uwd/uwd.rs中在系统dll找到的add rsp, X; ret 机器码)的地址,该地址是准备阶段手动构造后写入当前栈顶的.
+// ret时,cpu将栈顶AddRspXGadget地址弹出赋给rip,同时rsp+8后,rsp指向废弃的影子空间.此时控制流进入AddRspXGadget，CPU执行 `add rsp,X`。该指令强行让栈指针向下平移 X个字节，完美跨越并丢弃了那片废弃的影子空间（及堆栈参数数据）
+// rsp跨越后指向在堆栈中预置的下一个返回地址JmpRbxGadget（合法系统DLL 中的 `jmp [rbx]` 机器码地址）.然后继续执行该gadget的ret,cpu将栈顶的JmpRbxGadget地址弹出给rip,控制流随之跳入并执行jmp [rbx].由于在伪造堆栈的初始阶段,让brx指向保存有RestoreSynthetic（底层的恢复现场代码）绝对地址的那个原始栈槽。因此,jmp [rbx]直接用过解引用,在不依赖当前堆栈下,隐蔽/安全的将控制流导回真实的恶意代码内部,最终RestoreSynthetic负责清理剩余的假栈帧并恢复真实的寄存器环境.
+
+
+// 敏感函数执行完毕ret时,cpu跳到`AddRspXGadget`释放当前的伪造栈帧,然后ret跳转到`JmpRbxGadget`.由于jmp不改变rsp,不压入返回地址.rsp不是指向kernelbase.dll!jmp [rbx](这是rip指向的可执行代码段).而是指向JmpRbxGadget宿主函数的堆栈空间(即JmpRbxGadget被pop后,栈指针指向其分配的栈帧区域).而rbx寄存器始终指向存放RestoreSynthetic(uwd/synthetic.asm:用于承接rbx,后续敏感api执行后,通过ROP链AddRspXGadget->JmpRbxGadget,最终执行系统dll中的jmp [rbx])绝对地址的那个原始栈槽.通过jmp [rbx]就能将控制流导回,即在敏感api执行后,安全的将控制流从伪造的系统栈帧导回真实的恶意代码中.原因是:如果敏感api执行后调用ret,如果直接返回到源码中,栈顶(即返回地址)必须是内存中处于不合法PE模块区域的恶意代码地址.那么敏感api处于执行或休眠时,如果edr引擎对该线程stack walk栈回溯,会发现这个栈顶地中没有关联任何合法磁盘pe文件(如系统dll),从而被判定为栈欺骗.因此,必须在执行前,将栈顶的返回地址伪造为合法的系统地址(AddRspXGadget),在敏感api执行完毕后,用AddRspXGadget释放假栈帧,再借助 jmp [rbx]的非压栈跳转特性,通过解引用rbx(其指向保存有  RestoreSynthetic  地址的栈槽),隐秘的跳回RestoreSynthetic.以此再不往栈中留下任何非法内存地址痕迹的前提下,安全的收入控制流.
+// 但是edr的回溯不仅检查当前执行指令是不是在合法的IAT中,还会检查函数的栈展开信息(.pdata节区保存).
+// 回溯引擎读取栈顶后,退栈一步发现返回地址是 kernelbase!JmpRbxGadget 的宿主函数（例如处于系统函数RtlpSearchExceptionHandlers  内部）.回溯引擎去.pdata中找gadget宿主函数的UNWIND_INFO,假设该函数在prologue中分配了0x30的栈帧.
+// 回溯继续,将rsp+0x30后读取对应地址的值.这里可能是对齐/垃圾/参数等数据,导致栈展开失败.因此在scan_runtime中用`ignoring_set_fpreg`过滤使用帧指针寄存器的函数,找到gadget宿主函数的UNWIND_INFO,并计算该宿主函数的栈帧大小.
+// 在uwd的synthetic.asm/SpoofSynthetic内伪造栈帧,并手动执行sub rsp,栈帧大小.用以模拟并匹配该宿主函数的UNWINDO_INFO栈展开规则,确保edr回溯时rsp+栈帧大小(加8字节返回地址)后,能落到下一个合法的栈帧,从而欺骗回溯引擎.
+// 然后在这个伪造的栈帧底部,填入下一个伪造的合法返回地址BaseThreadInitThunk以及RtlUserThreadStart,知道用0截断回溯链
+
+
 
 
 ## win64 异常处理机制及对应的uwd源码

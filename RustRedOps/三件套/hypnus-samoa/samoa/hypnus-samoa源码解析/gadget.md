@@ -1,3 +1,48 @@
+## const JMP_GADGET
+
+其内部字段用于主线程休眠期间,构建ROP链（ VirtualProtect  ->Encrypt  ->  NtDelayExecution  ->  Decrypt  ->  VirtualProtect）时，在各个 API 调用转折过渡阶段使用,用于进入下一个api
+
+以调用VirtualProtect为例:
+1. 在 OS 模块中搜寻 Gadget:在find()中遍历kernelbase.dll的.text节,通过memchr::memmem::find找到jmp r11的机器码(0x41, 0xFF, 0xE3)的地址.将地址和r11写入Gadget结构体
+2. 在构建栈帧和跳转时使用:在伪造栈并准备调用VirtualProtect 时,将VirtualProtect  所需的参数放进  rcx ,  rdx ,  r8 ,  r9(win fastcall).然后将VirtualProtect的实际函数入口地址移入r11.
+3. 安全跳转:不执行call r11(会在栈顶留下不合法的返回地址).而是把返回地址预置在栈上(设置为`AddRspXGadget` 的地址，即 `add rsp, X; ret`).然后执行jmp r11(从kernelbase.dll找到的gadget,隐匿调用源)
+4. JMP_GADGET独独没有用rbx:rbx用于最后控制流收尾时,安全返回恶意程序的唯一通道.
+以上,在edr视角,当敏感 API 正在执行并触发栈回溯（Stack Walk）时，检测引擎读取到的栈顶返回地址是 `AddRspXGadget`，这属于系统DLL（如 kernelbase.dll）内部合法的非叶子函数，且其前方的指令确实是合法的 `call`（绕过了Call-preceding 检查），从而认定该 API 调用历史是完全合法的，放行拦截
+
+
+
+## 注释1-栈展开
+
+### 栈展开（Unwind）的运作真相：
+
+  当 EDR 或者是系统的  RtlVirtualUnwind  开始回溯栈时，它的数学计算过程如下：
+
+    [步骤 1] EDR 看到栈顶的返回地址指向：ntdll!RtlpSearchExceptionHandlers +
+  0x120
+               ↓
+    [步骤 2] EDR 去查询系统注册的异常表（.
+  pdata），找到了这个函数的官方注册项。
+               ↓
+    [步骤 3] EDR 读取该函数真实的 UNWIND_INFO，上面写着官方数据：
+             "该函数在进入时，会执行 `sub rsp, 0x28`，即开辟 0x28
+  字节栈空间。"
+               ↓
+    [步骤 4] 关键的一步！EDR 的退栈计算：
+             "为了找到上一个调用者，我需要让当前的 RSP 寄存器加上 0x28
+  字节。"
+             计算：新的 RSP = 原 RSP + 0x28
+               ↓
+    [步骤 5] EDR 去读取 [新的 RSP] 地址处的值，作为上一个调用者的返回地址。
+
+  #### 我们的"欺骗"是如何配合的？
+
+  正因为我们在代码里通过  scan_runtime  事先知道了这个函数开辟的栈空间是
+  0x28 （40）字节：
+
+  • 我们在内存栈上，手动塞入了 40 字节的垃圾数据（对齐垫片）。
+  • 在这 40 字节的末尾，我们精准地填入了下一个伪造的返回地址（比如指向
+  kernel32!BaseThreadInitThunk ）
+
 ## region.as_ref().as_ptr() as usize 
 
 **在 Windows进程的虚拟内存空间中，一个指向内存数据的“指针”，它的数值本身就是那个数据的“绝对虚拟地址（VA）**

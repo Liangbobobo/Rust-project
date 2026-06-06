@@ -95,6 +95,10 @@ pub enum HypnusError {
     InvalidArguments,
     ApiNotFound,
     ExceptionTableNotFound,
+    SuitableCallJmpRbxGadgetNotFound,
+    FailedToReadImageRuntimeFunction,
+    NotFoundCallRbx,
+    NotFoundJmprbx,
     GadgetNotFound,
     ModuleNotFound,
 
@@ -204,7 +208,7 @@ mod tests {
 // 注释2:即使物理布局完全一致,rustc仍认为这是两种类型.因为rustc保证str底层每个字节都是合法且纯正的utf-8编码,从而可以实现一系列安全的操作unicode的方法.而[T]不提供任何语义上的保证(可以是图片数据/可以是机器码/乱码等等)
 
 // 注释3:Rust 中，HypnusError 中的InvalidArguments 这种不带任何数据的枚举变体，叫做单元变体（Unit Variant）.它们本身不携带任何附加信息不像 OsError(NTSTATUS)携带一个i32.所以不需要初始化.因为加了#[repr(C)]其物理实质变成一个 C 语言风格的Tagged  Union（标签联合体）
-// rust不允许使用未经初始化的变量.但这里只是声明/定义阶段,后续在使用时必须初始化.对于InvalidArguments这种不携带数据(单元变体)的变量在使用时写出全名就是一次完整的初始化,如stealth_bail!(HypnusError::InvalidArguments)
+// rust不允许使用未经初始化的变量.但这里只是声明/定义阶段,后续在使用时必须初始化.但对于InvalidArguments这种不携带数据(单元变体)的变量在使用时写出全名就是一次完整的初始化,如stealth_bail!(HypnusError::InvalidArguments)
 // let my_error = HypnusError::OsError(0xC0000005); return Err(my_error);
 
 // 注释4:这是一个newtype后续使用时会直接展开为=号右侧的定义

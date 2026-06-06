@@ -58,19 +58,40 @@ impl PE {
     }
 
     /// Returns all section headers in the PE.
+    /// 得到所有节区切片的引用,失败退出函数返回None
+    // &self代表一个PE结构体实例,其内部只存了一个base raw pointer.见注释1
+    // 返回值是一个option包裹的slice.rust中&[T]代表slice的引用.详见注释2
     pub fn sections(&self) -> Option<&[IMAGE_SECTION_HEADER]> {
         unsafe {
+            // nt代表pe的nt头=*const IMAGE_NT_HEADERS
             let nt = self.nt_header()?;
-            let first_section = (nt as *const u8)
+            
+            // 
+            let first_section = 
+            // nt头从IMAGE_NT_HEADERS强转为字节指针
+            (nt as *const u8)
+                // 对nt头指针移动(add)size_of(IMAGE_NT_HEADERS)个字节,跨越nt头到达第一个节头的首字节
                 .add(size_of::<IMAGE_NT_HEADERS>()) as *const IMAGE_SECTION_HEADER;
+
+            // nt头中FileHeader字段中的NumberOfSections代表节区数量(类型是u16,需要转为usize),以满足from_raw_parts构造slice的要求
             Some(from_raw_parts(first_section, (*nt).FileHeader.NumberOfSections as usize))
         }
     }
 
     /// Finds a section by its name.
+    /// 
+    /// 返回的是节区头结构体(和节区实际数据区是分离的),40字节,里面记录了节区名字/RVA(距离pe/dll文件的相对偏移)
     pub fn section_by_name(&self, name: &str) -> Option<&IMAGE_SECTION_HEADER> {
+        
         self.sections()?.iter().find(|sec| {
-            let raw_name = unsafe { core::str::from_utf8_unchecked(&sec.Name) };
+            let raw_name = unsafe {
+                
+                // win PE结构中,IMAGE_SECTION_HEADER的Name字段类型是[u8;8],这8个字节如果不满以\0 结尾,能够占满就不以\0结尾
+                // 关于编码格式:rust里面都是utf-8编码.from_utf8会在运行时进行utf8格式校验.from_utf8_unchecked不校验
+                // 合理性:PE文件格式中节区名称(.text等)绝大多数都是ascii(是utf8的子集),天然支持
+                 core::str::from_utf8_unchecked(&sec.Name) };
+
+                 // 内存对齐与填充:将内部的\0剥离
             raw_name.trim_end_matches('\0') == name
         })
     }
@@ -124,3 +145,19 @@ impl <'a> Exports<'a> {
 
     }
 }
+
+
+
+
+// 注释1
+// 为什么只传入一个base raw pointer就能代表一个pe结构体实例?
+// win的底层开发中,经常只用一个*mut c_void(模块基址/win api中的HMOUDLE/Imagebase)代表整个PE结构体实例
+// PE文件在内存中的布局是资办函的相对拓扑解构,只要确定基址(起点),pe内部其他数据解构都能通过RVA+偏移量的方式动态计算出来
+// 因此,项目中把base放入PE结构体中的一个字段,该结构体在编译后其内存大小仅8字节,和raw pointer一致;后续通过impl的各种方法解构PE文件的各个结构
+
+
+
+// 注释2:数组的引用和切片的引用
+// 数组引用:&[u8;10](8字节).普通的8字节单指针
+// 切片引用:&[T]:16字节的胖指针(8字节地址+8字节长度)
+// 相互转换:rustc可以隐式强制转换,将一个数组引用转为slice引用

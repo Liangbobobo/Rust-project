@@ -791,14 +791,14 @@ pub fn stack_frame(module: *mut c_void, runtime: &IMAGE_RUNTIME_FUNCTION) -> Opt
 }
 
 /// Computes the total stack frame size of a function while ignoring any `setfp` frames. 
-/// Useful for identifying spoof-compatible RUNTIME_FUNCTION entries.
+/// Useful for identifying spoof-compatible RUNTIME_FUNCTION entries. 
 pub fn ignoring_set_fpreg(module: *mut c_void, runtime: &IMAGE_RUNTIME_FUNCTION) -> Option<u32> {
     unsafe {
 
-        // 指向UNWIND_INFO结构体
+        // 指向UNWIND_INFO结构体(pe文件的.rdata节,独立结构体)
         let unwind_info = (module as usize + runtime.UnwindData as usize) as *mut UNWIND_INFO;
 
-        // 跳过UNWIND_INFO前4个字节,指向真正的操作码数组
+        // 跳过UNWIND_INFO前4个字节,指向真正的操作码数组(UNWIND_INFO.UnwindCode)
         let unwind_code = (unwind_info as *mut u8).add(4) as *mut UNWIND_CODE;
         // 以上,win规定,prolog中每一条修改rsp或保存寄存器的指令,都必须在此处有一个对应的操作码
 
@@ -811,7 +811,7 @@ pub fn ignoring_set_fpreg(module: *mut c_void, runtime: &IMAGE_RUNTIME_FUNCTION)
         // 该函数每解析一个涉及栈增长的操作码,将对应的字节数加到total_stack.最终会得到需要的函数栈帧深度,即增加了多少字节
         let mut total_stack = 0u32;
 
-        // CountOfCodes 表示UNWIND_CODE数组中有多少元素
+        // CountOfCodes(unwidn_info.countofcodes) 表示UNWIND_CODE数组中有多少元素
         while i < (*unwind_info).CountOfCodes as usize {
             // Accessing `UNWIND_CODE` based on the index
             // add(i)指针算数运算,将指针向后移动i个UNWIND_CODE结构体宽度()
@@ -822,7 +822,9 @@ pub fn ignoring_set_fpreg(module: *mut c_void, runtime: &IMAGE_RUNTIME_FUNCTION)
             let op_info = (*unwind_code).Anonymous.OpInfo() as usize;
             let unwind_op = (*unwind_code).Anonymous.UnwindOp();
 
-            // 根据不同的栈操作,调整对应的寄存器
+            // IMAGE_RUNTIME_FUNCTION 中的 UnwindData 字段是一个 RVA，指向内存中的UNWIND_INFO 结构体
+            // UNWIND_INFO.UNWIND_CODE.Anonymous代表一条 Prolog 汇编指令的完整回退记录(一个16位数),UNWIND_OP_CODES是其中8-11位的枚举.用于指代不同的栈操作(压栈/分配空间等)
+            // 根据不同的栈操作,调整对应的寄存器:在UNWIND_INFO结构体中,所有操作码都是存放在一个连续的UNWIND_CODE数组中,由于不同的汇编指令复杂度,占用的slot也不同(slot是存储UNWIND_CODE的基本内存单元,16位)
             match UNWIND_OP_CODES::try_from(unwind_op) {
                 // Saves a non-volatile register on the stack.
                 //
@@ -832,7 +834,7 @@ pub fn ignoring_set_fpreg(module: *mut c_void, runtime: &IMAGE_RUNTIME_FUNCTION)
                         return None;
                     }
 
-                    // 虽然UWOP_PUSH_NONVOL是16位,但此时函数栈的操作是push只针对寄存器,而寄存器是8位的
+                    // 虽然UWOP_PUSH_NONVOL是16位,但此时函数栈的操作是push只针对寄存器,而寄存器是64位,8字节的
                     total_stack += 8;
                     i += 1;
                 }
