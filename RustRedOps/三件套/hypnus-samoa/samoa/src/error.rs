@@ -1,3 +1,6 @@
+// 这里自定义了debug_log!和steal_bail!,尽量使用steal_bail!.因为release下debug_log!不会出现,在真实环境出现的错误steal_bail!会返回自定义的错误代码,用于从源码中定位具体的错误位置
+
+
 // 背景知识:详见Rust Grammar and winx64 abi中fmt,有很多尚未理解
 // ConsoleWriter->_print->debug_log!
 

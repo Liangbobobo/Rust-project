@@ -1,3 +1,7 @@
+# Gadget.md
+
+是对samoa/src/gadget.rs中注释的补充
+
 ## const JMP_GADGET
 
 其内部字段用于主线程休眠期间,构建ROP链（ VirtualProtect  ->Encrypt  ->  NtDelayExecution  ->  Decrypt  ->  VirtualProtect）时，在各个 API 调用转折过渡阶段使用,用于进入下一个api

