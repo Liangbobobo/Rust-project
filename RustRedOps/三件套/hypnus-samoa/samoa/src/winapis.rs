@@ -325,6 +325,8 @@ pub fn NtProtectVirtualMemory(
 }
 
 /// Wrapper for the `NtQueryInformationProcess` API.
+/// 
+/// 动态调用而不是link/windows-rs等静态链接,避免在IAT中留下痕迹
 #[inline]
 pub fn NtQueryInformationProcess(
     ProcessHandle: HANDLE,
