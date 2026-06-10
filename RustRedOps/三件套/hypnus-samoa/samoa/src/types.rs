@@ -20,6 +20,11 @@ pub const VM_LOCK_1: u32 = 0x0001;
 pub const HEAP_GROWABLE: u32 = 0x00000002;
 
 /// 映射官方PROCESS_MITIGATION_POLICY_INFORMATION结构体;用于检测当前进程是否开启CFG(Control Flow Guard)
+/// 
+/// 其原型winnt.h中的PROCESS_MITIGATION_POLICY_INFORMATION:即调用底层安全策略查询api(NtQueryInformationProcess)时传入的结构体原型.其原型定义十分复杂.其中ControlFlowGuardPolicy(c中的union字段)时一个32位位域bitfield.红队工具没有必要完全移植这个结构体(原型有几百行),从内存本质角度:不管原型union有多少策略,union的内存共享特性,它里面的所有结构体大小都是DWORD 32位的.即在内存的真实物理布局中,就是连续的8字节.内核把所有状态位都压缩在ExtendedProcessInfoBuffer在各个32位整数中,cfg关闭这个数值是0,开启则为1
+/// 
+/// EXTENDED_PROCESS_INFORMATION （及其对应的官方原型PROCESS_MITIGATION_POLICY_INFORMATION ）绝对不定义在 PE 文件中.这涉及内存运行时状态和硬盘静态文件结构的区别.它是存粹的运行时内存数据,函数调用结束这个结构体就结束了.这个结构体定义在winnt.h头文件中,微软官方定义.
+/// 但是编译器会在pe文件中留下cfg白名单,pe文件存储cfg白名单的结构体是可选头->Data Directory(数据目录表)->IMAGE_LOAD_CONFIG_DIRECTORY （加载配置目录）中
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
 pub struct EXTENDED_PROCESS_INFORMATION {

@@ -89,6 +89,8 @@ use crate::types::NTSTATUS;
 /// 这里Result<T>的错误类型被硬编码为了 HypnusError.调用任何返回其他错误类型（如  core::str::Utf8Error)必须通过  .map_err()  将外部错误显式且手动地映射为  HypnusError的某个变体，然后才能使用  ? 详见注释
 pub type Result<T> = core::result::Result<T, HypnusError>;
 
+/// 如果这个enum加上#[derive(Debug)],enum的字段名称作为明文硬编码在.rdata只读数据段中.这会在反编译中暴露信息
+/// 且在cargo.toml中 release编译配置[profile.release]加入strip = "symbols":剥离符号表和调试信息;加入panic = "abort":panic时进程直接退出,不执行可能泄露文件路径/函数名的panic回溯机制
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
 pub enum HypnusError {
@@ -100,6 +102,7 @@ pub enum HypnusError {
     ExceptionTableNotFound,
     SuitableCallJmpRbxGadgetNotFound,
     FailedToReadImageRuntimeFunction,
+    NtQueryInformationProcessFailed,
     NotFoundCallRbx,
     NotFoundJmprbx,
     GadgetNotFound,
@@ -119,6 +122,8 @@ pub enum HypnusError {
 /// 代替源码中anyhow::bail!
 /// 
 /// 使用debug_log!打印自定义的err错误信息,并执行return终止当前函数,向上层调用者返回自定义的err
+/// 
+
 #[macro_export]
 macro_rules! stealth_bail {
     // 修复点: 改为 $($args:tt)* 以接收多个参数 (字符串模板 + 多个变量)
