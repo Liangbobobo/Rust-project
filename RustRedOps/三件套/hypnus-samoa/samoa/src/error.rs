@@ -103,6 +103,7 @@ pub enum HypnusError {
     SuitableCallJmpRbxGadgetNotFound,
     FailedToReadImageRuntimeFunction,
     NtQueryInformationProcessFailed,
+    FaileToAllocateMemoryForGadgetCode,
     NotFoundCallRbx,
     NotFoundJmprbx,
     GadgetNotFound,

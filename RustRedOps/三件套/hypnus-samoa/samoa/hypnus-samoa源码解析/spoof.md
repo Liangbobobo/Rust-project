@@ -1,3 +1,4 @@
+- [异常目录在发生异常的回溯机制](#异常目录在发生异常的回溯机制)
 - [Struct StackSpoof](#struct-stackspoof)
 - [申请第二个4k内存](#申请第二个4k内存)
 - [RtlUserThreadStart](#rtluserthreadstart)
@@ -7,6 +8,17 @@
 - [let (add\_rsp\_addr, add\_rsp\_size)](#let-add_rsp_addr-add_rsp_size)
 
 
+## 异常目录在发生异常的回溯机制
+
+win在loader指定程序exe及其dll时,将每个模块的内存范围和对应的异常表(IMAGE_RUNTIME_FUNCTION,在.pdata节)登记到内核级的 全局反向函数表（LdrpInvertedFunctionTable）中.该表明确划分了内存地址范围对应的模块.当异常发生/edr主动检查时时:
+1. 定位:用当前崩溃的内存地址(rip指针)去全局花名册找该地址属于哪个模块
+2. 去该模块专属的IMAGE_RUNTIME_FUNCTION异常表中查当前函数如何退栈
+3. 提取上一层调用者返回地址.用新的返回地址再次回到第一步,直至回溯到线程最底层起点(如 RtlUserThreadStart)
+
+**edr视角的异常:**
+1. 正常软件调用栈一定是连贯的,如果edr回溯发现某个返回地址不再全局花名册(如 落在未注册的匿名内存).edr判定为无头shellcode
+2. 对此,edr要么使用调用栈伪造call stack spoofing:把自己的木马伪装在合法连贯的系统函数调用链之下(spoof.rs使用的方式)
+3. 要么用RtlAddFunctionTable,把自己伪造的异常表塞进系统全局花名册,让操作系统把木马当作合法的.这里需要继续展开
 
 ## Struct StackSpoof
 

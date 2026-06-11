@@ -281,6 +281,8 @@ pub fn NtLockVirtualMemory(
 }
 
 /// Wrapper for the `NtAllocateVirtualMemory` API.
+/// 
+/// 使用了uwd的syscall!调用对应的os api
 pub fn NtAllocateVirtualMemory(
     ProcessHandle: HANDLE,
     BaseAddress: *mut *mut c_void,

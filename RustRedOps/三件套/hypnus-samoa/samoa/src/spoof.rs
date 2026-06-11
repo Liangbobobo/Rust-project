@@ -15,6 +15,7 @@ use puerto::types::{CONTEXT, IMAGE_DIRECTORY_ENTRY_EXCEPTION, IMAGE_RUNTIME_FUNC
 use puerto::{winapis::{NtCurrentProcess,NT_SUCCESS},
 helper::PE,
 };
+use crate::{types::*,};
 use crate::gadget::{GadgetKind};
 use crate::winapis::{
 NtLockVirtualMemory,
@@ -38,22 +39,26 @@ impl Unwind {
 
 /// return all runtime function entries
 /// 
+/// 作用:
 /// 语法:&[IMAGE_RUNTIME_FUNCTION]:使用&[T]详见注释2
 pub fn entries(&self)->Option<&[IMAGE_RUNTIME_FUNCTION]> {
     
-    /// pe->ntheader->ntheader.use PE的同时,也自动引入了对应的inherent methods.详见注释3
+    /// pe->ntheader;use crate::helper::PE的同时,也自动引入了在puerto中PE对应的inherent methods.详见注释3
     let nt = self.pe.nt_header()?;
 
-    /// ntheader->optionalheader->datadirectory(是一个16个元素的数组,每个元素是Image_Data_Directory类型,其中第3个指向Image_Runtime_Function,结构体为异常目录):异常目录是os用于stack walk栈回溯/SEH,详细记录了函数的栈/寄存器使用情况
+    /// ntheader->optionalheader(IMAGE_OPTIONAL_HEADER64)->datadirectory(IMAGE_DATA_DIRECTORY):(是一个16个元素的数组,每个元素是Image_Data_Directory类型,其中第3个指向Image_Runtime_Function,异常目录):异常目录是os用于stack walk栈回溯/SEH,详细记录了函数的栈/寄存器使用情况.其中VirtualAddress是起始地址,Size是总大小.Size/size_of::<IMAGE_RUNTIME_FUNCTION>就是指定dll中的所有非叶子函数
+    /// 
+    /// 注意静态pe文件和运行时镜像之前的区别:这里只指向IMAGE_RUNTIME_FUNCTION 的起始地址,在实际编译一个dll(如ntdll.dll,其中有几千个函数),编译器在.pdata截取把这几千个IMAGE_RUNTIME_FUNCTION 顺序排列在内存中.
     let dir = unsafe {
         (*nt).OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION]
     };
     
     if dir.VirtualAddress==0 || dir.Size== 0 {
+        debug_log!("Image_Runtime_Function address or size is empty");
         return None;
     }
     
-    /// 异常目录的地址
+    /// 异常目录的地址:IMAGE_DATA_DIRECTORY.VirtualAddress指向的就是IMAGE_RUNTIME_FUNCTION (每个IMAGE_RUNTIME_FUNCTION 记录程序中某个函数的起始/结束地址,及回溯UnwindData信息)
     let addr =(self.pe.base as usize + dir.VirtualAddress as usize) as *const IMAGE_RUNTIME_FUNCTION ;
     /// 异常目录的长度(Size是struct IMAGE_DATA_DIRECTORY的一个字段)
     let len = dir.Size as usize / size_of::<IMAGE_RUNTIME_FUNCTION>();
@@ -63,12 +68,10 @@ Some(unsafe {
     from_raw_parts(addr, len)
 })
 
-
-
 }
 
-/// Finds a runtime function by its RVA.
-/// offset(RVA):使用puerto的函数算出来的VA-对应模块的基址
+/// Finds a runtime function by its RVA:找到指定函数的IMAGE_RUNTIME_FUNCTION信息
+/// offset(RVA):使用puerto::GetProcAddress找到的是目标函数在内存中的真实起始地址.用这个真实起始地址减去模块基址,得到了指定函数在异常目的起始偏移量,即这里的参数offset
  pub fn function_by_offset(&self, offset: u32) -> Option<&IMAGE_RUNTIME_FUNCTION> {
         self.entries()?.iter().find(|f| f.BeginAddress == offset)
     }
@@ -103,15 +106,50 @@ gadget:GadgetKind,
 
 impl StackSpoof {
     
-    #[inline]
+  #[inline]
   pub  fn new(cfg:&Config)->Result<Self> {
+
+    
         todo!()
     }
 
     /// allocates memory required for spoof stack execution
 pub fn alloc_memory(cfg:&Config)->Result<Self> {
-    // Check that the algo module contains a gadget `call [rbp]` or `jmp [rbp]` from kernelbase.什么是kernelbase 见注释1
-    
+    // Check that the algo算法 module contains a gadget `call [rbp]` or `jmp [rbp]` from kernelbase.为什么是kernelbase 见注释1
+    let kind = GadgetKind::detect(cfg.modules.kernelbase.as_ptr())?;
+
+    // allocate gadget code:将指定opcode封装在静态字节流中(&`static [u8])
+let bytes = kind.bytes();
+
+// 作为NtAllocateVirtualMemory返回的分配后的内存地址
+let mut gadget_code = null_mut();
+
+// 将1左移12位,得到十进制是4096的i32数:NtAllocateVirtualMemory的参数,表示分配的内存大小.即4K
+let mut code_size = 1<<12;
+
+// 
+ if !NT_SUCCESS(NtAllocateVirtualMemory(
+            NtCurrentProcess(), 
+            &mut gadget_code, 
+            0, 
+            &mut code_size, 
+            MEM_COMMIT | MEM_RESERVE, 
+            PAGE_READWRITE
+        )) {
+            stealth_bail!(crate::error::HypnusError::FaileToAllocateMemoryForGadgetCode,"failed to allocate memory for gadget code");
+        }
+
+
+    // 将bytes的opcode写入内存(申请的第一块内存中(gadget_code))
+    // 为什么使用copy_nonoverlapping见注释4
+unsafe {
+    core::ptr::copy_nonoverlapping(bytes.as_ptr(), gadget_code as *mut u8, bytes.len());
+}
+
+// change protection to rx for execution
+
+
+
     todo!()
 }
 
@@ -137,5 +175,16 @@ pub fn alloc_memory(cfg:&Config)->Result<Self> {
 
 
 // 注释3
-// pe的类型是通过use puerto::helper::PE引入的.所用通过impl PE实现的固有方法Inherent methods会自动引入该模块(不需要也不能单独use某个具体的方法)
+// pe的类型是通过use puerto::helper::PE引入的.所用通过impl PE实现的固有方法Inherent methods会自动引入该模块(不需要也不能单独use引入某个具体的方法)
 // inherent methods:直接写在impl块中的.对于trait方法则必须通过use trait来实现
+
+
+// 注释4
+// core::ptr::copy =C 语言的  memmove(倒着复制);core::ptr::copy_nonoverlapping  = C 语言的  memcpy
+// nonoverlapping(无重叠):向编译器保证,源内存(bytes)和目标内存(gadget_code)在空间上绝不会交叉重叠.什么是交叉重叠?为什么交叉重叠下倒着复制不会覆盖未拷贝数据?
+// 交叉重叠:在python/java等环境下,当需要复制一段数据,底层会自动申请一块全新/互不干涉的内存.但在c/c++/rust中,为了极致性能,在同一块内存缓冲区就地操作数据(插入/处理网络数据包时),而不是申请新的内存.向一块内存写入数据时,假设源内存占用2-6的位置,目标内存需要4-8的位置.那么4-6的位置既是源区域的一部分,也是目标区域的一部分.源和目的区域就会出现重叠
+// 常规的正向复制:从左到右,会发生数据覆盖.逆向复制可疑解决这个问题
+// 普通的copy可能会有重叠情况,因此rustc在每次拷贝前都要做复杂的边界检查,了解目标区域没有覆盖源区域.如果覆盖了,它必须倒着复制,防止把还没有拷贝的数据给覆盖掉,速度较慢.
+// 这里使用的copy_nonoverlapping:编译器取消上述检查机制,调用cpu底层向量化指令(如AVX/SIMD),把内存字节高效的强行冲刷进去,速度极快.但如果有重叠,会导致素数孙华,引发UB.但在本文件中,bytes是准备好的opcode,gadget_code 是在内存新申请的,二者绝不可能重叠
+// 相对调用WriteProcessMemory/RtlCopyMemory等api向内存写入数据,core::ptr::copy_nonoverlapping不留下IAT,避免因edr hook敏感api被发现.因为它只是一个编译器内置指令Intrinsic,在编译出的.exe中,它会被翻译成底层的cpu指令.hook只能挂在API层面,对于cpu的汇编指令级别的内存读写,完全不知道在内存中写入了一段gadget代码
+// 以上,如果能确定源/目标数据是不同内存中的,就绝不会有交叉,就可用copy_nonoverlapping （memcpy），享受极致性能.如果是同一数组/同一buffer中左右移动的情况,就必须使用copy memmove来让os判断正向/逆向挪动,避免被数据覆盖.

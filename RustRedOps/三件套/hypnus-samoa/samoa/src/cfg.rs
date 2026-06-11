@@ -69,7 +69,7 @@ if !NT_SUCCESS(status) {
 }
 
 
-/// Adds a valid CFG call target for the given module base and target function.
+// Adds a valid CFG call target for the given module base and target function.
 
 
 
