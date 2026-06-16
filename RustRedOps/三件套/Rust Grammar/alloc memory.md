@@ -1,27 +1,39 @@
-# 从底层到高层的内存
+- [Alloc Memory](#alloc-memory)
+  - [从底层到高层的内存](#从底层到高层的内存)
 
-从最原始的地基——物理内存开始，一层层向上构建到Rust 的 GlobalAlloc 抽象。
 
-第一层：地基 —— 虚拟内存与页（Virtual Memory & Pages）在系统底层，程序看到的内存全是“假”的。
+
+# Alloc Memory
+
+
+
+
+## 从底层到高层的内存
+
+从最原始的物理内存开始，一层层向上构建到Rust 的 GlobalAlloc 抽象。
+
+**第一层：地基 —— 虚拟内存与页（Virtual Memory & Pages）.在系统底层，程序看到的内存全是“假”的(虚拟内存)。**
 
 1. 物理内存 (RAM)：真实的硬件电信号存储单元。
 2. 虚拟内存 (VA)：操作系统给每个进程画的 128TB（64位系统）的大饼。
 3. 内存管理单元 (MMU)：硬件层面的转换器。它通过页表 (Page Tables)将你的虚拟地址映射到物理地址。
-4. 页 (Page)：操作系统管理内存的最小单位，通常是 4KB。
+4. 页 (Page)：操作系统管理内存的最小单位，通常是 4KB.但win下VirtualAlloc 预留Reserve虚拟地址空间时,最小粒度是64kb
   * 所有的内存操作最终都要归结为：申请页 -> 设置页权限 (RWX) ->读写页。
   * RedOps视角：所有的检测（EDR）和规避（Bypass）都在页权限上做文章。比如PAGE_EXECUTE_READ（代码段）和 PAGE_READWRITE（数据段）。
+  * 内存除了RWX权限,还有一个出身证明,普通堆分配/VirtualAlloc申请的内存,Type都是MEM_PRIVATE 私有内存.EDR对MEM_PRIVATE + PAGE_EXECUTE_READ内存及其敏感.因为正常的代码(如dll中的代码)是由系统加载的,其类型是MEM_IMAGE.如果木马只更改RWX权限,没有管Type.会直接被发现.该概念在三件套中没有匹配,需要自己扩展.
 
-第二层：建筑师 —— 堆管理器 (The Heap Manager)如果你每次需要 16 字节都要找内核（NtAllocateVirtualMemory）要一个 4KB的页，那是极大的浪费。于是有了堆（Heap）。
+**第二层：建筑师 —— 堆管理器 (The Heap Manager)如果你每次需要 16 字节都要找内核（NtAllocateVirtualMemory）要一个 4KB的页，那是极大的浪费。于是有了堆（Heap）**
+
 1. 堆是什么？堆是一个内存池管理器。它向内核批发一大块内存（Pages），然后零售给程序。
-   1. Windows NT Heap (ntdll.dll)：
+   1.1 Windows NT Heap (ntdll.dll)：
        * Windows 核心的堆管理引擎是 Rtl 系列函数（RtlCreateHeap,RtlAllocateHeap）。
        * 它负责处理内存碎片、合并空闲块、多线程竞争等极其复杂的逻辑。
-   2. 私有堆 vs 默认堆：
+   1.2 私有堆 vs 默认堆：
        * 每个进程都有一个默认堆（GetProcessHeap()）。
        * hypnus 选择用 RtlCreateHeap 创建私有堆。
        * 使用场景：隔离。如果你的 Shellcode崩溃了，或者你想一次性加密所有恶意数据，私有堆让你能“一网打尽”而不干扰进程的其他部分。
 
-第三层：桥梁 —— Rust 的 GlobalAlloc 抽象:Rust 是一门追求零开销抽象的语言，它对内存分配的需求非常克制。
+**第三层：桥梁 —— Rust 的 GlobalAlloc 抽象:Rust 是一门追求零开销抽象的语言，它对内存分配的需求非常克制。**
 
 1. alloc Crate：Rust 内置的 core 库没有内存分配能力。当你使用 Vec,Box, String 时，你需要 alloc 库，而它要求你必须指定一个全局分配器(`#[global_allocator]`)。
    1. Layout 结构体：Rust 分配内存时不仅要 size，还要 align（对齐）。
@@ -29,6 +41,7 @@
        * 底层内幕：不正确的对齐会导致 CPU执行效率下降，甚至在某些架构（如 ARM）上直接崩溃。
    2. GlobalAlloc 特质 (Trait)：这是 Rust 给开发者的“插槽”
        * 只要你实现了 alloc 和 dealloc 这两个方法，你就可以接管整个 Rust程序的内存生命周期。
+       * 指定了这个分配器,那么系统默认分配器呢?它们之间是如何选择的?
 
 
 
