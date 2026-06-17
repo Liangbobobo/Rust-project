@@ -5,7 +5,9 @@
 - [uwd::ignoring\_set\_fpreg](#uwdignoring_set_fpreg)
 - [StackSpoof中用到的四个函数](#stackspoof中用到的四个函数)
 - [\*(ctx\_spoof.Rsp as \*mut u64) = cfg.rtl\_acquire\_lock.as\_u64().add(0x17);](#ctx_spoofrsp-as-mut-u64--cfgrtl_acquire_lockas_u64add0x17)
+- [cfg.base\_thread.as\_u64().add(0x14);](#cfgbase_threadas_u64add0x14)
 - [let (add\_rsp\_addr, add\_rsp\_size)](#let-add_rsp_addr-add_rsp_size)
+- [扩展rip rsp](#扩展rip-rsp)
 
 
 ## 异常目录在发生异常的回溯机制
@@ -308,6 +310,96 @@ edr扫描伪造栈时,不仅看返回地址指向哪个函数,还会执行反向
 2. 通过将返回地址设为0x17,在内存中伪造了在ntdll!RtlAcquireSRWLockExclusive的第23字节处(0x17)执行完了一次调用,之后会返回
 3. edr顺着上一个ZwWaitForWork 向上回溯时,会到RtlAcquireSRWLockExclusive + 0x17处.edr会检查这个地址的前几个字节,而因为0x17处之前在ntdll中确实是一个合法指令(call一个子函数),edr会认为这个调用链是系统调用系统
 4. 这种正在处理同步锁的状态是os中常见的背景噪音,edr的启发式引擎会给这种栈分配极高的信誉信任,而跳过深层次的内存扫描
+5. 此时RtlAcquireSRWLockExclusive的栈帧并没有载入当前栈中:EDR或系统栈回溯器(RtlvirtualUnwind)在扫描栈时,只关心返回地址,它不关心也不能检查函数内部局部变量
+6. 这套伪造的栈,cpu根本不会执行.只是把伪造的函数地址放入栈上,根本没有执行指令.
+7. 在线程被唤醒的时候,工作线程已经通过NtSetContextThread将主线程的rsp重新改回原始高地址.
+
+
+
+
+##  cfg.base_thread.as_u64().add(0x14);
+
+当cpu执行call rax指令进入子函数时,硬件会自动将call指令的下一条指令地址(BaseThreadInitThunk + 0x14)作为返回地址压入栈顶.因此,当线程再运行/挂起休眠时,栈上遗留的返回地址必须指向call的下一条指令.
+
+
+
+
+现代edr在stack walking时,不仅检查返回地址是否属于合法dll,还检查该地址在函数内部合理性.如果返回地址与call无关的指令地址,edr告警.此处指向0x14处的mov ecx,eax.能欺骗edr和系统展开器RtlVirtualUnwind.当前线程之前是由BaseThreadInitThunk发起的函数调用.
+
+```c
+void __fastcall BaseThreadInitThunk( DWORD unknown, LPTHREAD_START_ROUTINE entry, void *arg )
+{
+    RtlExitUserThread( entry( arg ) );
+}
+```
+1. __fastcall:win32下前两个参数通过ecx edx传递;win64下所有函数调用默认都是隐式的__fastcall
+2. 以win64为例:该函数有3个参数,unknow对应rcx,代表系统内部标志位,用户态线程通常为1;entry对应rcx,函数指针,指向用CreatThread时传入的真正的线程函数(如恶意载荷入口/正常业务代码);arg对应r8,传给线程入口函数的自定义参数指针(CreatThread的最后一个参数lpParameter)
+3. 函数体内 entry( arg ) ,执行到这里时,调用用户编写的线程函数,将参数arg传给它,此时控制权交给用户.
+4. 用户写线程函数执行完毕/用户忘记在代码最后调用ExitThread:它的返回值(一个DWORD退出码)被传给RtlExitUserThread.由RtlExitUserThread发起ring 0系统调用NtTerminateThread,通知win内核回收堆栈\TEB等资源.
+
+
+**Rsp存放的是一个内存地址(即当前栈顶在ram中的位置,相当于c的指针).  
+返回地址是存放在rsp指向的内存中的内容,该内容是函数的地址**
+
+以上,进入BaseThreadInitThunk时,它的三个参数分别在rcx rdx r8中.
+
+
+BaseThreadInitThunk的反汇编代码:
+
+| 偏移量 | 机器码 | 指令 | 注释 |
+|--------|--------|------|------|
+| 0x00 | 48 83 ec 28 | sub rsp, 28h | 申请栈空间 (32字节影子空间 + 8字节对齐) |
+| 0x04 | 48 8b c2 | mov rax, rdx | 将线程参数放入RAX |
+| 0x07 | 33 d2 | xor edx, edx | |
+| 0x09 | 48 8b cb | mov rcx, rbx | |
+| 0x0c | ff d0 | call rax | ◄── 调用真正的线程入口函数（执行我们的代码） |
+| 0x0e | 90 | nop | （根据系统版本不同，可能有微小填充） |
+| ... | ... | ... | |
+| 0x14 | 8b c8 | mov ecx, eax | ◄── 偏移量 0x14 处的指令：保存线程返回的退出码 |
+| 0x16 | ff 15 xx xx xx xx | call RtlExitUserThread | 调用线程退出函数 |
+
+上述的汇编代码,是微软MSVC编译器,在编译win的kernel32.dll时,根据c语言的逻辑,自动决定使用哪些寄存器(如 rax暂存函数指针,rbx备份参数),并生成这些机器码指令.之后由cpu执行.
+
+[扩展rip rsp](#扩展rip-rsp)
+
+该反汇编代码包含函数序言 函数体 收尾:
+1. 序言:0x00: sub rsp, 28h,其目的开辟空间,对齐内存.如果函数要修改非易失性寄存器(如 rbx),一般会把rbx压栈备份(push rbx),如果仅仅是读取rbx就不会压栈.
+2. 例外,即使修改非易失性寄存器,现代MSVC也不一定压栈.因为,win64下,函数序言一开始通过sub rsp,28h分配足够多栈空间.编译器更倾向用mov将非易失性寄存器被分到已分配的栈帧中.使用结束后再还原这些使用的非易失性寄存器.这么做可以使rsp在整个函数体执行期间保持固定,便于系统进行异常展开SEH Unwind和调试
+3. 当用户代码执行到最后一行ret,cpu: 1从当前栈顶读取压入的返回地址(BaseThreadInitThunk + 0x14),并送入rip.2将rsp + 8:弹出栈
+4. BaseThreadInitThunk + 0x14处是BaseThreadInitThunk执行时的cpu的rip地址,此处对应的机器码mov ecx,eax.不是rsp这个总是指向栈顶的地址
+5. 子函数执行完最后一行的ret时,cpu从栈顶读取返回地址BaseThreadInitThunk + 0x14,并写入rip.cpu执行此处mov指令后,cpu的硬件控制单元自动将rip加上当前指令长度2字节,新的rip=0x14+2 .rip自动指向0x16处,这里是call RtlExitUserThread .cpu执行这条call,才真正修改rip,cpu跳进 RtlExitUserThread  函数内部去销毁线程
+6. *(ctx_spoof.Rsp.add((cfg.stack.rlt_acquire_srw_size + 8) as u64))是BaseThreadInitThunk的子函数RtlAcquireSRWLockExclusive在执行完,准备调用ret返回到BaseThreadInitThunk时rsp指向的内存地址
+
+
+
+
+这里展示了当执行 call 到我们的线程，再到我们栈伪造休眠时，栈空间和 RSP 指针的真实物理状态：
+
+    【 阶段 1：普通执行阶段 】                  【 阶段 2：发起 ROP 链栈伪造休眠 】
+
+    内存地址 (高地址)                          内存地址 (高地址)
+    ┌──────────────────────────────┐          ┌──────────────────────────────┐
+    │ ...                          │          │ ...                          │
+    ├──────────────────────────────┤          ├──────────────────────────────┤
+    │ 原始栈数据                   │          │ 原始栈数据                   │
+    ├──────────────────────────────┤          ├──────────────────────────────┤
+    │ BaseThreadInitThunk 栈帧     │          │ BaseThreadInitThunk 栈帧     │
+    ├──────────────────────────────┤          ├──────────────────────────────┤
+    │ 返回地址: +0x14              │          │ 返回地址: +0x14              │
+    ├──────────────────────────────┤          ├──────────────────────────────┤ ◄── 真实 RSP 斩断于此
+    │ 我们的 ThreadProc 栈帧       │          │ (休眠期间这部分明文数据被加密) │
+    ├──────────────────────────────┤          ├──────────────────────────────┤
+    │                              │          │ ====== 20 KB Gap 安全区 =====│
+    │                              │          │   (用于吸收 EDR 临时栈写入)   │
+    │                              │          ├──────────────────────────────┤
+    │    空闲栈空间 (向低地址增长)   │          │ 伪造返回地址: +0x14          │ ◄── 伪造的 BaseThreadInitThunk 帧
+    │                              │          ├──────────────────────────────┤
+    │                              │          │ 伪造影子空间 (32 字节)       │
+    │                              │          ├──────────────────────────────┤ ◄── 伪造的虚拟 RSP (EDR 扫描起点)
+    │                              │          │                              │
+    ▼ 内存地址 (低地址)                          ▼ 内存地址 (低地址)
+
+
 
 
 ## let (add_rsp_addr, add_rsp_size) 
@@ -323,3 +415,21 @@ add rsp, 0x58 ; ret
 8. 88字节+8字节的返回地址=96是16的倍数
 9. ret时,cet会让cpu检查shadow stack.但在执行这个gadget前,hypnus已经通过Ntcontinue修好了系统状态,并利用内核特权同步了硬件影子栈.这里的ret是经过硬件背书的合法返回
 10. 项目中将Ntcontinue通过config放入rax寄存器
+
+
+
+## 扩展rip rsp
+
+rip rsp最直接的联系发生在函数调用和返回的瞬间,他们通过栈内存进行数据交换.
+
+核心纽带 call ret硬件指令
+
+**Call**
+1. call:rip写入rsp. cpu把rip的当前值即call的下一条指令(也就是返回地址)写入rsp.
+2. rsp-8 栈顶下移
+3. rip载入新函数入口地址,cpu跳转执行
+
+**ret**
+1. rsp写入rip:rsp +8 ,栈顶上移,回到返回地址所在位置
+2. cpu从当前rsp指向的内存中读取8字节数据,并强行写入rip
+3. cpu顺着新rip地址跳转,回到调用者函数中继续执行

@@ -107,6 +107,8 @@ pub enum HypnusError {
     FaileToChangeMemoryToRx,
     FailToAllocateGadgetPointerPage,
     MissingUnwindRtlUserThreadStart,
+    FaileToReadIMAGE_RUNTIME_FUNCTIONEntriesFromPdataSection,
+    AddRspGadgetNotFound,
     NotFoundCallRbx,
     NotFoundJmprbx,
     GadgetNotFound,
