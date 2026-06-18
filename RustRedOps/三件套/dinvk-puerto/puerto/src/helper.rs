@@ -23,6 +23,8 @@ impl PE {
         }
 
     /// Creates a new `PE` instance from a module base.
+    /// 
+    /// 一个module就是一个被win加载器映射到内存中,对齐并解析好导入表后的pe image
     #[inline]
     pub fn parse(base:*mut c_void) ->Self{
         Self { base }

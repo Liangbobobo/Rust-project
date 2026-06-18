@@ -235,7 +235,7 @@ pub enum GadgetKind {
 impl GadgetKind {
     /// scans the specified image base for a supported control-flow gadget
     ///
-    /// 作用:在该pe文件的整个.pdata节区中detect探测决定使用GadgetKind的call或jmp模式.由于GadgetKind是一个无状态的enum,不能存储地址.后续冗余设计了resolve()用于实际存储找到的gadget地址.可以改用GadgetKind::Call(*const u8,u32)一次性实现
+    /// 作用:在该pe文件的整个.pdata节区中detect探测决定使用GadgetKind的call或jmp模式(call [rbx]/jmp [rbx]).由于GadgetKind是一个无状态的enum,不能存储地址.后续冗余设计了resolve()用于实际存储找到的gadget地址.可以改用GadgetKind::Call(*const u8,u32)一次性实现
     pub fn detect(base: *mut c_void) -> Result<Self> {
         // 抽象一个PE文件,用一个结构体代表PE文件,该结构体只有一个raw pointer.
         let pe = Unwind::new(PE::parse(base));
@@ -311,7 +311,7 @@ impl GadgetKind {
     pub fn bytes(self) -> &'static [u8] {
         match self {
             GadgetKind::Call => &[
-                0x48, 0x83, 0x2C, 0x24, 0x02, // sub qword ptr [rsp], 2
+                0x48, 0x83, 0x2C, 0x24, 0x02, // sub qword ptr [rsp], 2:减去call指令本身大小
                 0x48, 0x89, 0xEC, // mov rsp, rbp
                 0xC3, // ret
             ],

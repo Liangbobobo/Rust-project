@@ -7,7 +7,6 @@
 - [\*(ctx\_spoof.Rsp as \*mut u64) = cfg.rtl\_acquire\_lock.as\_u64().add(0x17);](#ctx_spoofrsp-as-mut-u64--cfgrtl_acquire_lockas_u64add0x17)
 - [cfg.base\_thread.as\_u64().add(0x14);](#cfgbase_threadas_u64add0x14)
 - [let (add\_rsp\_addr, add\_rsp\_size)](#let-add_rsp_addr-add_rsp_size)
-- [扩展rip rsp](#扩展rip-rsp)
 
 
 ## 异常目录在发生异常的回溯机制
@@ -70,18 +69,33 @@ pub struct StackSpoof {
 ```
 
 **为什么要再次申请4kb内存**
-1. call rbx 与 call `[rbx]` 的区别:
-* call rbx,cpu直接跳转到rbx中的内存位置.这种情况不需要第二块内存
-* call `[rbx]`,cpu去rbx指向的内存中读取数据.如果cpu此时将该数据当作地址跳转,os会立即access violation.
+1. call rbx 与 call `[rbx]` 的寻址差异:
+* call rbx(寄存器间接调用):cpu直接将rbx寄存器里面存储的数值写入rip,即cpu直接跳转到该寄存器代表的物理地址处开始执行机器码.这种情况不需要第二块内存.
+  * 如果此处不是可执行的机器码:即rbx指向的内存时不可执行的,cpu在跳转后读取指令时会触发DEP异常,导致进程崩溃（Access Violation,  0xC0000005 ）
+* call `[rbx]`(内存间接调用):cpu把rbx中的值当作内存地址指针,cpu去该内存地址处读取一个8字节数值,然后把这个读出来的数值当作目标地址写入rip;
   * 内存中不分指令和数据,指令层面才区分.call `[rbx]`时,cpu内部控制单元触发一次内存总线读取.去rbx指向的内存读取**8字节**数据.此时cpu读取的这8字节,在cpu视角下是不分数据/指令的
-  * call指令除了读取,还会将读到的数据填入rip.且cpu会无条件的到rip指向的位置读取下一条要执行的指令
+  * cpu读取后,将读到的数据填入rip.且cpu会无条件的到rip指向的位置读取下一条要执行的指令
 * 加上第二块内存的解决方案:
   * cpu执行call `[rbx]`.这里rbx中存入的是第二块内存的地址.
   * cpu读取8字节(这8字节被预先填入了第一块内存的地址)
   * cpu将该8字节填入rip
-  * cpu执行压栈操作,把call指令下面那条指令地址压入当前栈,rsp-8,cpu把rip的当前值(即加上指令长度的rip,也叫返回地址)写入rsp中.cpu读取该8字节地址后,根据该该地址内部指令长度,加上rip的地址.让rip指向下一跳指令地址.
+  * cpu执行返回地址的压栈操作:rsp-8;然后将当前执行的rip加上call指令的字节长度当作返回地址压栈;而跳转指令完全取决于`[rbx]`内存中读取的8字节数值
   * cpu之后通过rip找到第一块内存
   * cpu开始执行第一块内存中的指令
+
+2. cpu执行call `[rbx]`的步骤
+* cpu将当前rip加上该call指令的长度(2字节),得到返回地址(即call指令执行完后的下一条指令地址)
+* rsp-8;然后将该返回地址写入此时rsp指向的内存中
+* cpu读取rbx,读取到的是第二块内存的虚拟地址
+* cpu发起内存读取,从上一步的地址中读取8字节数据,得到第一块内存的地址
+* cpu将第一块内存的8字节地址写入rip
+* 下一个时钟周期,cpu根据rip指向的地址,到第一块内存中读取机器码并开始执行.
+
+3. 为什么一块内存不行
+  * DEP/W^X保护策略:一块内存不能同时可写入和可执行;且edr会告警RWX的内存.第一块内存写入机器码后立即修改为PAGE_EXECUTE_READ的rx;第二块始终保持RW,作为纯粹数据页,没有执行权限
+  * 避免频繁更改属性引发edr告警:第一块内存只进行rw->rx的转换;第二块一直保持RW
+  * edr进行进程上下文审计时,不仅检查栈还会审计寄存器的值:edr检查寄存器是否直接指向私有rx内存.这里rbx存放第二块内存地址,第二块内存只是一个rw的数据页.edr看来rbx指向一个普通的数据内存地址,切断了寄存器和可执行代码页之间的直接关联
+
 
 
 ## RtlUserThreadStart
@@ -315,7 +329,48 @@ edr扫描伪造栈时,不仅看返回地址指向哪个函数,还会执行反向
 7. 在线程被唤醒的时候,工作线程已经通过NtSetContextThread将主线程的rsp重新改回原始高地址.
 
 
+#  pub fn spoof_context(&self, cfg: &Config, ctx: CONTEXT) -> CONTEXT 
 
+该函数执行后构造的栈帧示意图:
+
+【 内存高地址 (High Address) 】
+                                  │
+                                  ▼
+       ┌────────────────────────────────────────────────────────┐ ◄─── ctx. Rsp (原始栈顶)
+       │                                                        │
+       │           原始线程调用栈 (True Thread Stack Data)       │
+       │                                                        │
+       ├────────────────────────────────────────────────────────┤ ◄─── ctx. Rsp - 20KB (防火墙边界)
+       │░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│
+       │░░░░░░░░ 20KB 安全缓冲区 (空白 Stack Gap 防火墙) ░░░░░░░│ (防止栈操作覆盖伪造数据)
+       │░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│
+       ├────────────────────────────────────────────────────────┤ ◄─── Rsp + S_srw + S_base + S_user + 32
+       │   8 字节: 0x0000000000000000 (NULL 栈底标)             │ ◄─── RtlUserThreadStart 的返回地址槽
+       ├────────────────────────────────────────────────────────┤
+       │                                                        │
+       │   S_user 字节: RtlUserThreadStart 栈帧                 │ ◄─── 模拟始祖函数执行环境
+       │                                                        │
+       ├────────────────────────────────────────────────────────┤ ◄─── Rsp + S_srw + S_base + 16
+       │   8 字节: RtlUserThreadStart + 0x21 (指向 call 后)     │ ◄─── BaseThreadInitThunk 的返回地址槽
+       ├────────────────────────────────────────────────────────┤
+       │                                                        │
+       │   S_base 字节: BaseThreadInitThunk 栈帧                │ ◄─── 模拟初始化线程环境
+       │                                                        │
+       ├────────────────────────────────────────────────────────┤ ◄─── Rsp + S_srw + 8
+       │   8 字节: BaseThreadInitThunk + 0x14 (指向 call 后)    │ ◄─── RtlAcquireSRWLockExclusive 的返回地址槽
+       ├────────────────────────────────────────────────────────┤
+       │                                                        │
+       │   S_srw 字节: RtlAcquireSRWLockExclusive 栈帧          │ ◄─── 模拟获取锁的阻塞环境
+       │                                                        │
+       ├────────────────────────────────────────────────────────┤ ◄─── Rsp + 8
+       │   8 字节: RtlAcquireSRWLockExclusive + 0x17 (Decoy)    │ ◄─── ZwWaitForWork... 的返回地址槽
+       ├────────────────────────────────────────────────────────┤ ◄─── ctx_spoof.Rsp (修改后的新栈顶)
+       │                                                        │
+       │   ※ 当前执行点: Rip = ZwWaitForWorkViaWorkerFactory   │ ◄─── 模拟线程休眠待命状态
+       └────────────────────────────────────────────────────────┘
+                                  ▲
+                                  │
+                   【 内存低地址 (Low Address) 】
 
 ##  cfg.base_thread.as_u64().add(0x14);
 
@@ -417,19 +472,10 @@ add rsp, 0x58 ; ret
 10. 项目中将Ntcontinue通过config放入rax寄存器
 
 
+# pub fn spoof(&self,ctxs:&mut `[CONTEXT]`,cfg:&&Config,kind:Obfuscation)->Result<()>
 
-## 扩展rip rsp
 
-rip rsp最直接的联系发生在函数调用和返回的瞬间,他们通过栈内存进行数据交换.
 
-核心纽带 call ret硬件指令
+# spoof spoof_context之间的区别
 
-**Call**
-1. call:rip写入rsp. cpu把rip的当前值即call的下一条指令(也就是返回地址)写入rsp.
-2. rsp-8 栈顶下移
-3. rip载入新函数入口地址,cpu跳转执行
-
-**ret**
-1. rsp写入rip:rsp +8 ,栈顶上移,回到返回地址所在位置
-2. cpu从当前rsp指向的内存中读取8字节数据,并强行写入rip
-3. cpu顺着新rip地址跳转,回到调用者函数中继续执行
+这两个函数都会向内存写入数据来构造伪造栈帧
