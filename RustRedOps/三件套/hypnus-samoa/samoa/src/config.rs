@@ -48,6 +48,18 @@ pub trampoline:u64,
 
 }
 
+/// Global configuration object
+static CONFIG:spin::Once<Config>=spin::Once::new();
+
+/// lazily initializes and returns a singletond单例(`Config` instance)
+pub fn init_config()->Result<&'static Config> {
+    CONFIG.try_call_once(Config::new)
+}
+
+
+
+
+
 impl Config {
 
     /// Create a new `Config`.

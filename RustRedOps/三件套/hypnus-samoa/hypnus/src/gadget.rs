@@ -89,14 +89,14 @@ impl Gadget {
         }
     }
 
-    /// Injects this gadget into a given thread CONTEXT.
+    /// Injects this gadget into a given thread CONTEXT:将对应的Gadget
     ///
     /// Sets the `RIP` to the gadget address and writes the `target` value
     /// into the appropriate general-purpose register for indirect jump.
     /// 
     /// 通过设置rip将cpu引向位于三个dll中的指令,如jmp r10
     /// 
-    /// 通过match将将真正的目标target,如NtProtectVirtualMemory地址存入cpu对应的register
+    /// 通过match将真正的目标target,如NtProtectVirtualMemory地址存入cpu对应的register
     /// 
     /// 当cpu恢复执行,会先跳到self.addr,执行jmp r10.这时cpu会立即再次跳转到真正的恶意逻辑/系统调用中
     /// 
@@ -104,7 +104,7 @@ impl Gadget {
     /// 
     /// 这里可用ctx.Rip = target;实现同样功能,但EDR会检查rip是否来自合法\已加载的模块的函数导出表
     fn apply(&self, ctx: &mut CONTEXT, target: u64) {
-        // 将找到的Gaddet地址存入当前Context的rip.addr在struct Gadget中
+        // 将找到的Gaddet结构体代表地址的addr字段,存入当前Context的rip;addr在struct Gadget中
         ctx.Rip = self.addr;
 
         // 匹配gadget中的register.将要执行的函数
@@ -243,16 +243,17 @@ pub fn get_text_section(base: *mut c_void) -> Option<&'static [u8]> {
 
 /// Extension trait to allow injecting gadgets into a CONTEXT struct dynamically.
 pub trait GadgetContext {
-    /// Modifies the current CONTEXT instance by injecting a jump gadget.然后将第三个参数target作为地址
+    /// Modifies the current CONTEXT instance by injecting a jump gadget(即 jmp `<reg>` ).
     /// 
-    /// 第一个参数&mut self;第二个Config,第三个u64
+    /// 第一个参数&mut self;第二个Config,第三个参数target赋给rip
     /// 
-    /// 在dll的.text中找到jmp <reg> 的gadget->将context.rip设为gadget的物理地址(这样当cpu恢复执行,第一步跳向的时合法的地址,而不是要调用的敏感的函数地址)->根据gadget将目标函数地址写入对register.
+    /// 在dll的.text中找到jmp <reg> 的gadget->将context.rip设为gadget的物理地址(这样当cpu恢复执行,第一步跳向的是合法的函数地址,而不是要调用的敏感的函数地址)->根据gadget将目标函数地址写入对应register.
     /// 
     /// 当ntcontinue激活这个context后,cpu执行路径为cpu->ntdll!jmp <reg>->target函数:这样如果EDR在跳转瞬间检查rip,看到的是合法的ntdll指令,比从非导出函数/非法内存直接call敏感函数隐蔽
     fn jmp(&mut self, cfg: &Config, target: u64);
 }
 
+/// 将target赋给rip,在下一个时钟周期执行target.根据Gadget::new将找到的第一个jmp `reg` Gadget结构体的地址字段addr 和 Reg字段存入CONTEXT中
 impl GadgetContext for CONTEXT {
     fn jmp(&mut self, cfg: &Config, target: u64) {
         let gadget = Gadget::new(cfg);

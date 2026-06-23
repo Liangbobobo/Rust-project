@@ -738,12 +738,14 @@ impl ObfMode {
 ```
 
 **`#[derive(Debug,Clone,Copy,PartialEq,Eq)]`**
-1. debug
-2. Clone
-3. copy
-4. 
+这里分发的各个属性含义见rust grammer
 
-**`#[repr(transparent)]`**
+**`#[repr(transparent)]`** 
+1. 突破rust的orphan rule孤儿院则:允许自定义行为.orphan rule:要对一个类型实现特定的trait或自定义方法,那么该类型或该trait必须至少有一个是在当前crate中定义的
+2. rustc会自动检查对应的参数类型,避免误传不符合条件的参数
+3. 零成本抽象
+
+
 
 
 **pub struct ObfMode(pub u32)**

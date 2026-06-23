@@ -96,8 +96,8 @@ pub type Result<T> = core::result::Result<T, HypnusError>;
 pub enum HypnusError {
 
     // 为什么没有初始化?没有初始化的物理实质是什么(见注释3)
-    // 框架错误
-    InvalidArguments,
+    
+    
     ApiNotFound,
     ExceptionTableNotFound,
     SuitableCallJmpRbxGadgetNotFound,
@@ -117,6 +117,12 @@ pub enum HypnusError {
     NotFoundJmprbx,
     GadgetNotFound,
     ModuleNotFound,
+    // hypnus.rs中错误
+    InvalidArguments,
+    NtCreateEventFailed,
+    TpAllocPoolFailed,
+
+
 
 
     // os错误
