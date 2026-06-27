@@ -121,6 +121,11 @@ pub enum HypnusError {
     InvalidArguments,
     NtCreateEventFailed,
     TpAllocPoolFailed,
+    TpSetPoolStackInformationFailed,
+    TpAllocTimerRtlCaptureContextFailed,
+    TpAllocTimerNtSetEventFailed,
+    NtWaitForSingleObjectFailed,
+    NtDuplicateObjectFailed,
 
 
 

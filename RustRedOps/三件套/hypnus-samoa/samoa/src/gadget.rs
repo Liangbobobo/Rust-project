@@ -90,6 +90,7 @@ impl Gadget {
         // base是modules中代表三个dll的基址
         for base in modules {
             if let Some(range) = get_text_section(base as *mut c_void) {
+                // 通过find()找到const JMP_GADGETS中对应的jmp gadget
                 find(base, range).first().copied();
             }
         }
@@ -373,6 +374,30 @@ where
         shuffle(&mut gadgets);
 
         gadgets.first().copied()
+    }
+}
+
+/// Extension trait to allow injecting gadgets into a CONTEXT struct dynamically.
+pub trait GadgetContext {
+    /// Modifies the current CONTEXT instance by injecting a jump gadget(即 jmp `<reg>` ).
+    /// 
+    /// 第一个参数&mut self;第二个Config,第三个参数target为敏感目标函数地址
+    /// 
+    /// 函数内部逻辑：
+    /// 1. 在合法系统 DLL（ntdll/kernel32/kernelbase）的 .text段中扫描找到 jmp <reg> 的 gadget。
+    /// 2. 将 context.Rip 设为该 gadget 的【虚拟地址】(使 CPU恢复时第一步跳向合法系统模块内的指令，规避 EDR 静态检测)。
+    /// 3. 将目标函数地址 target 写入该 gadget 对应的【通用寄存器】(如R10/Rdi) 中。
+    ///
+    /// 当 ntcontinue 激活这个 context 后，CPU 执行路径为：
+    /// CPU ──► 合法系统DLL!jmp <reg> ──► target 敏感函数。
+    /// 这样在跳转瞬间，EDR 看到的 Rip 始终停留在合法 DLL的指令范围内，隐蔽性极高。
+    fn jmp(&mut self,cfg:&Config,target:u64);
+}
+
+impl GadgetContext for CONTEXT {
+     fn jmp(&mut self, cfg: &Config, target: u64) {
+        let gadget = Gadget::new(cfg);
+        gadget.apply(self, target);
     }
 }
 

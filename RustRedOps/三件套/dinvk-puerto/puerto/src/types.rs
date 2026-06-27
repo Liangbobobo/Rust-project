@@ -4,6 +4,7 @@ use core::ffi::c_void;
 use core::ptr::null_mut;
 use bitflags::bitflags;
 
+pub const DUPLICATE_SAME_ACCESS: u32 = 0x00000002;
 pub const IMAGE_NT_SIGNATURE: u32 = 17744u32;
 pub const IMAGE_DIRECTORY_ENTRY_EXPORT: IMAGE_DIRECTORY_ENTRY = 0u16;
 pub const IMAGE_DIRECTORY_ENTRY_EXCEPTION: usize = 3;

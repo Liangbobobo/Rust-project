@@ -18,7 +18,7 @@ use crate::winapis::{WinApi,Modules,Dll};
 #[derive(Default,Debug,Clone,Copy)]
 pub struct Config{
  pub stack:StackSpoof,
- /// 休眠结束后,让thread pool触发ntcontinue,继续执行hyponus.rs中timer()/wait()中定义好的执行流
+ /// 休眠结束后,让thread pool触发ntcontinue,继续执行hyponus.rs中timer()/wait()中定义好的执行流.用于
  pub callback:u64,
 
  /// 执行RtlCaptureContext的rx内存地址;在混淆链启动时获取快照
@@ -137,6 +137,18 @@ impl Config {
 
 
 
+/// Get current stack pointer
+/// 
+/// mov _,rsp
+#[inline]
+pub fn current_rsp() -> u64 {
+    
+    let rsp: u64;
+    // {}对应后面变量
+    // out:输出参数;reg:任意空闲通用寄存器作为中转;rsp:将中转寄存器里面的值给上面定义的rsp变量
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp) };
+    rsp
+}
 
 
 

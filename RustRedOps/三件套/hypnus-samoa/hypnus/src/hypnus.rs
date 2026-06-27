@@ -354,7 +354,7 @@ impl Hypnus {
             let mut timer_ctx = null_mut();
 
             // CONTEXT_FULL,记录cpu全貌
-            // win64下,P1Home-P6Home是shadow space.P1Home就是rcx.后续当trampoline执行jmp [rcx],由于rcx指向ctx_init.rcx取出来的值就是p1home内容,即Rtlcapturecntext在ntdll.dll的真实内存地址.结果cpu就跳进RtlCaptureContext
+            // win64下,P1Home-P4Home对应shadow space.P1Home就是rcx.后续当trampoline执行jmp [rcx] 由于rcx指向ctx_init.rcx,取出来的值就是p1home内容,即Rtlcapturecntext在ntdll.dll的真实内存地址.结果cpu就跳进RtlCaptureContext
             // 这里只申请内存并预设捕获用到的函数,没有实际捕获状态
             // 主线程在自己stack上开辟了1.2k空间,根据sizeof(CONTEXT)算出来的,没有显式allcoc
             // ctx_init 是一个物理存在的 CONTEXT结构体实例，其核心作用是作为异步获取的 “原始线程状态模板”.即一个硬件状态容器,显示通过异步调用从os偷到合法的线程指纹,随后将其作为蓝图分发给后续的混淆步骤
@@ -413,7 +413,7 @@ impl Hypnus {
                 // msWindowLength - 时间窗口:允许系统延迟执行的宽限期.0代表只要倒计时一归零，必须立刻发送唤醒信号(实际执行中受硬件时钟终端频率限制(一般15.6ms),除非使用timeBeginPeriod修改系统时钟频率)
                 0);
 
-            // Signal after RtlCaptureContext finishes:设置第二个定时器.因为RtlCaptureContext快照后,直接返回,线程继续休眠.第二个定时器设为200ms,去点亮events[0]
+            // Signal after RtlCaptureContext finishes:设置第二个定时器.因为RtlCaptureContext捕获快照后,直接返回,线程继续休眠.第二个定时器设为200ms,去点亮events[0]
             // 初始化新定时器对象TP_TIMER槽位.这里负责发送完成的信号
             let mut timer_event = null_mut();
             //
@@ -475,7 +475,7 @@ impl Hypnus {
 
             // NtDuplicateObject,内核提供的handle克隆api.在内核句柄表(handle table)中,创建新索引条目,该条目指向一个存在的内核对象.可以跨进程克隆句柄,可以在同一进程中将受限/临时的句柄转为永久/有完全访问权限的实体句柄
             // 其核心功能是将源进程表中的一个对象句柄索引，在目标进程（或同进程）的句柄表中创建一个新的有效条目，并根据权限掩码（ACCESS_MASK）赋予其相应的访问能力
-            // 在该项目中，此函数的作用是将当前线程的“伪句柄（Pseudo-handle）”转换为具备完整访问权限的“真实内核对象句柄”，从而为后续进行 APC注入和上下文操作提供合法且高权限的访问载体
+            // 在该项目中，此函数的作用是将当前线程的“伪句柄（Pseudo-handle）”转换为具备完整访问权限的“真实内核对象句柄”，以解决多线程异步环境下的定位冲突.这里将伪句柄(-2)传给ctx.rcx传给,
             status = NtDuplicateObject(
                 // 源进程
                 NtCurrentProcess(),
@@ -500,13 +500,13 @@ impl Hypnus {
             // Base CONTEXT for spoofing
             ctx_init.Rsp = current_rsp();
 
-            // spoof_context不是针对某个函数/payload的伪造栈,而是伪造了整个回溯链.这里ctx_init提供当前栈顶地址
+            // spoof_context不是针对某个函数/payload的伪造栈,而是伪造了整个回溯链.这里ctx_init提供当前栈的所有寄存器状态
             // EDR回溯的起点是rsp指向的栈槽位,即使rip里是payload地址,也不影响伪造栈.即,这里从payload之后开始一直伪装到回溯的根部
             let mut ctx_spoof = self.cfg.stack.spoof_context(self.cfg, ctx_init);
 
             // The chain will wait until `event` is signaled
             // 将该伪造栈帧的 RIP 设置为系统函数NtWaitForSingleObject 的地址。即当该栈帧被“加载”到 CPU时，它就像是一个系统调用
-            //  jmp内部调用Gadget::new,在指定dll中搜索预设的jmp <reg>机器码;jmp内部调用apply()将找到的物理地址与目标api注入到CPONTEXT和寄存器中.在之前for ctx中已经将rax设为ntcontinue.后续通过tpsettimer导致ntcontinue被调用,才真正执行
+            //  jmp内部调用Gadget::new,在指定dll中搜索预设的jmp <reg>机器码;jmp内部调用apply()将找到的物理地址与目标api注入到CONTEXT和寄存器中.在之前for ctx中已经将rax设为ntcontinue.后续通过tpsettimer导致ntcontinue被调用,才真正执行
             ctxs[0].jmp(self.cfg, self.cfg.nt_wait_for_single.into());
             // 遵循win64 fastcall约定,通过寄存器将参数传递给目标函数.
             // 这里将events[1]与NtWaitForSingle绑定.只有events[1]发信号这个绑定的函数才会执行

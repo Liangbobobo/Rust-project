@@ -2,6 +2,7 @@
 - [APC异步过程调用](#apc异步过程调用)
 - [十个ctxs功能](#十个ctxs功能)
 - [NtSetEvent2](#ntsetevent2)
+- [win的定时器](#win的定时器)
 - [TPAllocTimer](#tpalloctimer)
   - [第一个参数是指针的指针](#第一个参数是指针的指针)
 - [TpAllocTimer中的trampoline](#tpalloctimer中的trampoline)
@@ -18,6 +19,7 @@
 - [fn timer::rax](#fn-timerrax)
 - [hypnus.rs的执行流](#hypnusrs的执行流)
 - [struct TP\_POOL\_STACK\_INFORMATION](#struct-tp_pool_stack_information)
+- [TP\_CALLBACK\_ENVIRON\_V3](#tp_callback_environ_v3)
 - [TpAllocPool(\&mut pool, null\_mut())](#tpallocpoolmut-pool-null_mut)
 - [三个event\[\]](#三个event)
 - [win64 Event](#win64-event)
@@ -107,6 +109,12 @@ event`[1]`绑定的是`ctx[0]`的寄存器
 这是一个经典的abi隐式传参.这个传参动作不是rust的,由Windows内核(线程池引擎)直接在cpu寄存器层面完成的.
 
 在混淆逻辑运行时,调用NtSetEvent2 的不是你的主程序，而是 Windows线程池的工作线程（Worker Thread）
+
+## win的定时器
+
+win线程池的api设计中,定时器的声明周期被拆分为两步:
+1. alooc分配:对应TpAllocTimer,但它仅在堆内存开辟一块空间,填入定时器的配置(如回调函数,执行性时寄存器的状态等).此时定时器是静止的,内核不会开始倒计时
+2. 激活/设置(Set):对应TpSetTimer,将第一步分配好的定时器给内核,并传入DueTime(延时时间).这时倒计时正式开始,定时器被真正激活
 
 
 
@@ -283,9 +291,32 @@ TpAllocTimer(
 
 ## TpAllocTimer中的trampoline
 
+在TpAllocTimer中传入的callback(trampoline)就是定时器触发时被调用的函数.但win约定,任何传给TpAllocTimer的回调函数,其类型必须符合PTP_TIMER_CALLBACK(简称为  TimerCallback)其签名如下.
+```c
+VOID CALLBACK TimerCallback(
+        PTP_CALLBACK_INSTANCE Instance, // 第 1 个参数 ──► 存放在 RCX 寄存器
+        PVOID                 Context,  // 第 2 个参数 ──► 存放在 RDX 寄存器
+  (我们传入的 &ctx_init 指针)
+        PTP_TIMER             Timer     // 第 3 个参数 ──► 存放在 R8  寄存器
+    );
+```
+而最终想要跳转并执行的目标函数是RtlCaptureContext
+```c
+ VOID RtlCaptureContext(
+        PCONTEXT ContextRecord          // 第 1 个参数 ──► 存放在 RCX 寄存器
+  (期望在此处接收 &ctx_init)
+    );
+```
+
+**如何产生了错位**
+1. 线程池工作线程开始执行回调,把&ctx_init放在rdx寄存器中(在回调函数中&ctx_init代表的context,是第二个参数)
+2. 但是想让cpu执行RtlCaptureContext,该函数期望在rcx中读取该快照缓冲区的指针(context)
+3. 此时rcx存放的是Instance(第一个参数),rdx中存放的&ctx_init无法被RtlCaptureContext读取.因此需要trampoline(mov rcx,rdx jmp `[rcx]`)将参数对应上
+
+
 当通过TpAllocTimer提交任务,os唤醒工作线程执行时,它遵循TpTimerCallback签名.在执行时对应的寄存器状态:
 1. RCX：存储的是 PTP_CALLBACK_INSTANCE (实例指针)
-2. RDX：存储的是 Context 指针（也就是在 TpAllocTimer 第三个参数传入的 &mutctx_init）
+2. RDX：存储的是 Context 指针（也就是在 TpAllocTimer 第三个参数传入的 &mut ctx_init）
 3. R8：存储的是 PTP_TIMER 句柄
 
 而真正想要执行的是RtlCaptureContext,它只需要一个参数:  
@@ -558,9 +589,14 @@ pub struct TP_POOL_STACK_INFORMATION {
 
 
 
+## TP_CALLBACK_ENVIRON_V3
 
+v3代表win8之后引入的第三版结构
 
-
+**关于显示指定Pool:pool**
+1. 在调用TpAllocTimer  或  TpAllocWait分配异步任务时传入的执行环境参数是NUll,os会默认将任务分发给当前线程的默认全局线程池.这种情况下10个步骤的ROP链可能会被派发给不同的工作线程并发执行,导致加密,修改权限,挂起,解密等步骤错乱,导致程序崩溃.
+2. 通过TpSetPoolMinThreads(pool, 1);和TpSetPoolMaxThreads(pool, 1);把私有线程池限制为单线程池.所有被提交的任务(通过TpSetTimer触发)只能在同一个worker线程里按照排队顺序串行执行
+3. 在默认线程池中一个线程崩溃可能引发其他系统线程崩溃.但在私有线程池中不会影响其他系统线程.
 
 
 

@@ -89,18 +89,18 @@ impl Gadget {
         }
     }
 
-    /// Injects this gadget into a given thread CONTEXT:将对应的Gadget
+    /// Injects this gadget into a given thread CONTEXT:将对应的Gadget注入给定的线程CONTEXT
     ///
     /// Sets the `RIP` to the gadget address and writes the `target` value
     /// into the appropriate general-purpose register for indirect jump.
     /// 
-    /// 通过设置rip将cpu引向位于三个dll中的指令,如jmp r10
+    /// 通过rip将cpu引向位于三个dll中的指令,如jmp r10
     /// 
     /// 通过match将真正的目标target,如NtProtectVirtualMemory地址存入cpu对应的register
     /// 
     /// 当cpu恢复执行,会先跳到self.addr,执行jmp r10.这时cpu会立即再次跳转到真正的恶意逻辑/系统调用中
     /// 
-    /// 这时win下,实现ROP链(Return-Oriented Programming)调用的标准用法
+    /// 这是win下,实现ROP链(Return-Oriented Programming)调用的标准用法
     /// 
     /// 这里可用ctx.Rip = target;实现同样功能,但EDR会检查rip是否来自合法\已加载的模块的函数导出表
     fn apply(&self, ctx: &mut CONTEXT, target: u64) {
@@ -253,7 +253,7 @@ pub trait GadgetContext {
     fn jmp(&mut self, cfg: &Config, target: u64);
 }
 
-/// 将target赋给rip,在下一个时钟周期执行target.根据Gadget::new将找到的第一个jmp `reg` Gadget结构体的地址字段addr 和 Reg字段存入CONTEXT中
+
 impl GadgetContext for CONTEXT {
     fn jmp(&mut self, cfg: &Config, target: u64) {
         let gadget = Gadget::new(cfg);
