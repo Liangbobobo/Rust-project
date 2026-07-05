@@ -509,7 +509,7 @@ impl Hypnus {
             //  jmp内部调用Gadget::new,在指定dll中搜索预设的jmp <reg>机器码;jmp内部调用apply()将找到的物理地址与目标api注入到CONTEXT和寄存器中.在之前for ctx中已经将rax设为ntcontinue.后续通过tpsettimer导致ntcontinue被调用,才真正执行
             ctxs[0].jmp(self.cfg, self.cfg.nt_wait_for_single.into());
             // 遵循win64 fastcall约定,通过寄存器将参数传递给目标函数.
-            // 这里将events[1]与NtWaitForSingle绑定.只有events[1]发信号这个绑定的函数才会执行
+            // 这里将events[1]与NtWaitForSingleObject绑定.只有events[1]发信号这个绑定的函数才会执行
             ctxs[0].Rcx = events[1] as u64;
             ctxs[0].Rdx = 0;
             ctxs[0].R8  = 0;
@@ -546,8 +546,7 @@ impl Hypnus {
 
             // Backup context:备份当前线程的状态
             let mut ctx_backup = CONTEXT { ContextFlags: CONTEXT_FULL, ..Default::default() };
-            // jmp函数将ctxs[3]的rip指向一个系统合法(三个dll)的gadget,并预设下一条目标为NtThreadContext:进程读取指定线程的cpu寄存器快照(该函数rcx参数为线程句柄;rdx参数为CONTEXT类型)
-            // 必须使用NtThreadContext,这时唯一能获取包括rsp/eflags(状态位)在内,能够完整描述一个线程状态的官方接口
+            // jmp函数将ctxs[3].rip指向一个系统合法(三个dll中)的gadget(jmp <reg>),根据找到的reg将target函数NtThreadContext的地址放进去.该函数读取指定线程的cpu寄存器快照;必须使用NtThreadContext,这时唯一能获取包括rsp/eflags(状态位)在内,能够完整描述一个线程状态的官方接口
             (&mut ctxs[3]).jmp(self.cfg, self.cfg.nt_get_context_thread.into());
             ctxs[3].Rcx = h_thread as u64;
             ctxs[3].Rdx = ctx_backup.as_u64();

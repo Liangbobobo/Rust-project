@@ -247,7 +247,7 @@ pub trait GadgetContext {
     /// 
     /// 第一个参数&mut self;第二个Config,第三个参数target赋给rip
     /// 
-    /// 在dll的.text中找到jmp <reg> 的gadget->将context.rip设为gadget的物理地址(这样当cpu恢复执行,第一步跳向的是合法的函数地址,而不是要调用的敏感的函数地址)->根据gadget将目标函数地址写入对应register.
+    /// 在dll的.text中找到jmp <reg> 的gadget->将context.rip设为gadget的物理地址(这样当cpu恢复执行,第一步跳向的是合法的函数地址,而不是要调用的敏感的函数地址)->根据找到的gadget类型(jmp rdi-r15)将目标函数地址写入对应register.
     /// 
     /// 当ntcontinue激活这个context后,cpu执行路径为cpu->ntdll!jmp <reg>->target函数:这样如果EDR在跳转瞬间检查rip,看到的是合法的ntdll指令,比从非导出函数/非法内存直接call敏感函数隐蔽
     fn jmp(&mut self, cfg: &Config, target: u64);
