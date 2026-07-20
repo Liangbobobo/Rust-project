@@ -1,3 +1,4 @@
+- [每个函数都一定有对应的栈帧吗](#每个函数都一定有对应的栈帧吗)
 - [foliage](#foliage)
 - [APC异步过程调用](#apc异步过程调用)
 - [十个ctxs功能](#十个ctxs功能)
@@ -19,6 +20,7 @@
 - [fn timer::rax](#fn-timerrax)
 - [hypnus.rs的执行流](#hypnusrs的执行流)
 - [struct TP\_POOL\_STACK\_INFORMATION](#struct-tp_pool_stack_information)
+- [TpAllocWait](#tpallocwait)
 - [TP\_CALLBACK\_ENVIRON\_V3](#tp_callback_environ_v3)
 - [TpAllocPool(\&mut pool, null\_mut())](#tpallocpoolmut-pool-null_mut)
 - [三个event\[\]](#三个event)
@@ -38,6 +40,7 @@
 - [扩展-关于handle的概念](#扩展-关于handle的概念)
 - [win64 threadpool](#win64-threadpool)
   - [系统默认线程池](#系统默认线程池)
+- [TpSetWait 和 TPAllocWait](#tpsetwait-和-tpallocwait)
 - [线程池和事件](#线程池和事件)
 - [IOCP (I/O Completion Port)和worker factory](#iocp-io-completion-port和worker-factory)
 - [扩展-handle句柄](#扩展-handle句柄)
@@ -46,13 +49,17 @@
 
 
 
+## 每个函数都一定有对应的栈帧吗
 
+不是
 
-
+1. 叶子函数没有栈帧.叶子函数不调用其他函数,且不需要再栈上分配空间(没有超出寄存器数量的局部变量,不需要备份非易失性寄存器)
+2. 内联函数:当编译器发现某个函数非常简单,或者使用了`#[inline]`标记,在编译期间会执行内联优化,将被调用函数的机器码复制粘贴到调用者的函数体内部.因此,被内联的函数完全融入调用者的栈帧,它自己不占用任何独立的栈帧
+3. 尾调函数:一个函数的最后一步是调用另一个函数并直接返回其结果,这种调用称为尾调用.那么rustc/llvm会把原本的call优化为jmp到目标函数.目标函数回直接复用调用者的栈空间,不会在上方累加新栈帧.
 
 
 ## foliage
-
+ 
 **优势:**
 1. 不污染当前线程池：timer 和 wait 会占用进程的 Thread Pool，如果 EDR去审计线程池的回调队列，可能会发现异常。foliage是开辟独立线程，业务线程和混淆线程物理隔离
 2. 替身线程只存在于休眠混淆期间。休眠结束，线程死亡。EDR就算在事后想回溯是谁解密了内存，也根本找不到那个线程的句柄
@@ -368,7 +375,7 @@ NtWaitForSingleObject(
     _In_opt_ PLARGE_INTEGER Timeout
     );
 ```
-
+NtWaitForSingleObject是win内核暴露给用户态最底层的同步等待原语之一.当一个线程调用该函数时,线程通过syscall陷入内核.线程在内核中会一直处于沉睡,直到目标对象有信号,超时,APC中断
 
 作用:
 1. 挂起执行流：它通过系统调用告知内核调度器，当前线程不再具备“执行资格”
@@ -587,7 +594,14 @@ pub struct TP_POOL_STACK_INFORMATION {
     * 术语：物理内存提交 (Memory Commitment)。
     * 物理意义：它强制要求操作系统立即为这 512KB预留空间分配真实的物理内存（或分页文件空间）
 
+## TpAllocWait
 
+涉及到win的iocp机制,之后要和其他文档合并在一起
+
+这是win的线程池等待机制涉及的一个函数,用于分配/创建一个等待对象(wait object).是win提供高效,异步等待内核对象的核心函数.
+
+1. 传统做法.如果让程序等待一个事件(如网络数据到达,文件写入完成等),传统做法是创建一个专门线程,在线程内部调用 WaitForSingleObject.这个线程会处于sleep的挂起状态.虽然不占用cpu,但会占用1MB左右的栈空间和操作系统线程句柄资源,这种线程一多,就会消耗大量资源.
+2. 线程池等待.调用TpAllocWait 创建一个“等待对象”.再调用TpSetWait让系统盯着这个hEvent句柄,一旦这句柄有信号,就从线程池找到一个空闲worker thread执行指定函数.期间没有任何线程浪费死等,所有等待状态都在内核中由iocp监控.
 
 ## TP_CALLBACK_ENVIRON_V3
 
@@ -719,10 +733,10 @@ win64下,Event\Thread都是内核对象,且都通过Handle管理.
 /// Wrapper for the `NtCreateEvent` API.
 #[inline]
 pub fn NtCreateEvent(
-    EventHandle: *mut HANDLE,
-    DesiredAccess: u32,
-    ObjectAttributes: *mut c_void,
-    EventType: EVENT_TYPE,
+    EventHandle: *mut HANDLE,// 输出的事件句柄指针
+    DesiredAccess: u32,// 输入参数,期望的访问权限
+    ObjectAttributes: *mut c_void,// 输入参数,对象属性,原本指向内核结构体OBJECT_ATTRIBUTES  的指针,此处简化强转为*mut c_void.代表一个匿名事件,该匿名事件只存在于当前进程的私有句柄表中,隐蔽性高,外部工具难以直接检测
+    EventType: EVENT_TYPE,//详见下面解释
     InitialState: u8,
 ) -> NTSTATUS {
     unsafe { 
@@ -737,8 +751,10 @@ pub fn NtCreateEvent(
 }
 ```
 
-1. 通过winapis()调用dinvk::get_proc_address得到NtCreateEvent的内存地址.对该地址使用transmute强制转为本文件定义的NtCreateEvent函数指针
-
+1. 通过winapis()调用dinvk::get_proc_address得到NtCreateEvent的内存地址.对该地址使用transmute强制转为一个函数指针,即本文件定义的NtCreateEvent函数指针
+2. EventType: EVENT_TYPE:指定事件对象的复位行为.NotificationEvent代表通知型事件/手动复位,一旦事件被设置为有信号状态,会一直保持有信号,直到显示调用NtResetEvent将其复位.所有正在等待该事件的线程会被同时唤醒.在hypnus中确保多个步骤的上下文可以安全的监听同一个状态信号.
+3. SynchronizationEvent,同步型事件/自动复位:一旦事件变为有信号状态,只会唤醒一个正在等待它的线程,在唤醒瞬间,内核会自动将该事件重新复位为无信号状态.
+4. InitialState,输入参数,初始状态.事件对象被创建时的初始激活状态,rust中1代表true,0代表false:1代表创建即为有信号active状态,任何线程此时调用NtWaitForSingleObject等待这个事件,都不会阻塞.0代表创建时为无信号状态,后续有线程调用等待函数,会立即陷入阻塞,直到其他线程调用NtSetEvent激活.hypnus中传入0,代表将主线程挂起,后续唤醒
 
 
 ### 与函数原型的映射解析
@@ -1399,6 +1415,19 @@ Windows x64 系统中，线程池（Thread Pool） 是由内核和 ntdll.dll协�
 | 栈特征       | 标准系统栈指纹                   | 干净的系统栈指纹                | 复杂的运行时栈指纹 (Future 嵌套)   |
 | I/O 模型     | 原生 IOCP                        | 原生 IOCP                       | 封装后的 IOCP / epoll              |
 | 红队价值     | 低 (易被监控)                    | 极高 (完美伪装系统任务)         | 低 (Runtime 特征太明显)            |
+
+
+## TpSetWait 和 TPAllocWait
+
+```rust
+ let mut delay = zeroed::<LARGE_INTEGER>();
+            delay.QuadPart=-(100i64 * 10_000);
+            TpSetWait(wait_ctx, events[0], &mut delay);
+```
+以此为例
+
+其作用:正式激活等待对象,并绑定要监听的内核对象及超时时间.即其向win内核注册一个双重触发机制,在delay时间内,如点亮events`[0]`事件,或超过delay时间,让worker thread去执行之前绑定的跳板代码.  
+调用该函数之前,由TpAllocWait创建的等待对象只是一个空壳.而TpSetWait是正式启动的开关.
 
 ## 线程池和事件
 

@@ -126,6 +126,9 @@ pub enum HypnusError {
     TpAllocTimerNtSetEventFailed,
     NtWaitForSingleObjectFailed,
     NtDuplicateObjectFailed,
+    TpAllocWaitRtlCaptureContextFailed,
+    TpAllocWaitNtSetEventFailed,
+    
 
 
 
