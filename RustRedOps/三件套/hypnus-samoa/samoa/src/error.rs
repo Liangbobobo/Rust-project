@@ -128,6 +128,16 @@ pub enum HypnusError {
     NtDuplicateObjectFailed,
     TpAllocWaitRtlCaptureContextFailed,
     TpAllocWaitNtSetEventFailed,
+    TpAllocWaitFailed,
+    NtCreateThreadFailed,
+    NtGetContextThreadFailed,
+    NtQueueApcThreadFailed,
+    NtAlertResumeThreadFailed,
+    TimerLayoutSpoofFailed,
+    TpAllocTimerFailed,
+    NtSignalAndWaitForSingleObjectFailed,
+    
+    
     
 
 

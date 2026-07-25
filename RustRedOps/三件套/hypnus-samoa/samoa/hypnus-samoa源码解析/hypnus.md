@@ -1,15 +1,18 @@
 - [每个函数都一定有对应的栈帧吗](#每个函数都一定有对应的栈帧吗)
 - [foliage](#foliage)
 - [APC异步过程调用](#apc异步过程调用)
+- [NtQueueApcThread](#ntqueueapcthread)
 - [十个ctxs功能](#十个ctxs功能)
 - [NtSetEvent2](#ntsetevent2)
 - [win的定时器](#win的定时器)
 - [TPAllocTimer](#tpalloctimer)
   - [第一个参数是指针的指针](#第一个参数是指针的指针)
+- [RtlCaptureContext 和 NtGetContextThread](#rtlcapturecontext-和-ntgetcontextthread)
 - [TpAllocTimer中的trampoline](#tpalloctimer中的trampoline)
 - [threadpool workerfactory worker](#threadpool-workerfactory-worker)
 - [SystemFunction041](#systemfunction041)
 - [SystemFunction040](#systemfunction040)
+- [WaitForSingleObject](#waitforsingleobject)
 - [NtWaitForSingleObject](#ntwaitforsingleobject)
 - [`ctxs[0]`](#ctxs0)
 - [关于PE文件的节区Section](#关于pe文件的节区section)
@@ -26,7 +29,7 @@
 - [三个event\[\]](#三个event)
 - [win64 Event](#win64-event)
 - [Event Thread区别](#event-thread区别)
-- [Struct Hypnus::time::NtCreateEvent](#struct-hypnustimentcreateevent)
+- [NtCreateEvent](#ntcreateevent)
   - [与函数原型的映射解析](#与函数原型的映射解析)
 - [struct ObfMode](#struct-obfmode)
 - [Fiber 纤程(Windows)](#fiber-纤程windows)
@@ -75,6 +78,17 @@ APC (Asynchronous Procedure Call) 是 Windows内核提供的一种机制，允�
     * 此时执行APC时,实际上执行了NtContinue(&CONTECXT).NtContinue瞬间重置cpu的所有硬件寄存器.这意味着,每个APC并没有真正执行一个函数,而是进行一次暴力的硬件状态传递
 
 
+## NtQueueApcThread
+
+函数原型:
+
+函数作用:向指定的目标线程的APC队列中,强行灌入一个待执行的任务.当目标线程未来进入alertable时,内核调度器会按照FIFO的顺序,把这个任务提取出来并强制该线程去执行.
+
+需注意:
+1. 传入的threadhandle必须具备THREAD_SET_CONTEXT设置线程上下文的访问权限.如果对新建的傀儡线程操作,在NtCreateThreadEx 时必须申请THREAD_ALL_ACCESS.如果权限不足,NtQueueApcThread 会直接返回 STATUS_ACCESS_DENIED(0xC0000022)
+2. NtQueueApcThread是EDR监控的敏感词.跨进程监控:如果进程A向进程B的线程堆里灌入apc,EDR肯定会拦截.即使在本进程内部(foliage),EDR Hook也会检测传入的acproutine地址.如果发现该地址指向NtContinue,或者指向一块没有对应磁盘pe文件的匿名内存(REX页),会直接判定注入攻击.这也是在源码中需要直接系统调用uwd::syscall!来绕过用户态hook的原因
+3. win32层的QueueUserAPC只允许传入1个自定义参数,底层的NtQueueApcThread 允许你传入 3 个 参数.在调用时,必须将后面两个不用的参数显示填充为null_mut(),以防栈上传入脏数据导致崩溃
+4. 由于10个ctx任务灌入傀儡线程的apc队列,傀儡线程跑完ROP链后,必须在最后一个`ctx[9]`中使用RtlExitUserThread退出.如果不退出/自杀,当apc队列清空后,傀儡线程会尝试执行它被创建时的那个假入口地址(TpReleaseCleanup GroupMembers + 0x250).由于这个地址根本没有准备合法的执行环境,线程会瞬间发生rip越界崩溃,导致整个木马进程一起死掉
 
 ## 十个ctxs功能
 
@@ -287,14 +301,46 @@ TpAllocTimer(
 17. TpAllocTimer在堆上分配对象(假设地址0x1FF4500),然后用调用者传进来的栈地址0xAABBCC,将 0x1FF4500写入到0xAABBCC
 
 
+## RtlCaptureContext 和 NtGetContextThread
+
+RtlCaptureContext 和 NtGetContextThread虽然都是为了获取线程的CONTEXT（寄存器状态），但它们的底层物理机制、调用边界以及战术用途有着本质的区别
 
 
+| 维度 | RtlCaptureContext | NtGetContextThread (底层的… |
+| --------------|-----------------------------|------------------------------|
+| 操作对象 | 当前线程自己（我抓我自己） | 指定的任意线程（我抓别人，通<br>过 Handle） |
+| 执行位置 | 纯用户态（Ring<br>3），无需切换到内核 | 必须通过 syscall<br>陷入内核（Ring 0） |
+| 实现机制 | 通过编译器内联汇编直接读取<br>当前的物理寄存器（如 mov<br>rcx, rsp 等） | 由内核从目标线程的内核控制块<br>（TCB）或陷阱帧（Trap<br>Frame）中读取备份数据并拷回 |
+| 目标线程状态 | 必须是正在运行的活动状态 | 目标线程通常需要处于挂起（<br>Suspended）或阻塞（Waiting）<br>状态 |
+| EDR 监控度 | 几乎零监控（无系统调用，无<br>敏感特征） | 极高监控（是远程线程注入、AP<br>C 注入的特征 API） |
 
 
+**timer()和wait()中使用RtlCaptureContext的原因**
+
+1. 场景:此时主线程把任务分发给了线程池。线程池里的工作线程开始运行，执行跳板汇编，跳入 RtlCaptureContext
+2.  工作线程此时需要抓取它自己当前的寄存器状态，作为后续 10 个 ROP上下文的模板
+3. 因为是“自己抓自己”，使用纯用户态的 RtlCaptureContext速度极快，且完全不产生系统调用遥测，能够完美躲过 EDR对敏感系统调用的监控
+
+**在 foliage 模式中必须使用 NtGetContextThread**
+
+1. 场景 A：获取新建傀儡线程（h_thread）的初始状态.主线程用 NtCreateThreadEx创建了傀儡线程，但它是挂起状态（Suspended.挂起的线程根本没有运行，它自己无法调用任何函数.此时,主线程作为第三人,通过 NtGetContextThread(h_thread, ...)强行去读取这个挂起线程的寄存器（主要是为了拿到它初始的 Rsp栈顶地址，以便后续在它栈上伪造 ROP 链
+2.  场景 B：在假死期间备份主线程的上下文.现状：主线程已经调用 NtSignalAndWaitForSingleObject陷入内核假死睡觉了。此时，是傀儡辅助线程在后台跑 ROP 链.傀儡线程需要把主线程（即“别人”）的睡觉状态备份下来.傀儡线程无法使用 RtlCaptureContext 去抓主线程，它必须使用系统调用NtGetContextThread(thread_handle, ...) 跨线程读取主线程的寄存器状态
 
 
+**Windows 10/11 下的安全与稳定考量（OPSEC）**
 
+1. 在 Windows 10/11 中，如果对一个正在活跃运行的线程调用NtGetContextThread，由于 CPU寄存器在微秒级飞速变化，内核抓到的数据可能是不稳定的，甚至可能导致STATUS_THREAD_IS_TERMINATING 错误
+2. foliage 完美避开了这一点：它调用 NtGetContextThread，主线程正安全地挂起在 NtSignalAndWaitForSingleObject中，寄存器处于完全静止状态，抓取的数据绝对准确和稳定
+3. EDR 对跨进程/跨线程的 NtGetContextThread 监控极严。在 foliage中，我们所有的操作（主线程和辅助线程）都局限在同一个进程内部，且句柄是私有的。这在 Windows 10/11的安全策略下，属于“进程自省（Introspection）”行为，其危险评级远低于跨进程注入，极大地提高了免杀通过率
 
+**RtlCaptureContext 和 NtGetContextThread的适用场景**
+
+NtGetContextThread需要目标线程静止（挂起或阻塞）；而 RtlCaptureContext不仅不需要挂起，而且“必须”在当前线程正常活跃运行时调用
+
+1. RtlCaptureContext在执行该函数汇编指令的那一瞬间（例如执行 mov rcx, rsp保存栈顶），CPU寄存器状态是绝对确定且静止的。这里不存在“别人在乱动”的并发问题，因此抓出来的数据 100% 稳定且一致
+2. NtGetContextThread 的设计定位是：线程 A（主线程）去读取线程B（目标线程）的寄存器状态.此时,如果B正在另一个cpu核心上运行.B 的寄存器（如 RAX, RSP）实时存在于另一个 CPU核心的物理硅片上，并且以每秒数十亿次的速度在变。线程 A即使陷入内核，也无法去另一个物理核心上“抢夺”正在变动的寄存器值
+3. 只有当线程 B 不再运行（被挂起，或者因为等待某个锁而陷入阻塞）时，Windows内核调度器才会把线程 B 此时的寄存器状态，当做“工作备份”写入到线程 B的内核控制块（TCB，Thread Control Block）或内核栈的陷阱帧（Trap Frame）中
+4. 线程 A 调用 NtGetContextThread 陷入内核，内核会去线程 B 的 TCB中把这份已经“凝固”的寄存器备份安全地读出来
 
 ## TpAllocTimer中的trampoline
 
@@ -349,8 +395,24 @@ RCX:ContextRecord指针,要求把要写入的内存地址放在这里
 位于cryptbase.dll 中  
 本质：它是微软内部使用的 RtlEncryptMemory 函数的公开导出别名
 
+## WaitForSingleObject
+
+函数原型:
 
 
+**函数作用**:使调用它的当前线程暂停执行(挂起阻塞),一直等待指定的内核对象变成有信号状态,或者等待设定的超时时间到期.
+1. 不同win的内核对象,其有信号和无信号的定义完全不同.该函数会根据传入的句柄类型自动识别
+    * 线程/进程对象:无信号指线程/进程正在运行;有信号指线程/进程运行结束并退出
+    * event:无信号指红灯;有信号指调用了SetEvent变为绿灯
+    * 互斥量对象Mutex:无信号指当前锁被其他线程占用;有信号指锁被释放,无人占用
+
+
+函数参数
+
+**返回值**:返回一个DWORD状态码,解释线程被唤醒的原因.
+1. WAIT_OBJECT_0(0x00000000)：等待成功.等待的目标对象已经变成了“有信号”状态（比如等待线程退出了，或者事件被点亮了）
+2. WAIT_TIMEOUT(0x0000102)：等待超时设定的.毫秒数到了，但目标对象依然没有信号
+3. (0xFFFFFFFF)：调用失败.通常是因为你传入的句柄是无效的，或者你对该句柄没有SYNCHRONIZE 访问权限
 
 ## NtWaitForSingleObject
 
@@ -607,6 +669,30 @@ pub struct TP_POOL_STACK_INFORMATION {
 
 v3代表win8之后引入的第三版结构
 
+TP_CALLBACK_ENVIRON_V3是线程池回调环境结构体.当向线程池提交一个任务(如 timer 定时器/wait等待事件)时,除了告诉系统待执行的函数和参数之外,还需要这个结构体告诉系统,该任务以何种规则在哪个具体的池子里执行.
+
+**和CONTEXT之间的关系**
+
+TP_CALLBACK_ENVIRON_V3:属于系统调度层,决定任务在哪个线程池排队,在哪个线程去执行.即去哪跑任务.
+CONTEXT:属于硬件执行层(cpu/寄存器),决定cpu此刻具体的寄存器和各种运行指针(rip/rsp)是什么.即怎么跑任务.
+
+当定时器到期,系统并不直接跳进CONTEXT运行,需要经过系统调度层 ──► 硬件执行层的交接过程:
+1. 系统调度层（TP_CALLBACK_ENVIRON_V3 发挥作用:定时器到时,win线程池管理器读取绑定的TP_CALLBACK_ENVIRON_V3;进而发现env.Pool指向私有线程池pool;管理器派发任务,唤醒在私有线程池中唯一的工作线程
+2. 工作线程苏醒后,开始执行预置的入口函数(callback汇编跳板);
+
+
+
+1. 主线程通过TpAllocTimer将`&ctxs[N]`作为第三个参数传递:`TpAllocTimer(&mut timer, callback, &ctxs[N] as *mut _, &mut env);`.操作系统接收到这个地址,在堆区申请_TP_TIMER 结构体中的某个字段,将`&ctxs[N]`的内存首地址(指针)记录下来,假设为add
+2. 主线程挂起,主线程的栈被冻结,但add内存处的数据保持不变
+3. 定时器到期,工作线程被唤醒并去堆区读取_TP_TIMER 结构体中add的数据.
+
+
+`TpAllocTimer(&mut timer, self.cfg.callback as *mut c_void, ctx as *mut _, &mut env);` 在配置定时器时,self.cfg.callback指向 config.rs 中 Config::alloc_callback()动态分配的汇编跳板内存,crx是ctxs结构体指针.
+
+1. 根据win**线程池定时器回调函数PTP_TIMER_CALLBACK**的签名.第二个参数必须装入RDX寄存器.
+
+
+
 **关于显示指定Pool:pool**
 1. 在调用TpAllocTimer  或  TpAllocWait分配异步任务时传入的执行环境参数是NUll,os会默认将任务分发给当前线程的默认全局线程池.这种情况下10个步骤的ROP链可能会被派发给不同的工作线程并发执行,导致加密,修改权限,挂起,解密等步骤错乱,导致程序崩溃.
 2. 通过TpSetPoolMinThreads(pool, 1);和TpSetPoolMaxThreads(pool, 1);把私有线程池限制为单线程池.所有被提交的任务(通过TpSetTimer触发)只能在同一个worker线程里按照排队顺序串行执行
@@ -634,6 +720,14 @@ v3代表win8之后引入的第三版结构
 
 
 ## TpAllocPool(&mut pool, null_mut())
+
+**底层原理**
+
+当调用TpAllocPool(&mut pool, null_mut())时:
+1. 申请内存(堆分配):调用用户态堆管理器api(底层是RtlAllocHeap),在当前进程的用户态虚拟地址空间(ring 3)中,申请一块约几百字节的内存页,用于存放_TP_POOL结构体.
+2. 初始化该结构体:内存请清零,并写入默认初始化苏剧
+3. 返回内存首地址:pool是一个指向堆内存中_TP_POOL结构体的指针.
+
 
 1. 是 Windows 线程池 API (Thread Pool API) 的核心构造函数
 2. 第一个参数 &mut pool: 传入 pool指针的地址，执行成功后，内核会将新创建的线程池对象地址填入这里。
@@ -727,7 +821,41 @@ win64下,Event\Thread都是内核对象,且都通过Handle管理.
 
 > 线程是 CPU资源的消费者，通过寄存器与栈的动态流转实现程序逻辑；而事件是内核状态的载体，通过 SignalState 的物理翻转实现对线程执行流的逻辑阻断与重启。在 hypnus中，我们利用‘线程’去执行混淆，利用‘事件’去锁定这个线程的步拍，从而实现了一种受控的、可预期的‘幽灵执行流
 
-## Struct Hypnus::time::NtCreateEvent
+## NtCreateEvent
+
+```c
+/**
+ * The NtCreateEvent routine creates an event object, sets the initial state of the event to the specified value,
+ * and opens a handle to the object with the specified desired access.
+ *
+ * \param EventHandle A pointer to a variable that receives the event object handle.
+ * \param DesiredAccess The access mask that specifies the requested access to the event object.
+ * \param ObjectAttributes A pointer to an OBJECT_ATTRIBUTES structure that specifies the object attributes.
+ * \param EventType The type of the event, which can be SynchronizationEvent or a NotificationEvent.
+ * \param InitialState The initial state of the event object.
+ * \return NTSTATUS Successful or errant status.
+ * \see https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-zwcreateevent
+ */
+_Kernel_entry_
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtCreateEvent(
+    _Out_ PHANDLE EventHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_opt_ PCOBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ EVENT_TYPE EventType,
+    _In_ BOOLEAN InitialState
+    );
+```
+
+在win底层开发和内核研究中,能够熟练阅读和解构这类原生c语言内核级函数声明是基本功.这类声明包含大量微软特有的修饰符(Macros/Annotations)和原生类型
+
+**函数前缀和修饰符**
+
+
+
+
 
 ```rust
 /// Wrapper for the `NtCreateEvent` API.
@@ -1426,8 +1554,8 @@ Windows x64 系统中，线程池（Thread Pool） 是由内核和 ntdll.dll协�
 ```
 以此为例
 
-其作用:正式激活等待对象,并绑定要监听的内核对象及超时时间.即其向win内核注册一个双重触发机制,在delay时间内,如点亮events`[0]`事件,或超过delay时间,让worker thread去执行之前绑定的跳板代码.  
-调用该函数之前,由TpAllocWait创建的等待对象只是一个空壳.而TpSetWait是正式启动的开关.
+TpSetWait 作用:正式激活等待对象,并绑定要监听的内核对象及超时时间.即其向win内核注册一个双重触发机制,在delay时间内,如点亮events`[0]`事件,或超过delay时间,让worker thread去执行之前绑定的跳板代码.  
+调用该函数之前,由TpAllocWait创建的等待对象只是一个空壳.而TpSetWait是正式启动的开关. 
 
 ## 线程池和事件
 
