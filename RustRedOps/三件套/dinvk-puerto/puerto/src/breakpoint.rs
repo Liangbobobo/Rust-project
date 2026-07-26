@@ -12,6 +12,8 @@
 // 2.current_api多线程不安全,如何用thread local storage来为每个线程维护独立的hook状态,支持多线程并发注入?
 // 未在winapis.rs文件中定义NtAllocateVirtualMemory, NtProtectVirtualMemory 等,封装系统调用,导致出现set_point() unuse警告,需要完善
 // use cfg_if;
+
+#![allow(unused)]
 use crate::types::{
     CONTEXT, CONTEXT_DEBUG_REGISTERS_AMD64, CONTEXT_DEBUG_REGISTERS_X86, HANDLE, OBJECT_ATTRIBUTES,EXCEPTION_POINTERS,EXCEPTION_SINGLE_STEP,EXCEPTION_CONTINUE_SEARCH,EXCEPTION_CONTINUE_EXECUTION
 };

@@ -2,6 +2,9 @@
 
 //use alloc::string::String;//原项目hypnus中用于obfstr的宏展开,samoa中未使用obfstr,而是使用了error.rs中的HypnusError和steal_bail!来error handling
 
+// indirect syscall:跳转到.dll文件内部,利用dll内部原本存在的syscall指令调用对应的函数
+// direct syscall:将系统调用号SSN加载到eax寄存器执行syscall
+
 use alloc::collections::btree_map::Keys;
 use puerto::winapis::NT_SUCCESS;
 use spin::mutex;
@@ -71,15 +74,141 @@ use puerto::winapis::{NtCurrentProcess, NtCurrentThread};
 /// }
 /// 
 /// ```
+/// #[macro_export];编译器属性,rust的宏默认只在其所在的文件/mod中可见.加上#[macro_export]提升为全局属性
+#[macro_export]
+macro_rules! timer {
+    // rust原生不支持函数重载(函数重名,但参数不同),但可以通过宏实现接口重载.调用timer!时,rustc在编译阶段(AST生成时),会展开替换为匹配的代码
+    ($base:expr, $size:expr, $time:expr) => {
+         $crate::__private::hypnus_entry(
+            $base, 
+            $size, 
+            $time, 
+            $crate::Obfuscation::Timer, 
+            $crate::ObfMode::None
+        )
+    };
 
+    // 第二个Arm,接收四个参数
+    ($base:expr, $size:expr, $time:expr, $mode:expr) => {
+        $crate::__private::hypnus_entry(
+            $base, 
+            $size, 
+            $time, 
+            $crate::Obfuscation::Timer, 
+            $mode
+        )
+    };
+}
+/// Initiates execution obfuscation using the `TpSetWait`.
+///
+/// # Example
+/// 
+/// ```
+/// #![no_std]
+/// #![no_main]
+///
+/// extern crate alloc;
+/// 
+/// use hypnus::{foliage, ObfMode};
+/// use hypnus::allocator::HypnusHeap;
+/// use core::ffi::c_void;
+/// 
+/// #[global_allocator]
+/// static ALLOCATOR: HypnusHeap = HypnusHeap;
+/// 
+/// // Pointer to the memory region you want to obfuscate (e.g., shellcode)
+/// let data = b"\x90\x90\x90\xCC";
+/// let ptr = data.as_ptr() as *mut c_void;
+/// let size = data.len() as u64;
+///
+/// // Sleep duration in seconds
+/// let delay = 5;
+/// loop {
+///     // Full obfuscation with heap encryption and RWX memory protection
+///     wait!(ptr, size, delay, ObfMode::Heap | ObfMode::Rwx);
+/// }
+/// ```
+#[macro_export]
+macro_rules! wait {
+    ($base:expr, $size:expr, $time:expr) => {
+        $crate::__private::hypnus_entry(
+            $base, 
+            $size, 
+            $time, 
+            $crate::Obfuscation::Wait, 
+            $crate::ObfMode::None
+        )
+    };
 
+    ($base:expr, $size:expr, $time:expr, $mode:expr) => {
+        $crate::__private::hypnus_entry(
+            $base, 
+            $size, 
+            $time, 
+            $crate::Obfuscation::Wait, 
+            $mode
+        )
+    };
+}
 
-/// Enumeration of supported memory obfuscation strategies
+/// Initiates execution obfuscation using the `NtQueueApcThread`.
+///
+/// # Example
+/// 
+/// ```
+/// #![no_std]
+/// #![no_main]
+///
+/// extern crate alloc;
+/// 
+/// use hypnus::{foliage, ObfMode};
+/// use hypnus::allocator::HypnusHeap;
+/// use core::ffi::c_void;
+/// 
+/// #[global_allocator]
+/// static ALLOCATOR: HypnusHeap = HypnusHeap;
+/// 
+/// // Pointer to the memory region you want to obfuscate (e.g., shellcode)
+/// let data = b"\x90\x90\x90\xCC";
+/// let ptr = data.as_ptr() as *mut c_void;
+/// let size = data.len() as u64;
+///
+/// // Sleep duration in seconds
+/// let delay = 5;
+/// loop {
+///     // Full obfuscation with heap encryption and RWX memory protection
+///     foliage!(ptr, size, delay, ObfMode::Heap | ObfMode::Rwx);
+/// }
+/// ```
+#[macro_export]
+macro_rules! foliage {
+    ($base:expr, $size:expr, $time:expr) => {
+        $crate::__private::hypnus_entry(
+            $base, 
+            $size, 
+            $time, 
+            $crate::Obfuscation::Foliage, 
+            $crate::ObfMode::None
+        )
+    };
+
+    ($base:expr, $size:expr, $time:expr, $mode:expr) => {
+        $crate::__private::hypnus_entry(
+            $base, 
+            $size, 
+            $time, 
+            $crate::Obfuscation::Foliage, 
+            $mode
+        )
+    };
+}
+
+/// Enumeration(内部字段是互斥的) of supported memory obfuscation strategies:作为tiemr! wait! foliage!的参数,以及_private/hypnus_entry() 的参数
 ///
 /// 用于指定休眠混淆的底层调度方式(线程池/APC),并用于fiber入口处路由执行框架;无论Timer还是Foliage,核心主载荷的加密方式都是写死的(ROP链中的SystemFunction040)
 pub enum Obfuscation {
     /// The technique using windows thread poll(TpSetTimer)
-    /// 单元变体（Unit Variant):该类型不携带数据,写出全名就是初始化
+    /// enum的单元变体（Unit Variant):该类型不携带数据,写出全名就是初始化.其他形式需要初始化: 元组变体 Timer(u32), ;结构体变体 Timer{ delay:u32,repeat:bool}, 
     Timer,
     /// The technique using windows thread poll(TpSetWait)
     Wait,
@@ -89,22 +218,15 @@ pub enum Obfuscation {
 
 // derive相关 详见rust grammer
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// 代表透明内存布局(编译时,把该类型当作其内部的类型对待):强制ObfMode结构体内部字段布局和定义时的内部字段完全一致(物理内存中的大小(等于u32的4字节大小)/对齐(等于u32的4字节对齐)/abi(如一个函数接收这个类型的参数时,与接收一个u32没有区别.
-// 如果没有这个属性,编译器可能把这个结构体通过栈/指针来隐式传递).加上这属性让其与u32一致,不能有多余padding,避免rustc的优化(默认是#[repr(Rust)]).使ObfMode中u32的值和物理属性与u32完全一致.
-// 这是rust的零成本抽象,写源码时,不能把普通u32传给ObfMode,保证了类型安全;在编译后的运行期,ObfMode的外壳被剥离,内存中只留下一个u32.可以把ObfMode直接写入R9寄存器
+// 详见注释14
 #[repr(transparent)]
-/// 元组结构体(包含一个匿名字段/成员);
 /// 是Rust中的NewType模式:即用结构体包装一个已有类型以提供类型安全;
-/// 该结构体用于表示:混淆中是否开启额外的内存操作特权(是私有堆独立加密/主载荷的rwx权限妥协).该结构体ObfMode不改变使用的加密方式(SystemFunction040),只更改内存权限
-pub struct ObfMode(pub u32);
+/// 该结构体用于表示:混淆中是否开启额外的内存操作特权(私有堆独立加密/主载荷的rwx权限妥协).该结构体ObfMode不改变使用的加密方式(SystemFunction040),只更改内存权限
+pub struct ObfMode(pub u32); // 元组结构体(包含一个匿名字段/成员);
 
 /// 后续会手动传入timer!/wait!/Hypnus结构体.在执行时,会通过这个值决定如何操作内存加密
 impl ObfMode {
-    // Rust中,在impl中为结构体定义附属于该类型的常量,称为关联常量(非常Idiomatic Rust的设计模式):以ObfMode::Heap的形式使用,且其命名空间被锁定在ObfMode:: 空间中,不会与rust prelude的Option::None发生冲突.如果不在impl块中定义pub const None: ObfMode = ObfMode(0b0000);则会污染当前模块的命名空间.
-    // 这么写的好处:1. 模拟enum类型,同时保持 #[repr(transparent)]的底层物理特性.如果使用enum会有tag标识. 2. 高内聚性encapsulation:符合面向对象驱动的设计思想,None\Heap\Rwx是ObfMode类型的合法预设值,将它们和ObfMode绑在一起,提升代码可读性
-    // 这三个常量的生命周期:在Rust中,只要是const关键字定义的常量,无论在什么地方,其生命周期和内存行为都是一致的. 1. const在编译时会被直接内联到所有调用它的地方(即查找和替换,不占用任何真实的内存地址):在运行时ObfMode::None没有一般变量的堆栈生命周期,不占用运行时的变量生存期,不会在程序运行期间被释放/销毁 2. 若取其引用,自动提到'static.rustc将该常量的值放入程序只读数据段.rdata
-    // 这里的None是一个全局公开常量,其内部的值是ObfMode(0b0000);借助#[repr(transparent)],其本质是一个u32,但在Rust类型系统角度,它是一个新的ObfMode类型.
-    // None不是rust关键字(是core::option::Option::None).且控制在impl ObfMode命名空间中,不会和预导入的None冲突
+    // 详见注释15
     pub const None: Self = ObfMode(0b0000);
 
     // ObfMode结构体内部只有一个u32,后面的Heap/Rwx都是ObfMode这个结构体的不同值(封装了不同的u32)
@@ -169,7 +291,7 @@ impl Hypnus {
             time,
             // 在宏调用时赋予了实参.这是省略写法=mode:mode, rust中,实例化一个结构体时,如果当前作用域内存在一个与结构体字段同名的变量.可以省略:value的赋值部分
             mode,
-            cfg: init_config()?,
+            cfg: init_config()?,// 书签
         })
     }
 
@@ -1121,6 +1243,95 @@ impl Hypnus {
     }
 }
 
+// 通常用于隐藏宏内部的私有实现,当自定义的宏在展开时必须跨mod调用辅助函数,为了宏调用成功这个辅助函数必须声明为pub.但一旦声明为pub,它就会出现在库文档中,用户可能错误的直接调用它.在辅助函数上加上#[doc(hidden)].这样宏依然可以在后台正常调用,但普通用户在开发者文档中完全看不到它,从而保证了API的整洁,防止用户误用.
+// #[doc(hidden)]具有递归隐藏特性:在一个mod上标记后,该模块中的所有成员,包括其中所有的pub函数,结构体等,都会自动且无条件的从文档中隐藏.
+#[doc(hidden)]
+pub mod _private{
+
+    // a pointer type that uniquely owns a heap allocation of type T:用于在堆上分配内存,跨越fiber切换时的栈边界
+    use alloc::boxed::Box;
+    use crate::winapis::{ConvertFiberToThread, ConvertThreadToFiber, CreateFiber, DeleteFiber, SwitchToFiber};
+
+// 导入父模块(mod hypnus)
+    use super::*;
+
+    /// executive sequeue using the specified obfuscation strategy
+pub fn hypnus_entry(base:*mut c_void,size:u64,time:u64,obf:Obfuscation,mode:ObfMode) {
+    
+    // master承载了fiber handle 类型是*mut c_void.
+    // 该函数将当前线程转为fiber
+    let master = ConvertThreadToFiber(null_mut());
+    // 极端情况下,edr会监控该api或因系统资源枯竭导致thread to fiber失败,导致蓝屏
+    if master.is_null() {
+        return;
+    }
+
+    /// structure passed to the fiber containing the Hypnus
+    struct FiberContext{
+        hypnus:Box<Hypnus>,
+        obf:Obfuscation,
+        master:*mut c_void,
+    }
+
+    /// trampoline function executed inside the fiber
+    /// 
+    /// it unpacks the FiberContext,runs the selected obfuscation method,and optionally logs error in debug mode
+    extern "system" fn hypnus_fiber(ctx:*mut c_void) {
+        unsafe {
+            let mut ctx = Box::from_raw(ctx as *mut FiberContext);
+            let _result = match ctx.obf{
+                Obfuscation::Timer=>ctx.hypnus.timer(),
+                Obfuscation::Wait=>ctx.hypnus.wait(),
+                Obfuscation::Foliage=>ctx.hypnus.foliage(),
+            };
+           #[cfg(debug_assertions)]
+                if let Err(_error) = _result {
+                    debug_log!("[Hypnus] {:?}", _error);
+                }
+                SwitchToFiber(ctx.master);
+        }
+    }
+
+    match Hypnus::new(base as u64, size, time, mode) {
+        Ok(hypnus)=>{
+            // creats the context to be passed into the new fiber
+            // 当cpu执行流在旧栈(主线程栈)与新栈(fiber栈)之间切换时,普通的栈变量会失效,必须使用heap.详见注释13
+            let fiber_ctx = Box::new(
+                FiberContext{
+                    hypnus:Box::new(hypnus),
+                    obf,
+                    master
+                }
+            );
+            // creates a new fiber with 1MB stack,pointing to the hypnus_fiber function
+            let fiber = CreateFiber(
+                // 堆栈初始提交大小
+                0x100000, Some(hypnus_fiber), Box::into_raw(fiber_ctx).cast());
+                if fiber.is_null() {
+                    return;
+                }
+
+SwitchToFiber(fiber);
+                DeleteFiber(fiber);
+                ConvertFiberToThread();
+
+
+
+        }
+
+        Err(_error )=>{ 
+            #[cfg(debug_assertions)]
+              
+                    debug_log!("[Hypnus] {:?}", _error);
+                }
+        
+    }
+
+
+}
+}
+
+
 /// converts self to a u64 that representing the pointer value
 ///
 trait Asu64 {
@@ -1312,3 +1523,22 @@ fn xor(data: *mut u8, len: usize, key: &[u8; 8]) {
 // 1. rust销毁局部变量的触发条件是执行流离开作用域.由于主线程在NtSignalAndWaitForSingleObject被os挂起,cpu停止执行当前线程的代码.那么执行流就没有走到函数结尾(}),从rustc语义来看,ctxs依然处于它的生存作用域内.因此,rustc自动生成的清理代码Drop析构函数,并没有执行
 // 2. 纤程栈的生命周期:普通局部变量的栈,由当前cpu的rsp寄存器决定,在普通函数调用中,一旦函数通过ret返回,rsp会弹出,原来的栈空间会被后续其他函数栈帧覆盖;而fiber的栈,在调用CreatFiber时,win内核在heap区申请一块1MB的物理虚拟内存页,将rsp指向这块内存的末尾作为fiber的专属栈.只要不主动调用DeleteFiber,os内核就会在内存中保留这1MB内存页,不会将其回收或分配给其他人.主线程在休眠期,其rsp依然指向这个fiber栈,这块1mb的内存数据依然完好,ctxs的数据也完好.
 // 3. rustc只负责在编译时,在函数结尾插入栈回退和变量清理的机器码;os则负责在运行时,控制cpu是否执行这些机器码,以及控制物理内存页的存留.我们通过os调用,让os在运行期间把线程冻结在函数中段,所以编译器在编译期写好的销毁局部变量的指令就没有机会运行.一旦工作线程把主线程唤醒,主线程恢复执行,跑完foliage函数并退出fiber,执行流到达函数结尾}.rustc才会去销毁这些变量,随后主线程调用DeleteFiber,os把这1mb内存还给系统.这完全符合rust内存安全规范.
+
+// 注释13
+// 1. 双栈内存空间存在隔离:fiber创建后,在SwitchToFiber前后,系统内存发生了物理切换.主线程栈是操作系统在创建进程时分配的默认栈.fiber栈是调用createfiber时,内核在虚拟地址空间中分配的独立1MB内存区域.当主线程执行SwitchToFiber时,cpu的rsp寄存器瞬间被修改,指向新的1mb的纤程栈.此时,cpu的所有动作都在这个新栈上运行.
+// 2. 为什么不能使用栈变量传递数据:在rust的线性执行流中,编译器是通过{}判断变量生存期的,但SwitchToFiber在底层是一条修改rsp并跳转的汇编指令.但rust编译器无法感知这次跳转,依旧认为hypnus_entry函数继续往下走.从而将旧栈上fiber_ctx内存回收或重写.而此时,新栈(fiber)里的代码还在通过指针尝试读取旧栈上的fiber_ctx 这就会读取到已被破坏的脏数据,导致程序崩溃
+// 2.1 此外,当fiber完成任务后,执行流通过SwitchToFiber重新切回主线程(旧栈).主线程醒来后会调用DeleteFiber销毁新栈,并通知内核将fiber的1mb纤程栈物理页从进程空间中注销并销毁.主线程后续无法读取到任何混淆状态,也无法执行后续的解密清理.
+// 3. heap是完美的中转:heap不属于特定栈,且其内存是全局共享,其生命周期由自己手动控制.
+// 3.1 手动控制heap的生命周期:rust中没有像c那种free(ptr)显示释放内存的函数.rust是RAII(资源获取即初始化)的.在用Box::new()分配堆上的内存后.后续Box::into_raw(fiber_ctx).cast() 这里将Box转为裸指针,并移交所有权.其向rustc通知,忘掉这块内存,不要在函数结束时释放它,我自己接管生命周期.后续将上文的裸指针重新包装回Box,并交出所有权(Box::from_raw(ptr)).在后续的函数中回自动释放该块内存.如果忘了Box::from_raw(ptr),这块内存永远释放不掉.
+
+// 注释14
+// 代表透明内存布局(编译时,把该类型当作其内部的类型对待):强制ObfMode结构体内部字段布局和定义时的内部字段完全一致(物理内存中的大小(等于u32的4字节大小)/对齐(等于u32的4字节对齐)/abi(如一个函数接收这个类型的参数时,与接收一个u32没有区别.
+// 如果没有这个属性,编译器可能把这个结构体通过栈/指针来隐式传递).加上这属性让其与u32一致,不能有多余padding,避免rustc的优化(默认是#[repr(Rust)]).使ObfMode中u32的值和物理属性与u32完全一致.
+// 这是rust的零成本抽象,写源码时,不能把普通u32传给ObfMode,保证了类型安全;在编译后的运行期,ObfMode的外壳被剥离,内存中只留下一个u32.可以把ObfMode直接写入R9寄存器
+
+// 注释15
+// Rust中,在impl中为结构体定义附属于该类型的常量,称为关联常量(非常Idiomatic Rust的设计模式):以ObfMode::Heap的形式使用,且其命名空间被锁定在ObfMode:: 空间中,不会与rust prelude的Option::None发生冲突.如果不在impl块中定义pub const None: ObfMode = ObfMode(0b0000);则会污染当前模块的命名空间.
+    // 这么写的好处:1. 模拟enum类型,同时保持 #[repr(transparent)]的底层物理特性.如果使用enum会有tag标识. 2. 高内聚性encapsulation:符合面向对象驱动的设计思想,None\Heap\Rwx是ObfMode类型的合法预设值,将它们和ObfMode绑在一起,提升代码可读性
+    // 这三个常量的生命周期:在Rust中,只要是const关键字定义的常量,无论在什么地方,其生命周期和内存行为都是一致的. 1. const在编译时会被直接内联到所有调用它的地方(即查找和替换,不占用任何真实的内存地址):在运行时ObfMode::None没有一般变量的堆栈生命周期,不占用运行时的变量生存期,不会在程序运行期间被释放/销毁 2. 若取其引用,自动提到'static.rustc将该常量的值放入程序只读数据段.rdata
+    // 这里的None是一个全局公开常量,其内部的值是ObfMode(0b0000);借助#[repr(transparent)],其本质是一个u32,但在Rust类型系统角度,它是一个新的ObfMode类型.
+    // None不是rust关键字(是core::option::Option::None).且控制在impl ObfMode命名空间中,不会和预导入的None冲突

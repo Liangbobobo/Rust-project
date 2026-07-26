@@ -91,7 +91,9 @@ impl Gadget {
         for base in modules {
             if let Some(range) = get_text_section(base as *mut c_void) {
                 // 通过find()找到const JMP_GADGETS中对应的jmp gadget
-                find(base, range).first().copied();
+                if let Some(gadget) = find(base, range).first().copied() {
+        gadgets.push(gadget);
+    }
             }
         }
 

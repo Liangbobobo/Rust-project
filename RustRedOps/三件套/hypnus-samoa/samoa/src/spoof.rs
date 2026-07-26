@@ -4,7 +4,7 @@
 // 本文件函数的流程图: -> ->
 // 每个函数的流程图: -> ->
 
-// 优化:这里用到的伪造栈链,应当自己再找一套,避免因hypnus开源被edr记录,增加被发现的风险.是否有必要,需要严谨论证
+// 优化:这里用到的伪造栈链,应当自己再找一套,避免因hypnus开源被edr记录,增加被发现的风险:换成自己的伪造链,对EDR影响不大,但需要认真验证.
 use crate::config::Config;
 use crate::error::HypnusError::{
     AddRspGadgetNotFound, FailToAllocateGadgetPointerPage, FaileToChangeMemoryToRx,
