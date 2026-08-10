@@ -1460,11 +1460,8 @@ fn xor(data: *mut u8, len: usize, key: &[u8; 8]) {
 // 而NtSignalAndWaitForSingleObject:通过一次syscall陷入Ring 0内核,在内核调度器锁定状态下,原子化完成点亮A并将当前线程挂起去等待B.从而杜绝任何中间线程抢占或打断的可能
 // 这里events[2]表示要点亮的内核对象句柄; events[3]表示要挂起等待的内核对象句柄; 0 是否进入警惕状态; null_mut()在超时时间的参数位置上,代表无限等待.
 
-// 注释10
-// APC,asynchronous procedure call异步调用过程:是win内核提供的一种基础同步机制,运行os或应用程序在特定线程上下文环境中,异步执行一段指定的函数/过程.
-// 根据调用约定和运行级别,win下的APC分为:1. 内核模式APC:由内核或驱动程序使用,通常用于系统底层任务(如 异步IO操作的完成).其优先级高于用户态代码,一旦触发,内核会强制中断当前线程的用户态执行流,切入内核态执行该APC;
-// 2. 用户模式apc:由用户态应用程序使用(通过 Win32 API QueueUserAPC 或内核 Native API NtQueueApcThread),用户态apc的执行是被动的.当向某线程发送apc任务后,该任务会排在线程apc队列中.只有当目标线程主动调用特定的同步函数并进入alertable state警惕状态时,内核才会派发并执行队列中的apc.常见使线程进入警惕态的api:SleepEx(..., TRUE),WaitForSingleObjectEx(..., TRUE),SignalObjectAndWait(..., TRUE),MsgWaitForMultipleObjectsEx(..., QS_ALLINPUT, MWMO_ALERTABLE)
-// 3. 特殊用户模式apc:win10 19041及后续版本适用.特殊用户模式apc不需要线程处于alertable state状态即可强制执行.主要为了支持底层的环形缓冲区ring buffer和高并发异步IO调度,减少不必要的线程上下文切换开销.但win10/11,也推出了ETW-Ti（Threat Intelligence)内核遥测接口,当任何进程尝试调用NtQueueApcThread向另一进程的线程注入apc时,内核会通过ETW-Ti产生遥测事件,获取该动作的完整上下文,这使得传统的跨进程apc注入极易被查杀.
+// 注释10 详见 windows internals/APC 
+
 
 // 注释11
 // 如果在foliage函数开始运行就使用RtlCaptureContext抓主线程快照,抓到的是正在运行的,正在修改栈帧的主线程状态.

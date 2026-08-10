@@ -1,7 +1,7 @@
 use crate::module::{get_ntdll_address};
 use crate::types::{CONTEXT, HANDLE, NTSTATUS, NtGetThreadContextFn, NtSetThreadContextFn, PEB};
 use crate::{dinvok};
-
+use crate::types::*;
 /// Returns the default heap handle for the current process from the PEB.
 #[inline(always)]
 pub fn GetProcessHeap() -> HANDLE {
@@ -65,6 +65,19 @@ pub fn NtCurrentPeb()->*const PEB {
     return unsafe { *(__readx18(0x60) as *const *const PEB) };
     }
    
+/// retrieve a pointer to the TEB of the current thread
+#[inline(always)]
+pub fn NtCurrentTeb()->*const TEB {
+    #[cfg(target_arch = "x86_64")]
+    return __readgsqword(0x30) as *const TEB;
+
+     #[cfg(target_arch = "x86")]
+    return __readfsdword(0x18) as *const TEB;
+
+    #[cfg(target_arch = "aarch64")]
+    return unsafe { *(__readx18(0x30) as *const *const TEB) };
+}
+
 
 #[inline(always)]
 #[cfg(target_arch = "x86_64")]

@@ -63,87 +63,158 @@ use std::collections::HashMap;
 use std::vec::Vec;
 
 fn main() {
-    // List of APIs and Modules to test
-    let api_list = vec![
-        // Modules
-        "KERNEL32.DLL", "ntdll.dll", "advapi32.dll",
-        "kernel32.dll", "NTDLL.DLL", "ADVAPI32.DLL",
-
-        // Core APIs
-        "NtAllocateVirtualMemory",
-        "NtProtectVirtualMemory",
-        "NtCreateThreadEx",
-        "NtWriteVirtualMemory",
-        "NtOpenProcess",
-        "NtQueryInformationProcess",
-        "NtGetContextThread",
-        "NtSetContextThread",
-        
-        // Exception Handling
-        "AddVectoredExceptionHandler",
-        "RemoveVectoredExceptionHandler",
-
-        // Standard Windows APIs
-        "LoadLibraryA",
-        "VirtualAlloc",
-        "GetProcessHeap",
-        "GetStdHandle",
-        "GetProcAddress",
-        "GetModuleHandleA",
-        "ExitProcess",
-        "WaitForSingleObject",
-        "CreateFileW",
-        "ReadFile",
-        "WriteFile",
-        "VirtualFree",
-        "VirtualProtect",
-        "CreateRemoteThread",
-        "OpenProcess",
-        "RtlMoveMemory",
-        "RtlZeroMemory",
-
-        // Forwarded Exports (for module resolution tests)
-        "SetIoRingCompletionEvent",
-        "SetProtectedPolicy",
-        "SetProcessDefaultCpuSetMasks",
-        "SetDefaultDllDirectories",
-        "SetProcessDefaultCpuSets",
-        "InitializeProcThreadAttributeList",
-        "SystemFunction028",
-        "PerfIncrementULongCounterValue",
-        "PerfSetCounterRefValue",
-        "I_QueryTagInformation",
-        "TraceQueryInformation",
-        "TraceMessage",
+    // List of APIs and Modules grouped by category across puerto / mariana / samoa
+    let api_groups: &[(&str, &[&str])] = &[
+        (
+            "1. Modules (包含大小写，验证 fnv1a_utf16 大小写折叠特征)",
+            &[
+                "kernel32.dll", "KERNEL32.DLL",
+                "ntdll.dll", "NTDLL.DLL",
+                "kernelbase.dll", "KERNELBASE.DLL",
+                "advapi32.dll", "ADVAPI32.DLL",
+                "cryptbase.dll", "CryptBase", "CRYPTBASE.DLL",
+            ],
+        ),
+        (
+            "2. Stack Spoofing Core APIs (uwd / mariana)",
+            &[
+                "RtlUserThreadStart",
+                "BaseThreadInitThunk",
+            ],
+        ),
+        (
+            "3. Dynamic Syscalls & Native APIs (uwd / mariana / samoa)",
+            &[
+                "NtAllocateVirtualMemory",
+                "NtProtectVirtualMemory",
+                "NtCreateThreadEx",
+                "NtWriteVirtualMemory",
+                "NtOpenProcess",
+                "NtQueryInformationProcess",
+                "NtGetContextThread",
+                "NtSetContextThread",
+                "NtSignalAndWaitForSingleObject",
+                "NtQueueApcThread",
+                "NtAlertResumeThread",
+                "NtLockVirtualMemory",
+                "NtDuplicateObject",
+                "NtCreateEvent",
+                "NtWaitForSingleObject",
+                "NtClose",
+                "NtSetEvent",
+                "NtContinue",
+                "NtTestAlert",
+                "RtlExitUserThread",
+                "ZwWaitForWorkViaWorkerFactory",
+            ],
+        ),
+        (
+            "4. ThreadPool (TP) APIs (samoa / hypnus)",
+            &[
+                "TpAllocPool",
+                "TpSetPoolStackInformation",
+                "TpSetPoolMinThreads",
+                "TpSetPoolMaxThreads",
+                "TpAllocTimer",
+                "TpSetTimer",
+                "TpAllocWait",
+                "TpSetWait",
+                "TpReleaseCleanupGroupMembers",
+                "CloseThreadpool",
+            ],
+        ),
+        (
+            "5. Memory & Fiber & System Helper APIs (samoa / hypnus)",
+            &[
+                "RtlWalkHeap",
+                "RtlCaptureContext",
+                "RtlAcquireSRWLockExclusive",
+                "SetProcessValidCallTargets",
+                "ConvertFiberToThread",
+                "ConvertThreadToFiber",
+                "CreateFiber",
+                "DeleteFiber",
+                "SwitchToFiber",
+                "SystemFunction040",
+                "SystemFunction041",
+                "EnumDateFormatsA",
+            ],
+        ),
+        (
+            "6. Exception Handling & Win32 APIs (puerto / dinvk)",
+            &[
+                "AddVectoredExceptionHandler",
+                "RemoveVectoredExceptionHandler",
+                "LoadLibraryA",
+                "VirtualAlloc",
+                "GetProcessHeap",
+                "GetStdHandle",
+                "GetProcAddress",
+                "GetModuleHandleA",
+                "ExitProcess",
+                "WaitForSingleObject",
+                "CreateFileW",
+                "ReadFile",
+                "WriteFile",
+                "VirtualFree",
+                "VirtualProtect",
+                "CreateRemoteThread",
+                "OpenProcess",
+                "RtlMoveMemory",
+                "RtlZeroMemory",
+            ],
+        ),
+        (
+            "7. Forwarded Exports (for module resolution tests)",
+            &[
+                "SetIoRingCompletionEvent",
+                "SetProtectedPolicy",
+                "SetProcessDefaultCpuSetMasks",
+                "SetDefaultDllDirectories",
+                "SetProcessDefaultCpuSets",
+                "InitializeProcThreadAttributeList",
+                "SystemFunction028",
+                "PerfIncrementULongCounterValue",
+                "PerfSetCounterRefValue",
+                "I_QueryTagInformation",
+                "TraceQueryInformation",
+                "TraceMessage",
+            ],
+        ),
     ];
 
     let mut hashes: HashMap<u32, &str> = HashMap::new();
     let mut collisions: Vec<(&str, &str, u32)> = Vec::new();
 
-    println!("\n[+] Starting Hash Calculation & Collision Check (Standalone Example)...");
-    println!("--------------------------------------------------");
+    println!("\n[+] Starting Hash Calculation & Collision Check (puerto / mariana / samoa)...");
 
-    for api in api_list {
-        // Convert to UTF-16 for the hash function
-        let api_utf16: Vec<u16> = api.encode_utf16().collect();
-        let hash = fnv1a_utf16(&api_utf16);
+    for (category, apis) in api_groups {
+        println!("\n// =========================================================================");
+        println!("// {}", category);
+        println!("// =========================================================================");
 
-        // Print the calculated hash
-        println!("API: {:<35} -> Hash: 0x{:08X}", api, hash);
+        for api in *apis {
+            // Convert to UTF-16 for the hash function
+            let api_utf16: Vec<u16> = api.encode_utf16().collect();
+            let hash = fnv1a_utf16(&api_utf16);
 
-        // Check for collisions
-        if let Some(existing_api) = hashes.get(&hash) {
-            // If hashes match, check if the source strings are actually different (ignoring case)
-            // The hash function is case-insensitive, so "ntdll.dll" == "NTDLL.DLL" is NOT a collision.
-            if !existing_api.eq_ignore_ascii_case(api) {
-                collisions.push((api, *existing_api, hash));
+            // Print the calculated hash
+            println!("API/Module: {:<35} -> Hash: 0x{:08X} (dec: {})", api, hash, hash);
+
+            // Check for collisions
+            if let Some(existing_api) = hashes.get(&hash) {
+                // If hashes match, check if the source strings are actually different (ignoring case)
+                // The hash function is case-insensitive, so "ntdll.dll" == "NTDLL.DLL" is NOT a collision.
+                if !existing_api.eq_ignore_ascii_case(api) {
+                    collisions.push((api, *existing_api, hash));
+                }
+            } else {
+                hashes.insert(hash, api);
             }
-        } else {
-            hashes.insert(hash, api);
         }
     }
 
-    println!("--------------------------------------------------");
+    println!("\n--------------------------------------------------");
 
     if !collisions.is_empty() {
         println!("\n[!] COLLISIONS DETECTED:");

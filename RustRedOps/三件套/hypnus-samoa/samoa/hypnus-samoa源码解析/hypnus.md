@@ -1,60 +1,62 @@
-- [每个函数都一定有对应的栈帧吗](#每个函数都一定有对应的栈帧吗)
-- [foliage](#foliage)
-- [APC异步过程调用](#apc异步过程调用)
-- [NtQueueApcThread](#ntqueueapcthread)
-- [十个ctxs功能](#十个ctxs功能)
-- [NtSetEvent2](#ntsetevent2)
-- [win的定时器](#win的定时器)
-- [TPAllocTimer](#tpalloctimer)
-  - [第一个参数是指针的指针](#第一个参数是指针的指针)
-- [RtlCaptureContext 和 NtGetContextThread](#rtlcapturecontext-和-ntgetcontextthread)
-- [TpAllocTimer中的trampoline](#tpalloctimer中的trampoline)
-- [threadpool workerfactory worker](#threadpool-workerfactory-worker)
-- [SystemFunction041](#systemfunction041)
-- [SystemFunction040](#systemfunction040)
-- [WaitForSingleObject](#waitforsingleobject)
-- [NtWaitForSingleObject](#ntwaitforsingleobject)
-- [`ctxs[0]`](#ctxs0)
-- [关于PE文件的节区Section](#关于pe文件的节区section)
-- [IMAGE\_SECTION\_HEADER](#image_section_header)
-- [section\_by\_name](#section_by_name)
-- [dinvk::helper::section()](#dinvkhelpersection)
-- [fn timer::NtDuplicateObject](#fn-timerntduplicateobject)
-- [fn timer::rax](#fn-timerrax)
-- [hypnus.rs的执行流](#hypnusrs的执行流)
-- [struct TP\_POOL\_STACK\_INFORMATION](#struct-tp_pool_stack_information)
-- [TpAllocWait](#tpallocwait)
-- [TP\_CALLBACK\_ENVIRON\_V3](#tp_callback_environ_v3)
-- [TpAllocPool(\&mut pool, null\_mut())](#tpallocpoolmut-pool-null_mut)
-- [三个event\[\]](#三个event)
-- [win64 Event](#win64-event)
-- [Event Thread区别](#event-thread区别)
-- [NtCreateEvent](#ntcreateevent)
-  - [与函数原型的映射解析](#与函数原型的映射解析)
-- [struct ObfMode](#struct-obfmode)
-- [Fiber 纤程(Windows)](#fiber-纤程windows)
-  - [适用场景](#适用场景)
-  - [ConvertThreadToFiber](#convertthreadtofiber)
-- [mod \_\_private](#mod-__private)
-- [扩展-关于Pin代替Box](#扩展-关于pin代替box)
-- [扩展-Box::into\_raw/内部数据拷贝时发生的内部布局移动](#扩展-boxinto_raw内部数据拷贝时发生的内部布局移动)
-- [CONTEXT-暂存知识点,后续需要移动到其他文件中](#context-暂存知识点后续需要移动到其他文件中)
-  - [进程 线程 纤程切换概览](#进程-线程-纤程切换概览)
-- [扩展-关于handle的概念](#扩展-关于handle的概念)
-- [win64 threadpool](#win64-threadpool)
-  - [系统默认线程池](#系统默认线程池)
-- [TpSetWait 和 TPAllocWait](#tpsetwait-和-tpallocwait)
-- [线程池和事件](#线程池和事件)
-- [IOCP (I/O Completion Port)和worker factory](#iocp-io-completion-port和worker-factory)
-- [扩展-handle句柄](#扩展-handle句柄)
-- [扩展- `AsRef<[u8]>`](#扩展--asrefu8)
+- [SPECIFICATION](#specification)
+  - [扩展-每个函数都一定有对应的栈帧吗](#扩展-每个函数都一定有对应的栈帧吗)
+  - [foliage](#foliage)
+  - [NtQueueApcThread](#ntqueueapcthread)
+  - [十个ctxs功能](#十个ctxs功能)
+  - [NtSetEvent2](#ntsetevent2)
+  - [win的定时器](#win的定时器)
+  - [TPAllocTimer](#tpalloctimer)
+    - [第一个参数是指针的指针](#第一个参数是指针的指针)
+  - [RtlCaptureContext 和 NtGetContextThread](#rtlcapturecontext-和-ntgetcontextthread)
+  - [TpAllocTimer中的trampoline](#tpalloctimer中的trampoline)
+  - [threadpool workerfactory worker](#threadpool-workerfactory-worker)
+  - [SystemFunction041](#systemfunction041)
+  - [SystemFunction040](#systemfunction040)
+  - [WaitForSingleObject](#waitforsingleobject)
+  - [NtWaitForSingleObject](#ntwaitforsingleobject)
+  - [`ctxs[0]`](#ctxs0)
+  - [关于PE文件的节区Section](#关于pe文件的节区section)
+  - [IMAGE\_SECTION\_HEADER](#image_section_header)
+  - [section\_by\_name](#section_by_name)
+  - [dinvk::helper::section()](#dinvkhelpersection)
+  - [fn timer::NtDuplicateObject](#fn-timerntduplicateobject)
+  - [fn timer::rax](#fn-timerrax)
+  - [hypnus.rs的执行流](#hypnusrs的执行流)
+  - [struct TP\_POOL\_STACK\_INFORMATION](#struct-tp_pool_stack_information)
+  - [TpAllocWait](#tpallocwait)
+  - [TP\_CALLBACK\_ENVIRON\_V3](#tp_callback_environ_v3)
+  - [TpAllocPool(\&mut pool, null\_mut())](#tpallocpoolmut-pool-null_mut)
+  - [三个event\[\]](#三个event)
+  - [struct ObfMode](#struct-obfmode)
+  - [Fiber 纤程(Windows)](#fiber-纤程windows)
+    - [适用场景](#适用场景)
+    - [ConvertThreadToFiber](#convertthreadtofiber)
+  - [mod \_\_private](#mod-__private)
+  - [扩展-关于Pin代替Box](#扩展-关于pin代替box)
+  - [扩展-Box::into\_raw/内部数据拷贝时发生的内部布局移动](#扩展-boxinto_raw内部数据拷贝时发生的内部布局移动)
+  - [CONTEXT-暂存知识点,后续需要移动到其他文件中](#context-暂存知识点后续需要移动到其他文件中)
+    - [进程 线程 纤程相互之间的切换](#进程-线程-纤程相互之间的切换)
+  - [win64下指针的各种类型和需要注意的情况以及和rust对应情况](#win64下指针的各种类型和需要注意的情况以及和rust对应情况)
+  - [扩展-关于handle的概念](#扩展-关于handle的概念)
+  - [win64 threadpool](#win64-threadpool)
+    - [系统默认线程池](#系统默认线程池)
+  - [TpSetWait 和 TPAllocWait](#tpsetwait-和-tpallocwait)
+  - [线程池和事件](#线程池和事件)
+  - [IOCP (I/O Completion Port)和worker factory](#iocp-io-completion-port和worker-factory)
+  - [扩展-handle句柄](#扩展-handle句柄)
+  - [扩展- `AsRef<[u8]>`](#扩展--asrefu8)
 
 
+# SPECIFICATION
+
+hypnus.rs中只保留源码之间的逻辑
+
+背景知识和对应的函数在hypnus.md中
 
 
-## 每个函数都一定有对应的栈帧吗
+## 扩展-每个函数都一定有对应的栈帧吗
 
-不是
+**不是**
 
 1. 叶子函数没有栈帧.叶子函数不调用其他函数,且不需要再栈上分配空间(没有超出寄存器数量的局部变量,不需要备份非易失性寄存器)
 2. 内联函数:当编译器发现某个函数非常简单,或者使用了`#[inline]`标记,在编译期间会执行内联优化,将被调用函数的机器码复制粘贴到调用者的函数体内部.因此,被内联的函数完全融入调用者的栈帧,它自己不占用任何独立的栈帧
@@ -68,14 +70,7 @@
 2. 替身线程只存在于休眠混淆期间。休眠结束，线程死亡。EDR就算在事后想回溯是谁解密了内存，也根本找不到那个线程的句柄
 3. 极度连贯：APC 队列由 Windows 内核调度，一旦唤醒，10个步骤行云流水，没有任何用户态的干预逻辑
 
-## APC异步过程调用
 
-APC (Asynchronous Procedure Call) 是 Windows内核提供的一种机制，允许程序将一个函数“强行塞进”某个线程的任务队列中。当这个线程闲下来（进入Alertable 警觉状态，比如正在调用 SleepEx或等信号）时，系统会打断它，强制它先去执行队列里的 APC函数，执行完了再回来
-
-本项目中:
-1. 常规APC参数:NtQueueApcThread(目标线程, 要执行的函数地址,传给函数的参数)
-2. hypnus中:调用是：NtQueueApcThread(目标线程, NtContinue的地址,我们伪造的CONTEXT地址)
-    * 此时执行APC时,实际上执行了NtContinue(&CONTECXT).NtContinue瞬间重置cpu的所有硬件寄存器.这意味着,每个APC并没有真正执行一个函数,而是进行一次暴力的硬件状态传递
 
 
 ## NtQueueApcThread
@@ -763,133 +758,7 @@ CONTEXT:属于硬件执行层(cpu/寄存器),决定cpu此刻具体的寄存器�
    * 绑定位置：在配置链条最后一环 `ctxs[9]` 时
    * 作用过程：这是整个链条的“终点线”。当之前的加解密、休眠任务全部顺序跑完，执行到 `ctxs[9]` 时，它会按照 RDX 里的指令点亮 `events[2]`。此时，主线程的`NtSignalAndWaitForSingleObject(..., events[2], ...)`接收到信号，宣告整个混淆周期结束
 
-## win64 Event
 
-Event:一种由内核管理的同步原语（Synchronization Object）
-1. 它是一个内核对象，拥有“有信号（Signaled）”和“无信号（Non-signaled）”两个物理状态
-2. 它允许一个线程在执行到特定位置时挂起等待（RedLight），直到另一个线程（或系统中断）将其状态修改为“有信号”（GreenLight），从而将其唤醒
-3. 用户态通过一个 64位的句柄（Handle）来操控它，是实现多线程复杂逻辑同步（如：A干完，B才能开始）的基石.[扩展-关于handle的概念](#扩展-关于handle的概念)
-
-**Event实质:**
-1. 在 Windows 内核中，事件的实质是一个存储在 非分页池（Non-paged Pool） 中的 C结构体，名为 KEVENT
-2. 每一个 KEVENT对象都包含一个核心头部：DISPATCHER_HEADER
-    * SignalState（信号状态）：一个简单的长整型（Long）。0 代表无信号，1代表有信号
-    * WaitListHead（等待列表头）：这是一个双向链表。它记录了此时此刻，有哪些线程正在等待这个事件
-3. 事件的实质不是代码，而是内核内存里的一块带状态的“记事本”，上面写着它是红灯还是绿灯，以及谁在排队
-4. Windows事件的实质是一个包含信号状态（SignalState）和等待链表（WaitList）的内核调度对象（KEVENT）；它之所以能挂起和恢复线程，是因为它能与 Windows内核调度器联动，通过修改线程在‘等待’与‘就绪’队列间的物理位置，实现对 CPU时间片的剥夺与重新分配
-
-
-**Event如何挂起/恢复线程**
-
-event本身不具备主动控制任何东西的能力，它只是一块死内存。真正控制线程调度的是 Windows 内核的核心组件——微内核分发器（Kernel Dispatcher）. Event 只是调度器用来做决策的数据依据.
-
-1. 在内核(ring0)视角下没有handle只有数据结构.Thread在内核中是用KTHREAD表示的庞大结构体;Event在内核中是用Kevent表示的小结构体,其内部有一个关键头部DISPATCHER_HEADER,该头部包含SignalState(当前信号值,0表示无信号,>0表示有信号)/WaitListHead(双向链表的表头,表示等待名单)
-
-2. 挂起机制:比如调用WaitForSingleObject(Event...)或NtWaitForSingleObject(event, ...) 时,底层最终会调用内核函数KeWaitForSingleObject.该底层内核函数会:
-    * 创建桥梁(KWAIT_BLOCK):内核并不会把THREAD直接塞进Event名单.而是在线程栈或内核池中临时创建一个等待块KWAIT_BLOCK的结构体.该结构体有三个指针,一个指回线程KTHREAD,一个指向事件KEVENT,一个用与连接链表
-    * 登记:内核把KWAIT_BLOCK挂载到KEVENT的WaitListHead双向链表.此时,Event知道有一个线程通过这个块连接了,等待绿灯
-    * 上下文切换(context switch):这是调度核心,Dispatcher将当前KTHREAD状态从running改为waiting.接着触发一次软中断,强制cpu保存当前线程所有寄存器状态,然后去os的Read Queue中找一个其他线程来运行.此时,你的线程在物理层面被踢出cpu
-
-3. 恢复机制(Event唤醒线程,即SetEvent的内核操作):当另一个线程(比如源码中的混淆线程)调用了SetEvent.底层会进入内核函数KeSetEvent,调度器开始接管
-    * 置位：内核将KEVENT中的 SignalState 改为 1
-    * 扫描等待链表：内核顺着KEVENT中WaitListHead链表查找发现之前挂在在其上的KWAIT_BLOCK.并继续向下找到木马线程KTHREAD
-    * 内核把KWAIT_BLOCK从Event中摘除解除绑定(如果这是一个自动重置事件,内核会顺手把SignalState重新改为0)
-    * 重新排队:内核将该被唤醒的kTHREAD状态从Waiting改为Ready.然后内核把该线程塞进某个cpu核心的就绪队列
-    * 被塞进就绪队列,不意味着线程立即跑代码,它还得等cpu
-    * 当KeSetEvent执行完毕返回或发生下一个时钟中断,内核会检查当前cpu的就绪队列.如果调度器发现刚才被唤醒的木马CPU优先级比当前正在CPU上跑的线程高,调度器会立刻preempt当前线程.
-    * 内核恢复木马线程之前保存的寄存器状态,把rip指向WaitForSingleObject之后的代码
-    * 此时木马线程重新占用cpu,继续向下执行
-
-
->在 hypnus 的这段代码中，events句柄代表的是三个独立的内核同步对象（KEVENT），它们充当异步任务链的‘时序锁’；而线程句柄（如h_thread）则代表受操纵的执行上下文（ETHREAD）。这两者的配合实现了：由‘事件’作为逻辑节拍，指挥‘线程’在影子栈中完成复杂的混淆动作
-> 事件是“信号”，线程是“载体”
-
-
-## Event Thread区别
-
-win64下,Event\Thread都是内核对象,且都通过Handle管理.
-1. 物理本质:
-    * Thread是os的基本调度单位,一个Thread拥有一个私有的CPU寄存器集合(CONTEXT)和一个物理栈内存Stack
-    * Event是内核维护的一个同步原语.是内核非分页池的结构化内存Kevent.内部包含一个SignalState状态和一个WaitList排队者名单
-2. 权限和控制权差异
-    * 线程切换是由内核调度器强制执行的.线程本身不知道自己被切换了,它的寄存器状态被悄悄保存到内核栈中
-    * Event是由程序员通过指令显式触发.触发一个Event并不代表立即切换cpu.只向内核通知,当SignalState为1,将排队的thread改为就绪
-
-
-
->设计事件（Event）的本质，是为了在操作系统层面实现‘被动通知机制’，从而替代高能耗、低可靠的‘主动查询机制’。它将‘等待’这个逻辑动作，从消耗 CPU指令的‘动态行为’，转化为由内核调度器托管的‘静态状态’，从而实现了计算资源的最优分配与多核环境下的原子同步
-
-> 线程是 CPU资源的消费者，通过寄存器与栈的动态流转实现程序逻辑；而事件是内核状态的载体，通过 SignalState 的物理翻转实现对线程执行流的逻辑阻断与重启。在 hypnus中，我们利用‘线程’去执行混淆，利用‘事件’去锁定这个线程的步拍，从而实现了一种受控的、可预期的‘幽灵执行流
-
-## NtCreateEvent
-
-```c
-/**
- * The NtCreateEvent routine creates an event object, sets the initial state of the event to the specified value,
- * and opens a handle to the object with the specified desired access.
- *
- * \param EventHandle A pointer to a variable that receives the event object handle.
- * \param DesiredAccess The access mask that specifies the requested access to the event object.
- * \param ObjectAttributes A pointer to an OBJECT_ATTRIBUTES structure that specifies the object attributes.
- * \param EventType The type of the event, which can be SynchronizationEvent or a NotificationEvent.
- * \param InitialState The initial state of the event object.
- * \return NTSTATUS Successful or errant status.
- * \see https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-zwcreateevent
- */
-_Kernel_entry_
-NTSYSCALLAPI
-NTSTATUS
-NTAPI
-NtCreateEvent(
-    _Out_ PHANDLE EventHandle,
-    _In_ ACCESS_MASK DesiredAccess,
-    _In_opt_ PCOBJECT_ATTRIBUTES ObjectAttributes,
-    _In_ EVENT_TYPE EventType,
-    _In_ BOOLEAN InitialState
-    );
-```
-
-在win底层开发和内核研究中,能够熟练阅读和解构这类原生c语言内核级函数声明是基本功.这类声明包含大量微软特有的修饰符(Macros/Annotations)和原生类型
-
-**函数前缀和修饰符**
-
-
-
-
-
-```rust
-/// Wrapper for the `NtCreateEvent` API.
-#[inline]
-pub fn NtCreateEvent(
-    EventHandle: *mut HANDLE,// 输出的事件句柄指针
-    DesiredAccess: u32,// 输入参数,期望的访问权限
-    ObjectAttributes: *mut c_void,// 输入参数,对象属性,原本指向内核结构体OBJECT_ATTRIBUTES  的指针,此处简化强转为*mut c_void.代表一个匿名事件,该匿名事件只存在于当前进程的私有句柄表中,隐蔽性高,外部工具难以直接检测
-    EventType: EVENT_TYPE,//详见下面解释
-    InitialState: u8,
-) -> NTSTATUS {
-    unsafe { 
-        (winapis().NtCreateEvent)(
-            EventHandle, 
-            DesiredAccess, 
-            ObjectAttributes, 
-            EventType, 
-            InitialState
-        ) 
-    }
-}
-```
-
-1. 通过winapis()调用dinvk::get_proc_address得到NtCreateEvent的内存地址.对该地址使用transmute强制转为一个函数指针,即本文件定义的NtCreateEvent函数指针
-2. EventType: EVENT_TYPE:指定事件对象的复位行为.NotificationEvent代表通知型事件/手动复位,一旦事件被设置为有信号状态,会一直保持有信号,直到显示调用NtResetEvent将其复位.所有正在等待该事件的线程会被同时唤醒.在hypnus中确保多个步骤的上下文可以安全的监听同一个状态信号.
-3. SynchronizationEvent,同步型事件/自动复位:一旦事件变为有信号状态,只会唤醒一个正在等待它的线程,在唤醒瞬间,内核会自动将该事件重新复位为无信号状态.
-4. InitialState,输入参数,初始状态.事件对象被创建时的初始激活状态,rust中1代表true,0代表false:1代表创建即为有信号active状态,任何线程此时调用NtWaitForSingleObject等待这个事件,都不会阻塞.0代表创建时为无信号状态,后续有线程调用等待函数,会立即陷入阻塞,直到其他线程调用NtSetEvent激活.hypnus中传入0,代表将主线程挂起,后续唤醒
-
-
-### 与函数原型的映射解析
-
-1. 属于ntdll.dll
-2. 
-3. EventType: EVENT_TYPE:这里是enum与原型参数是否匹配
 
 
 ## struct ObfMode
@@ -1421,42 +1290,31 @@ Pin 是 Rust 为了解决 “自引用结构体 (Self-referential Structs)” �
 
 
 
-### 进程 线程 纤程切换概览
+### 进程 线程 纤程相互之间的切换
 
 一、 进程切换（Process Switch）：地址空间的置换
 
-  当系统从进程 A 切换到进程 B
-  时，除了保存寄存器，最核心的是切换虚拟内存的映射关系。
+当系统从进程 A 切换到进程 B时，除了保存寄存器，最核心的是切换虚拟内存的映射关系。
+1. CR3 寄存器（Directory Table Base）：
+    * 精准定义：这是控制分页机制的 CPU 寄存器。
+    * 作用：它指向当前进程的页目录基址。切换 CR3 意味着 CPU现在看到的虚拟地址 0x400000 指向的是进程 B 的物理内存，而不是进程 A的
+2. EPROCESS / KPROCESS (内核对象)：
+    * 作用：内核中代表进程的结构体。它包含了进程的句柄表（Handle Table）、令牌（Token，决定权限）以及指向 PEB 的指针
+3. PEB (Process Environment Block)：
+    * 位置：用户态内存。
+    * 作用：保存了进程加载的模块列表（Ldr）、命令行参数、环境变量等。
 
-   1. CR3 寄存器（Directory Table Base）：
-       * 精准定义：这是控制分页机制的 CPU 寄存器。
-       * 作用：它指向当前进程的页目录基址。切换 CR3 意味着 CPU
-         现在看到的虚拟地址 0x400000 指向的是进程 B 的物理内存，而不是进程 A
-         的。
-   2. EPROCESS / KPROCESS (内核对象)：
-       * 作用：内核中代表进程的结构体。它包含了进程的句柄表（Handle
-         Table）、令牌（Token，决定权限）以及指向 PEB 的指针。
-   3. PEB (Process Environment Block)：
-       * 位置：用户态内存。
-       * 作用：保存了进程加载的模块列表（Ldr）、命令行参数、环境变量等。
+二、 线程切换（Thread Switch）：内核调度单元的转移
 
-  ---
-
-  二、 线程切换（Thread Switch）：内核调度单元的转移
-
-  线程是执行的最小单元。线程切换是由 内核调度器（Dispatcher） 完成的。
-
-   1. KTHREAD / ETHREAD (内核线程块)：
-       * 作用：这是内核管理线程的“账本”。它保存了线程的优先级、亲和性、内核栈指
-         针（Kernel Stack）。
-       * 关键点：当线程被切走时，它的 CONTEXT
-         实际上是被保存在它的内核栈里的，而不是保存在用户态。
-   2. TEB (Thread Environment Block)：
-       * 位置：用户态内存，通过 GS:[0x30] (x64) 访问。
-       * 必须精准更新的字段：
-           * StackBase & StackLimit：这是红队最关注的。如果 CONTEXT.Rsp
-             指向的地址超出了这两个字段定义的范围，系统会立即触发异常。
-           * TlsSlots：线程局部存储，很多库（如 C++ 标准库）依赖它运行。
+线程是执行的最小单元。线程切换是由内核调度器（Dispatcher） 完成的。
+1. KTHREAD / ETHREAD (内核线程块)：
+    * 作用：这是内核管理线程的“账本”。它保存了线程的优先级、亲和性、内核栈指针（Kernel Stack）
+    * 关键点：当线程被切走时，它的 CONTEXT实际上是被保存在它的内核栈里的，而不是保存在用户态
+2. TEB (Thread Environment Block)：
+    * 位置：用户态内存，通过 GS:[0x30] (x64) 访问。
+    * 必须精准更新的字段：
+        * StackBase & StackLimit：这是红队最关注的。如果 CONTEXT.Rsp指向的地址超出了这两个字段定义的范围，系统会立即触发异常。
+        * TlsSlots：线程局部存储，很多库（如 C++ 标准库）依赖它运行。
 
   ---
 
@@ -1489,21 +1347,14 @@ Pin 是 Rust 为了解决 “自引用结构体 (Self-referential Structs)” �
          进行任务切换，但系统依然利用它来保存当前线程的内核栈指针（RSP0）。当发
          生异常从用户态跳入内核态时，CPU 会从 TSS 里读取“救命”的内核栈地址
 
-
+## win64下指针的各种类型和需要注意的情况以及和rust对应情况
 
 ## 扩展-关于handle的概念
 
-在 Windows 中，句柄（Handle）是一个通用的概念:
-1. 无论是事件、线程、进程还是文件，它们在内核里都是“对象”，操作系统都会发给你一个 64 位的数字（Handle）作为遥控器
-2. 都可以被“等待”：你可以调用 NtWaitForSingleObject去等一个事件，也可以等一个线程
-3. 事件句柄 (events)
-    * 它们不运行代码，它们只是在内存里占个坑
-    * 它们的作用是告诉线程池里的线程：“现在轮到你执行第 3步混淆了，执行完记得给下一盏灯发信号”
+详见 Windows internals/关于内核对象和handle
 
-4. 线程句柄 (h_thread)
-    * 它是通过 NtDuplicateObject 或 NtCreateThreadEx 拿到的
-    * 它代表了那个真正要去执行 NtDelayExecution（休眠）的物理线程
-    * 核心逻辑：hypnus 会把这个 h_thread传给那些“事件驱动”的任务，让它们去操作这个线程的上下文
+
+
 
 
 ## win64 threadpool
@@ -1512,12 +1363,6 @@ Windows x64 系统中，线程池（Thread Pool） 是由内核和 ntdll.dll协�
 1. 物理本质：它是一个用户态对象，维护着一个就绪任务队列和一组休眠中的辅助线程
 2. 运行机制：当你把一个任务（如 timer 或 work）派发给线程池时，内核会唤醒其中一个空闲线程来处理它
 3. 避免了频繁创建和销毁线程的巨大开销
-
-
-
-
-
-
 
 ### 系统默认线程池
 

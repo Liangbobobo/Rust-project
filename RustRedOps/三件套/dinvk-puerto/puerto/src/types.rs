@@ -1246,6 +1246,7 @@ pub union LDR_DATA_TABLE_ENTRY_0 {
     pub Reserved6: *mut c_void,
 }
 
+/// 当前PE(dll或exe)文件内部.text代码节区物理存在的每个函数的开始,结束(RVA)及退栈说明
 #[repr(C)]
 #[derive(Copy, Clone, Default, Debug)]
 pub struct IMAGE_RUNTIME_FUNCTION {

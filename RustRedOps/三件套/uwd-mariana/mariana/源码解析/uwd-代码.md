@@ -1,3 +1,52 @@
+## 使用rbp作为栈帧指针
+
+### cpu和汇编视角
+
+当一个函数选择rbp作为帧指针时,cpu在prolog(进入函数),body(执行体),epilogue(退出函数)对rbp物理操作如下:
+
+**prolog阶段:是函数入口,建立rbp锚点和保存旧rbp.编译器通常有两种汇编写法操作rbp:**  
+A.push rbp方式   
+push rbp ; 将调用者的旧rbp压栈(rsp下移8字节)   
+mov rbp,rsp ;将当前rsp赋值给rbp,此时rbp成为当前函数固定基准锚点  
+sub rsp,0x100 ;rsp继续下移256字节,开辟局部变量空间
+
+B.mov存储方式  
+sub rsp,0x100 ;一次性开辟256字节空间  
+mov `[rsp+0x20]`,rbp ; 把调用者旧rbp放在rsp+0x20物理槽位上
+
+**body阶段:函数体执行期间,通过rbp寻址.**  
+一旦rbp锚点建立,后续所有局部变量访问都不再依赖会频繁变化的rsp,而是通过rbp操作
+
+mov `[rbp -0x10]`,eax ;访问局部变量(rbp减去偏移)  
+mov ecx,`[rbp+0x10]`  ;访问外层函数传进来的参数(rbp加上偏移)
+
+**epilogue阶段:函数出口,恢复rbp现场**
+
+当函数准备ret返回,物理上必须恢复调用者rbp
+
+mov rsp,rbp ;将rsp弹回rbp锚点位置,销毁所有局部变量空间  
+pop rbp     ; 从栈顶弹出旧rbp,恢复到rbp寄存器中  
+ret         ; 弹出返回地址,跳转回调用者
+
+### windows/edr 回溯引擎视角:edr如何通过rbp还原链表
+
+edr/windbg无需读取pe文件的.pdata节区情况下,仅凭内存指针就能进行rbp链表快速遍历:  
+1. 取出当前cpu的rbp寄存器地址
+2. 读取内存`[rbp]`的值 -> 得到上个函数的rbp地址(previous_rbp)
+3. 读取内存`[rbp+8]`的值 -> 这就是上个函数的返回地址. 
+   3.1 因此call比push先发生,假设此时栈顶地址是0x7FFFF008.主函数调用其他函数时,先执行的是call,此时cpu自动将call下一条指令的地址(即返回地址)压栈(即rsp).进入子函数后,第一步执行push rbp,那么栈会先rsp-8 ,然后将rbp放入0x7FFFF000.此时返回地址还在0x7FFFF008中.
+   3.2 执行mov rbp,rsp ;建立rbp锚点后.rbp变为0x7FFFF000作为栈帧的基准地址.那么此时rbp+8就一定是第一步压入的返回地址
+4. 将rbp=previous_rbp,重复上述步骤直到rbp为0
+
+如果edr沿着这个物理链表向上读取rbp+8时,发现某个返回地址指向了不可信的内存,或者链表断裂(指针指向非法地址).机会引发告警
+
+
+
+
+
+
+
+
 ## pub fn ignoring_set_fpreg
 
 作用:手动解析PE文件的UNWIND_INFO数据解构,一步步还原该函数在prologue阶段开辟的物理空间
