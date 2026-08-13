@@ -179,8 +179,8 @@ pub fn get_module_address(
 /// 
 /// 多次分析,仍然是函数参数不需要使用option,返回值使用option,下次重构时使用
 pub fn get_proc_address(
-    h_module: Option<HMODULE>,
-    function: hash_type,
+    h_module: Option<HMODULE>,// dll内存基址
+    function: hash_type,// 函数名对应的hash
     hash_func: Option<fn(&[u16]) -> u32>,
 ) -> Option<*mut c_void> {
     // 使用let-else解构option,这样可以错误输出

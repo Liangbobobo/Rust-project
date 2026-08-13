@@ -7,7 +7,7 @@ edition = "2024"
 puerto={path = "../../dinvk-puerto/puerto"}
 bitfield = "0.19.0"
 obfstr = "0.4.4"
-# 关闭memchr库默认的功能特性,强制让其工作在#![no_std]环境下.
+# 关闭memchr库默认的功能特性,强制让其工作在#![no_std]环境下.详见rust相关/crates
 memchr = { version = "2.7.4", default-features = false }
 
 [features]

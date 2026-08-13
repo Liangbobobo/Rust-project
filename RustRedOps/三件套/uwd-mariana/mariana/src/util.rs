@@ -14,7 +14,7 @@ use puerto::types::IMAGE_RUNTIME_FUNCTION;
 // 这里引入了未完成的文件中的函数.此时应该集中精力完成本文件,把这个未完成的函数设为桩函数(stub/mock),避免在多个未完成文件频繁跳转,造成逻辑混乱.即在未完成的函数对应的文件中,实现该函数的空实现
 use crate::{ignoring_set_fpreg, types::UNWIND_FRAME_INFO};
 
-/// search for a valid instruction offset in a function:在选定函数的二进制代码字节流中,搜索call qword ptr [rip + 0]的汇编指令.将该指令的pos+7(该指令固定7字节)作为下一条指令地址返回,作为伪造的返回地址.
+/// search for a valid instruction offset in a function:用于伪造符合要求的返回地址.在选定函数的二进制代码字节流中,搜索call qword ptr [rip + 0]的汇编指令.将该指令的pos+7(该指令固定7字节)作为下一条指令地址返回,作为伪造的返回地址.
 /// 
 /// cpu执行call指令时,cpu会自动把call指令下一条指令地址(rip中的地址)压栈作为返回地址.edr用RtlVirtualUnwind回溯检查时,会检查返回地址-7的字节处.是否有一条call指令,如果没有edr就会报警.
 ///
@@ -61,7 +61,10 @@ pub fn find_valid_instruction_offset(
 
 /// scans the code of a module for a given byte pattern,restricted to a valid
 /// RUNTIME_FUNCTION regions
-/// 遍历.pdata节区每个合法函数region,确保找到的gadget都位于有unwind记录的函数内部,避免有非函数指令
+/// 
+/// 遍历.pdata节区每个合法函数region,确保找到的gadget都位于有unwind记录的函数内部,避免有非函数指令;
+/// 
+/// 返回gadget的VA和gadget在函数栈中的offsset
 pub fn find_gadget(
     module: *mut c_void,
     pattern: &[u8],

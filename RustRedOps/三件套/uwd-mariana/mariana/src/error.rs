@@ -32,6 +32,13 @@ pub enum MarianaError {
     BaseThreadInitThunkunwindinfonotfound,
     RtlUserThreadStartstacksizenotfound,
     BaseThreadInitThunkstacksizenotfound,
+    firstprolognotfound,
+    secondprolognotfound,
+    addrspgadgetnotfound,
+    jmprbxgadgetnotfound,
+    ntdlldllnotfound,
+    get_proc_addressreturnednull,
+    ssnnotfound,
 
 }
 

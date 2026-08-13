@@ -17,5 +17,6 @@ pub use uwd::*;
 pub mod types;
 pub mod util;
 pub mod error;
+pub mod hash_name;
 
 extern crate alloc;

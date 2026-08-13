@@ -1,3 +1,13 @@
+// uwd模拟/伪造了从线程起点到合法的业务函数中间,共计4层完整的物理假帧
+// 高地址(栈底)
+// 4. 模拟必须的-线程根节点帧(ntdll.dll!RtlUserThreadStart)
+// 3. 模拟必须的-线程初始化帧(kernel32.dll!BaseThreadInitThunk)
+// 2. 随机伪造帧-rbp_offset/find_push_rbp:find_push_rbp(内部调用rbp_offset)在kernelbase.dll中检索包含push rbp的经典rbp链表函数
+// 1. 随机伪造帧-stack_frame/find_prolog:find_prolog在内部用stack_frame在kernelbase.dll中检索一个标准的/rsp管理的系统业务函数,作为发起敏感api调用的假源头
+// 低地址
+// 1. 采用rsp帧+rbp帧,模拟win64下kernel32.dll/kernelbase.dll真实编译状态.且能够应对edr的rsp轨/rbp轨的双重检测
+// 2. 
+
 #![allow(unused)]
 
 use alloc::vec::Vec;
@@ -14,17 +24,18 @@ use puerto::module::{get_module_address, get_proc_address};
 use puerto::types::AddVectoredExceptionHandlerFn;
 use puerto::types::IMAGE_RUNTIME_FUNCTION;
 
-
-
+use crate::types::Unwind;
+use crate::types::{
+    Config, Registers,
+    UNWIND_OP_CODES::{self, *},
+};
+use crate::types::{UNW_FLAG_CHAININFO, UNW_FLAG_EHANDLER};
+use crate::types::{UNWIND_CODE, UNWIND_INFO};
 #[cfg(feature = "desync")]
 use crate::util::find_base_thread_return_address;
 use crate::util::{find_gadget, find_valid_instruction_offset, shuffle};
-use crate::types::{Config, Registers, UNWIND_OP_CODES::{self, *}};
-use crate::types::{UNW_FLAG_CHAININFO, UNW_FLAG_EHANDLER};
-use crate::types::{UNWIND_CODE, UNWIND_INFO};
-use crate::types::Unwind;
 
-#[cfg(feature = "desync")]// 详见注释8
+#[cfg(feature = "desync")] // 详见注释8
 unsafe extern "C" {
     /// Function responsible for Call Stack Spoofing (Desync).该函数定义在asm文件夹下
     fn Spoof(config: &mut Config) -> *mut c_void;
@@ -37,14 +48,17 @@ unsafe extern "C" {
 }
 
 /// specifies the spoofing mode used by the engine:伪造的堆栈,是去执行普通的api函数,还是去执行syscall
-pub enum SpoofKind<'a> {
+pub enum SpoofKind {
     /// spoofs a direct function call:不需要ssn,用传进来的函数物理地址,在伪造好的堆栈上跳转过去执行
     Function,
 
-    /// spoof a syscall using its name:欺骗并执行底层windows native syscall(如 NtAllocateVirtualMemory等).
+    /// 这里改为Syscall(u32),需要进一步分析为何能装下puerto的hash.rs中的函数(根据其返回值等)
+    /// 
+    /// 原Syscall(&'a str):spoof a syscall using its name:欺骗并执行底层windows native syscall(如 NtAllocateVirtualMemory等).
     /// 元组型枚举变体(tuple-like enum variant):后续engine接收到这个参数后. 1. 用这个名字去ntdll.dll的IAT解析其ssn(system service number) 2. 在ntdll.dll内部找到一条干净的syscall; ret汇编指令.随后引擎在伪造好的堆栈上,将ssn写入rax,跳转到syscall;ret 发起硬核系统调用
     /// 关于其声明周期标注 <'a>: Syscall(&'a str)成员中存放的是字符串切片引用(指针).Rust中只要一个结构体或枚举内部包含了引用(指针),就必须显示标注生命周期. 'a 表示向Rust编译器做出安全承诺:传入的Syscall字符串(如 "NtAllocateVirtualMemory"),在整个堆栈伪造过程执行完毕之前,其所在的内存绝对安全,不会被提前释放.
-    Syscall(&'a str),
+    /// 
+    Syscall(u32),
 }
 
 /// performs call stack spoofing in desync mode
@@ -105,15 +119,97 @@ pub fn spoof(addr: *mut c_void, args: &[*const c_void], kind: SpoofKind) -> Resu
 
     // stack size
     let rtl_user_size = ignoring_set_fpreg(ntdll, rtl_user_runtime)
-    .ok_or(MarianaError::RtlUserThreadStartstacksizenotfound)?;
+        .ok_or(MarianaError::RtlUserThreadStartstacksizenotfound)?;
 
     let base_thread_size = ignoring_set_fpreg(kernel32, base_thread_runtime)
-    .ok_or(MarianaError::BaseThreadInitThunkstacksizenotfound)?;
+        .ok_or(MarianaError::BaseThreadInitThunkstacksizenotfound)?;
 
-    config.rtl_user_thread_size=rtl_user_size as u64;
-    config.base_thread_size=base_thread_size as u64;
+    config.rtl_user_thread_size = rtl_user_size as u64;
+    config.base_thread_size = base_thread_size as u64;
 
     // first prologue
+    let first_prolog = Prolog::find_prolog(kernelbase, tables)
+    .ok_or(MarianaError::firstprolognotfound)?;
+
+    config.first_frame_fp=(first_prolog.frame + first_prolog.offset as u64) as *const c_void;
+    config.first_frame_size=first_prolog.stack_size as u64;
+
+    // second prologue:两个prolog都是从kernelbase.dll的运行时函数表中检索的.
+    let second_prolog = Prolog::find_push_rbp(kernelbase, tables)
+    .ok_or(MarianaError::secondprolognotfound)?;
+
+    config.second_frame_fp=(second_prolog.frame + second_prolog.offset as u64) as *const c_void;
+    config.second_frame_size=second_prolog.stack_size as u64;
+    config.rbp_stack_offset=second_prolog.rbp_offset as u64;
+
+    // gadget:add rsp , 0x58; ret
+// 0x58十进制是88字节,栈帧上每个槽位是8字节,即11个槽位,也就是11个函数参数.呼应前文参数小于11的设定
+// 0x58是目标api预留的参数空间,size是该gadget指令所在系统函数的物理栈大小(.pdata节保存的回溯信息)
+    let (add_rsp_addr,size) = find_gadget(kernelbase,&[0x48, 0x83, 0xC4, 0x58, 0xC3], tables)
+    .ok_or(MarianaError::addrspgadgetnotfound)?;
+
+    config.add_rsp_gadget=add_rsp_addr as *const c_void;
+    config.add_rsp_frame_size=size as u64;
+
+    // gadget:jmp rbx 切回正常的执行流
+    let (jmp_rbx_addr,size) = find_gadget(kernelbase, &[0xFF,0x23], tables)
+    .ok_or(MarianaError::jmprbxgadgetnotfound)?;
+
+    config.jmp_rbx_gadget=jmp_rbx_addr as *const c_void;
+    config.jmp_rbx_frame_size=size as u64;
+
+    // prepare arguments
+    // args: &[*const c_void]其类型是一个动态长度的slice.如果是&[*const c_void;11]这是一个固定的数组
+    let len = args.len();
+    config.number_args=len as u64;
+
+    // iter将slice转为迭代器;take()截取元素个数;enumerate()对每个元素加上一个索引i,与slice中单个引用&[*const c_void]一起组成一个tuple
+    // for(i,&arg)正好解构enumerate(),得到*const c_void
+    for (i,&arg) in args.iter().take(len).enumerate() {
+        match i {
+                0 => config.arg01 = arg,
+                1 => config.arg02 = arg,
+                2 => config.arg03 = arg,
+                3 => config.arg04 = arg,
+                4 => config.arg05 = arg,
+                5 => config.arg06 = arg,
+                6 => config.arg07 = arg,
+                7 => config.arg08 = arg,
+                8 => config.arg09 = arg,
+                9 => config.arg10 = arg,
+                10 => config.arg11 = arg,
+                _ => break,
+            }
+    }
+
+    // handle syscall spoofing:
+    // SpoofKind::Function,如果想伪装一个普通api(如VirtualAlloc、LoadLibraryA、MessageBoxA),直接将对应函数指针(地址)addr传入.此时,不需要解析SSN,直接把addr赋值给config.spoof_function,后续汇编通过call [rcx].Config.SpoofFunction直接跳转到这个api函数
+    // 
+    match kind {
+        SpoofKind::Function=>config.spoof_function=addr,
+
+        SpoofKind::Syscall(hash)=>{
+            let ntdll = get_module_address(Some(0xB3383153), Some(fnv1a_utf16))
+            .ok_or(MarianaError::ntdlldllnotfound)?;
+
+            let addr = get_proc_address(Some(ntdll), Some(hash), Some(fnv1a_utf16)).ok_or(MarianaError::get_proc_addressreturnednull)?;
+
+            config.is_syscall=true as u32;
+            config.ssn=puerto::syscall::x86_64::ssn(hash, ntdll).ok_or(MarianaError::ssnnotfound)? as u32;
+            // config.spoof_function=
+            
+
+
+
+
+
+
+        }
+    }
+
+
+
+
 
 
 
@@ -121,69 +217,112 @@ pub fn spoof(addr: *mut c_void, args: &[*const c_void], kind: SpoofKind) -> Resu
     todo!()
 }
 
-/// metadata extracted from a function prologue that is suitable for spoofing 
-#[derive(Copy,Clone,Default)]
-struct Prolog{
-
+/// metadata extracted from a function prologue that is suitable for spoofing
+#[derive(Copy, Clone, Default)]
+struct Prolog {
     // address of the selected function frame
-    frame:u64,
+    frame: u64,
     // total stack space reserved by the function
-    stack_size:u32,
+    stack_size: u32,
     // offset inside the function where a valid instruction pattern was found
-    offset:u32,
+    offset: u32,
     // offset in the stack where rbp is pushed or saved
-    rbp_offset:u32,
-
+    rbp_offset: u32,
 }
 impl Prolog {
-    /// find the first prologue in the unwind table that looks safe for spoofing
-    /// 
+    /// find the first prologue in the unwind table that looks safe for spoofing:在系统dll(如kernelbase.dll)的.pdata节中检索基于rsp(函数prolog将rsp下推的情况)的伪造帧筛选(调用stack_frame),构建一个函数的prolog信息.用于伪造第一层伪造帧
+    ///
     /// this scans the RUNTIME_FUNCTION entries for a function that:
     /// -allocates a stack frame
     /// -has a predictable prologue layput
-    fn find_prolog(module_base:*mut c_void,runtime_table: &[IMAGE_RUNTIME_FUNCTION])->Option<Self> {
+    fn find_prolog(
+        module_base: *mut c_void,
+        runtime_table: &[IMAGE_RUNTIME_FUNCTION],
+    ) -> Option<Self> {
         let mut prologs = runtime_table
-        .iter()
-        .filter_map(|runtime|{
-            let (is_valid,stack_size) =stack_frame(module_base, runtime)?;
-            if !is_valid {
-                return None;
-            }
+            .iter()
+            .filter_map(|runtime| {
+                let (is_valid, stack_size) = stack_frame(module_base, runtime)?;
+                if !is_valid {
+                    return None;
+                }
 
-            let offset = find_valid_instruction_offset(module_base , runtime)?;
+                let offset = find_valid_instruction_offset(module_base, runtime)?;
 
-            let frame = module_base as u64+ runtime.BeginAddress as u64;
+                let frame = module_base as u64 + runtime.BeginAddress as u64;
 
-            Some(Self{
-                frame,
-                stack_size,
-                offset,
-                ..Default::default()
+                Some(Self {
+                    frame,
+                    stack_size,
+                    offset,
+                    ..Default::default()
+                })
             })
-})
-.collect::<Vec<Self>>();
-    
-     if prologs.is_empty() {
+            .collect::<Vec<Self>>();
+
+        if prologs.is_empty() {
             return None;
         }
-    
-     // Shuffle to reduce pattern predictability.
+
+        // Shuffle to reduce pattern predictability.
         shuffle(&mut prologs);
 
         prologs.first().copied()
-
     }
 
+    /// find a prologue that use `push rbp` and an rbp-based frame:第3层伪造栈帧中,在.pdata节的所有函数中,检索带push rbp的系统函数(调用rbp_offset),并打包成prolog结构体返回
+    /// this is useful when spoofing techniques rely on classic frame-pointer based layouts rather than purely rsp-based stack frame
+    fn find_push_rbp(
+        module_base: *mut c_void,
+        runtime_table: &[IMAGE_RUNTIME_FUNCTION],
+    ) -> Option<Self> {
+        let mut prologs = runtime_table
+            .iter()
+            .filter_map(|runtime| {
+                let (rbp_offset, stack_size) = rbp_offset(module_base, runtime)?;
 
+                if rbp_offset == 0 || stack_size == 0 || stack_size <= rbp_offset {
+                    return None;
+                }
 
+                let offset = find_valid_instruction_offset(module_base, runtime)?;
 
+                let frame = module_base as u64 + runtime.BeginAddress as u64;
+
+                Some(Self {
+                    frame,
+                    stack_size,
+                    offset,
+                    rbp_offset,
+                })
+            })
+            .collect::<Vec<Self>>();
+
+        if prologs.is_empty() {
+            return None;
+        }
+
+        // the first frame is often not suitable on many windows version
+        prologs.remove(0);
+
+        // shuffle to reduce pattern predictability
+        shuffle(&mut prologs);
+
+        prologs.first().copied()
+    }
 }
 
 /// determines whether rbp is pushed or saved in a spoof-compatible manner方式 and computes the total stack size for a function
-/// 
+///
 /// this inspects检查/审查 the unwind codes associated with the IMAGE_RUNTIME_FUNCTION
-/// entry to determine if the function frame uses a layout suitable for call stack spoofing 
-pub fn rbp_offset(module: *mut c_void,runtime: &IMAGE_RUNTIME_FUNCTION)->Option<(u32,u32)> {
+/// entry to determine if the function frame uses a layout suitable for call stack spoofing
+///
+/// 输入:系统dll物理基址 和 .pdata节中指向某函数的IMAGE_RUNTIME_FUNCTION结构体
+///
+/// 作用:在.pdata节中检索具备rbp压栈/保存的系统函数,定位旧rbp被保存在栈上的偏移(旧rbp被保存,一方面用于子函数执行完毕恢复现场,一方面edr用旧rbp巡视返回地址).旧rbp用于伪造的栈帧中的返回地址(旧rbp+8),防止edr发现返回地址不在系统dll中 和 累加总栈深
+///
+/// 输出:旧rbp相对栈顶的物理偏移 和 函数总栈深
+pub fn rbp_offset(module: *mut c_void, runtime: &IMAGE_RUNTIME_FUNCTION) -> Option<(u32, u32)> {
     unsafe {
         let unwind_info = (module as usize + runtime.UnwindData as usize) as *mut UNWIND_INFO;
 
@@ -191,12 +330,12 @@ pub fn rbp_offset(module: *mut c_void,runtime: &IMAGE_RUNTIME_FUNCTION)->Option<
 
         let flag = (*unwind_info).VersionFlags.Flags();
 
-        let mut i =0usize ;
+        let mut i = 0usize;
         let mut total_stack = 0u32;
         let mut rbp_pushed = false;
         let mut stack_offset = 0;
 
-        while i<(*unwind_info).CountOfCodes as usize {
+        while i < (*unwind_info).CountOfCodes as usize {
             // accessing UNWIND_CODE based on the index
             let unwind_code = unwind_code.add(i);
             // information used in operation codes
@@ -205,21 +344,21 @@ pub fn rbp_offset(module: *mut c_void,runtime: &IMAGE_RUNTIME_FUNCTION)->Option<
 
             match UNWIND_OP_CODES::try_from(unwind_op) {
                 // saves a non-volatile register on the stack:Example : push <reg>
-                Ok(UWOP_PUSH_NONVOL)=>{
-                    if Registers::Rsp==op_info {
+                Ok(UWOP_PUSH_NONVOL) => {
+                    if Registers::Rsp == op_info {
                         return None;
                     }
                     // 上文先把rbp_pushed=false,这里是为了防止出现rbp被push两次的情况(正常将rbp作为栈帧的prologue中只能push一次rbp)
-                    if Registers::Rbp==op_info {
-                        if rbp_pushed{
+                    if Registers::Rbp == op_info {
+                        if rbp_pushed {
                             return None;
                         }
-                        rbp_pushed=true;
+                        rbp_pushed = true;
                         // 前文判定push的是不是rbp,如果不是后文将循环执行total_stack+=8.那么rbp的偏移就是已经算出的total_stack.如判定是rbp,total_stack就是其偏移
-                        stack_offset=total_stack;
+                        stack_offset = total_stack;
                     }
-                    total_stack+=8;
-                    i+=1;
+                    total_stack += 8;
+                    i += 1;
                 }
 
                 // allocate large space on the stack
@@ -227,17 +366,17 @@ pub fn rbp_offset(module: *mut c_void,runtime: &IMAGE_RUNTIME_FUNCTION)->Option<
                 // - OpInfo==1:the next two slots contain the full size of the allocation(up to 4GB-8)
                 // Example OpInfo==0:sub rsp ,0x100;allocates 256bytes(slot中的数字是32,32*8=256字节)
                 // Example OpInfo==1:sub rsp,0x10000; allocate 65536 bytes(two slots used)
-                Ok(UWOP_ALLOC_LARGE)=>{
-                    if (*unwind_code).Anonymous.OpInfo()==0 {
+                Ok(UWOP_ALLOC_LARGE) => {
+                    if (*unwind_code).Anonymous.OpInfo() == 0 {
                         // case 1:size in 1 slot,divided by 8
                         // multiplies by 8 to the actual value
                         // 注意这里比源码多了一个(),显示说明了先add在*的过程
-                        let frame_offset = ((*(unwind_code.add(1))).FrameOffset as i32) *8 ;// 这里FrameOffset类型是i32.详见注释9
+                        let frame_offset = ((*(unwind_code.add(1))).FrameOffset as i32) * 8; // 这里FrameOffset类型是i32.详见注释9
 
-                        total_stack += frame_offset as u32; 
+                        total_stack += frame_offset as u32;
 
-                        i+=2
-                    }else {
+                        i += 2
+                    } else {
                         // case 2:OpInfo==1(size in 2 slots,32 bits)
                         // 将两个slots看作一个FrameOffset字段,前面有注释专门讲解
                         let frame_offset = *((unwind_code.add(1)) as *mut i32);
@@ -245,26 +384,26 @@ pub fn rbp_offset(module: *mut c_void,runtime: &IMAGE_RUNTIME_FUNCTION)->Option<
                         total_stack += frame_offset as u32;
 
                         // consumes 3 slots(1 for the instruction,2 for the full size).这里不加;的原因见注释10
-                        i+=3;
+                        i += 3;
                     }
                 }
 
                 // allocates small space in the stack.Example OpInfo=3L:sub rsp,0x20; allocate 32 bytes (OpInfo+1)*8
-                Ok(UWOP_ALLOC_SMALL)=>{
-                    total_stack+=((op_info+1)*8) as u32;
-                    i+=1;
+                Ok(UWOP_ALLOC_SMALL) => {
+                    total_stack += ((op_info + 1) * 8) as u32;
+                    i += 1;
                 }
 
                 // UWOP_SAVE_NONVOL:save the contents of a non-volatile register in a specific position on the stack
                 // - Reg: Name of the saved register
                 // - FrameOffset: mov [rsp+0x40],rsi ;save the contents of rsi in rsp+0x40
-                Ok(UWOP_SAVE_NONVOL)=>{
+                Ok(UWOP_SAVE_NONVOL) => {
                     // 这里能够比较 详见注释11
-                    if Registers::Rsp==op_info {
+                    if Registers::Rsp == op_info {
                         return None;
                     }
 
-                    if Registers::Rbp==op_info {
+                    if Registers::Rbp == op_info {
                         if rbp_pushed {
                             return None;
                         }
@@ -273,19 +412,19 @@ pub fn rbp_offset(module: *mut c_void,runtime: &IMAGE_RUNTIME_FUNCTION)->Option<
                         stack_offset = total_stack + offset as u32;
                         rbp_pushed = true;
                     }
-                    i+=2;
+                    i += 2;
                 }
-                
+
                 // save a non-volatile register to a stack address wih a long offset
                 // - Reg: Name of the saved register
                 // - FrameOffset: long offset indicating where the value of the register is saved
                 // Example: mov [rsp+0x1040],rsi; save the contents of rsi in rsp+0x1040
-                Ok(UWOP_SAVE_NONVOL_BIG)=>{
-                    if Registers::Rsp==op_info {
+                Ok(UWOP_SAVE_NONVOL_BIG) => {
+                    if Registers::Rsp == op_info {
                         return None;
                     }
 
-                    if Registers::Rbp==op_info {
+                    if Registers::Rbp == op_info {
                         if rbp_pushed {
                             return None;
                         }
@@ -299,7 +438,7 @@ pub fn rbp_offset(module: *mut c_void,runtime: &IMAGE_RUNTIME_FUNCTION)->Option<
                     i += 3;
                 }
 
-                 // Return
+                // Return
                 Ok(UWOP_SET_FPREG) => return None,
 
                 // - Reg: Name of the saved XMM register.
@@ -323,22 +462,23 @@ pub fn rbp_offset(module: *mut c_void,runtime: &IMAGE_RUNTIME_FUNCTION)->Option<
                 }
 
                 _ => {}
-
             }
         }
-
-        
     }
 
-
-todo!()}
-
-
+    todo!()
+}
 
 /// computes stack frame metadata while rejecting setfp frames
-/// 
+///
 /// used when locating suitable prologues for spoofed call frames
-pub fn stack_frame(module: *mut c_void,runtime: &IMAGE_RUNTIME_FUNCTION)->Option<(bool,u32)> {
+///
+/// 输入:系统dll基址和.pdata节中指向某函数的IMAGE_RUNTIME_FUNCTION结构体
+///
+/// 作用:拦截非法rsp压栈;拦截非法寄存器保存;拦截复杂的SEH异常链;拦截非标准栈指针;之后遍历操作码累加该函数prologue开辟的栈空间,并链式展开递归(UNW_FLAG_CHAININFO标志置位)
+///
+/// 输出:bool表示对应函数在prologue中是否建立rbp帧,该函数在栈上开辟的空间字节数.被拦截/解构异常,则返回None
+pub fn stack_frame(module: *mut c_void, runtime: &IMAGE_RUNTIME_FUNCTION) -> Option<(bool, u32)> {
     unsafe {
         let unwind_info = (module as usize + runtime.UnwindData as usize) as *mut UNWIND_INFO;
 
@@ -349,7 +489,7 @@ pub fn stack_frame(module: *mut c_void,runtime: &IMAGE_RUNTIME_FUNCTION)->Option
         let mut i = 0usize;
         let mut set_fpreg_hit = false;
         let mut total_stack = 0i32;
-        while i<(*unwind_info).CountOfCodes as usize {
+        while i < (*unwind_info).CountOfCodes as usize {
             // accessing UNWIND_CODE based on the index
             let unwind_code = unwind_code.add(i);
             // information used in operation codes
@@ -357,22 +497,21 @@ pub fn stack_frame(module: *mut c_void,runtime: &IMAGE_RUNTIME_FUNCTION)->Option
             let unwind_op = (*unwind_code).Anonymous.UnwindOp();
 
             match UNWIND_OP_CODES::try_from(unwind_op) {
-                
                 // save a non-volatile register on the stack(如 push <reg>)
-                Ok(UWOP_PUSH_NONVOL)=>{
+                Ok(UWOP_PUSH_NONVOL) => {
                     // 代表将rsp压栈,且没有设置rbp作为栈帧指针.则放弃该函数,无法用于栈帧伪造
-                    if Registers::Rsp==op_info && !set_fpreg_hit {
+                    if Registers::Rsp == op_info && !set_fpreg_hit {
                         return None;
                     }
 
-                    total_stack+=8;
-                    i+=1;
+                    total_stack += 8;
+                    i += 1;
                 }
 
                 // allocates samll space in the stack(如 Opinfo=3:sub rsp,0x20 allocate 32bytes(Opinfo+1)*8)
-                Ok(UWOP_ALLOC_SMALL)=>{
-                    total_stack+=((op_info+1)*8) as i32;
-                    i+=1;
+                Ok(UWOP_ALLOC_SMALL) => {
+                    total_stack += ((op_info + 1) * 8) as i32;
+                    i += 1;
                 }
 
                 // allocates large space on the stack
@@ -381,8 +520,8 @@ pub fn stack_frame(module: *mut c_void,runtime: &IMAGE_RUNTIME_FUNCTION)->Option
                 //
                 // Example (OpInfo == 0): sub rsp, 0x100 ; Allocates 256 bytes
                 // Example (OpInfo == 1): sub rsp, 0x10000 ; Allocates 65536 bytes (two slots used)
-                Ok(UWOP_ALLOC_LARGE)=>{
-                     if (*unwind_code).Anonymous.OpInfo() == 0 {
+                Ok(UWOP_ALLOC_LARGE) => {
+                    if (*unwind_code).Anonymous.OpInfo() == 0 {
                         // Case 1: OpInfo == 0 (Size in 1 slot, divided by 8)
                         // Multiplies by 8 to the actual value
 
@@ -392,7 +531,8 @@ pub fn stack_frame(module: *mut c_void,runtime: &IMAGE_RUNTIME_FUNCTION)->Option
 
                         // Consumes 2 slots (1 for the instruction, 1 for the size divided by 8)
                         i += 2
-                    } {
+                    }
+                    {
                         // Case 2: OpInfo == 1 (Size in 2 slots, 32 bits)
                         let frame_offset = *(unwind_code.add(1) as *mut i32);
                         total_stack += frame_offset;
@@ -445,7 +585,7 @@ pub fn stack_frame(module: *mut c_void,runtime: &IMAGE_RUNTIME_FUNCTION)->Option
                 // UWOP_SET_FPREG: Marks use of register as stack base (e.g. RBP).
                 // Ignore if not RBP, has EH handler or chained unwind.
                 // Subtract `FrameOffset << 4` from the stack total. 详见注释7
-                   Ok(UWOP_SET_FPREG) => {
+                Ok(UWOP_SET_FPREG) => {
                     if (flag & UNW_FLAG_EHANDLER) != 0 && (flag & UNW_FLAG_CHAININFO) != 0 {
                         return None;
                     }
@@ -460,7 +600,7 @@ pub fn stack_frame(module: *mut c_void,runtime: &IMAGE_RUNTIME_FUNCTION)->Option
                     i += 1
                 }
 
-            // Reserved code, not currently used.
+                // Reserved code, not currently used.
                 Ok(UWOP_EPILOG) | Ok(UWOP_SPARE_CODE) => i += 1,
 
                 // Push a machine frame. This unwind code is used to record the effect of a hardware interrupt or exception.
@@ -469,20 +609,12 @@ pub fn stack_frame(module: *mut c_void,runtime: &IMAGE_RUNTIME_FUNCTION)->Option
                     i += 1
                 }
                 _ => {}
-            
             }
         }
-
-
     }
 
-
-todo!()}
-
-
-
-
-
+    todo!()
+}
 
 // 不要删除,有示范意义.后续有真正的实现
 // // 占位桩函数,用于辅助编译util.rs
@@ -759,3 +891,4 @@ pub fn ignoring_set_fpreg(module: *mut c_void, runtime: &IMAGE_RUNTIME_FUNCTION)
 // 题外话 win64下,虽然cpu寄存器支持高达128TB的虚拟内存,但微软在PE文件结构体内部,依然强行规定所有RVA都是u32.
 // 即IMAGE_SECTION_HEADER中的PointerToRawData（文件偏移）和 VirtualAddress（内存 RVA）都是 u32; IMAGE_OPTIONAL_HEADER64中的SizeOfImage: u32,该字段表示(整个EXE加载到内存后的总尺寸)
 // 以上,单个exe/dll文件体积物理上不超过4GB,否则PointerToRawData 就会溢出，无法寻址到 4 GB 以外的文件内容;单个模块展开后的内存镜像（SizeOfImage）物理上绝对不能超过4 GB
+

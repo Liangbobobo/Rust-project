@@ -22,3 +22,6 @@ mod painc;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub mod breakpoint;
+
+// 将 syscall 子模块的pub函数和变量重导出到库根作用域的.如puerto::ssn,而不需要写繁琐的dinvk::syscall::ssn
+pub use syscall::x86_64;
