@@ -196,14 +196,12 @@ pub fn spoof(addr: *mut c_void, args: &[*const c_void], kind: SpoofKind) -> Resu
 
             config.is_syscall=true as u32;
             config.ssn=puerto::syscall::x86_64::ssn(hash, ntdll).ok_or(MarianaError::ssnnotfound)? as u32;
-            // config.spoof_function=
             
+            
+            config.spoof_function=puerto::x86_64::get_syscall_address(addr)
+            .ok_or(MarianaError::syscalladdressnotfound)? as *const c_void;
 
-
-
-
-
-
+            
         }
     }
 
@@ -212,9 +210,10 @@ pub fn spoof(addr: *mut c_void, args: &[*const c_void], kind: SpoofKind) -> Resu
 
 
 
+Ok(unsafe {
+    SpoofSynthetic(&mut config)
+})
 
-
-    todo!()
 }
 
 /// metadata extracted from a function prologue that is suitable for spoofing

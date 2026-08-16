@@ -39,6 +39,7 @@ pub enum MarianaError {
     ntdlldllnotfound,
     get_proc_addressreturnednull,
     ssnnotfound,
+    syscalladdressnotfound,
 
 }
 
