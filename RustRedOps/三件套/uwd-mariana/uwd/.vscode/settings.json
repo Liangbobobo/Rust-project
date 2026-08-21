@@ -1,5 +1,9 @@
 {
-    "rust-analyzer.linkedProjects": [
-        "Cargo.toml"
-    ],
+  "rust-analyzer.linkedProjects": [
+    "Cargo.toml"
+  ],
+  "files.associations": {
+    "*.asm": "asm-x86-masm"
+  },
+  "asm-code-lens.assembler": "masm (x86)"
 }

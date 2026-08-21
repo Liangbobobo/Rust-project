@@ -463,9 +463,29 @@ pub fn rbp_offset(module: *mut c_void, runtime: &IMAGE_RUNTIME_FUNCTION) -> Opti
                 _ => {}
             }
         }
+
+        // if there is a chain unwind structure ,it must be processed recursively and included in the stack size calculation
+        if (flag & UNW_FLAG_CHAININFO)!=0 {
+            let count = (*unwind_info).CountOfCodes as usize;
+            let index = 
+            // 极快的位运算,判断count是不是奇数(任何奇数的二进制最低位必定是1)
+            if count & 1 ==1 {
+                // 为了满足4字节对齐,对奇数个unwind_code必须+1
+                count +1
+            } else {
+                count
+            };
+            let runtime = unwind_code.add(index) as *const IMAGE_RUNTIME_FUNCTION;
+            if let Some((_,child_total)) = rbp_offset(module, &*runtime) {
+                total_stack+=child_total;
+            }else {
+                return None;
+            }
+        }
+        Some((stack_offset,total_stack))
     }
 
-    todo!()
+
 }
 
 /// computes stack frame metadata while rejecting setfp frames
@@ -610,9 +630,26 @@ pub fn stack_frame(module: *mut c_void, runtime: &IMAGE_RUNTIME_FUNCTION) -> Opt
                 _ => {}
             }
         }
+
+        // If there is a chain unwind structure, it too must be processed
+        // recursively and included in the stack size calculation.
+        if (flag & UNW_FLAG_CHAININFO) != 0 {
+            let count = (*unwind_info).CountOfCodes as usize;
+            let index = if count & 1 == 1 { count + 1 } else { count };
+            let runtime = unwind_code.add(index) as *const IMAGE_RUNTIME_FUNCTION;
+            if let Some((chained_fpreg_hit, chained_stack)) = stack_frame(module, &*runtime) {
+                total_stack += chained_stack as i32;
+                set_fpreg_hit |= chained_fpreg_hit;
+            } else {
+                return None;
+            }
+        }
+
+        Some((set_fpreg_hit, total_stack as u32))
+        
+
     }
 
-    todo!()
 }
 
 // 不要删除,有示范意义.后续有真正的实现
