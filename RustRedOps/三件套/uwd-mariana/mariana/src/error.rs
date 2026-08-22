@@ -26,7 +26,7 @@ pub enum MarianaError {
     FailedToReadIMAGE_RUNTIME_FUNCTIONEntrieFromPdataSection,
     ntdllnotfound,
     kernel32notfound,
-    rlt_user_addrnotfound,
+    rtl_user_addrnotfound,
     base_thread_addrnotfound,
     RtlUserThreadStartunwindinfonotfound,
     BaseThreadInitThunkunwindinfonotfound,

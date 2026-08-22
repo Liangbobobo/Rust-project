@@ -12,14 +12,14 @@ use puerto::types::IMAGE_RUNTIME_FUNCTION;
 // crate代表当前crate的根目录文件.对于库(Library),其根目录就是lib.rs;对于二进制(Binary)项目,根目录文件就是main.rs
 // 这里表示从当前项目的lib.rs文件中,导入ignoring_set_fpreg.但这里函数本身定义在uwd.rs中,为啥能从lib.rs导入呢.因为在lib.rs中引入了pub use uwd::*;将uwd.rs的所有pub函数和类型挂载到lib.rs下.又从lib.rs这个根目录导入本文件中(这叫重导出)
 // 这里引入了未完成的文件中的函数.此时应该集中精力完成本文件,把这个未完成的函数设为桩函数(stub/mock),避免在多个未完成文件频繁跳转,造成逻辑混乱.即在未完成的函数对应的文件中,实现该函数的空实现
-use crate::{ignoring_set_fpreg, types::UNWIND_FRAME_INFO};
+use crate::ignoring_set_fpreg;
 
 /// search for a valid instruction offset in a function:用于伪造符合要求的返回地址.在选定函数的二进制代码字节流中,搜索call qword ptr [rip + 0]的汇编指令.将该指令的pos+7(该指令固定7字节)作为下一条指令地址返回,作为伪造的返回地址.
-/// 
+///
 /// cpu执行call指令时,cpu会自动把call指令下一条指令地址(rip中的地址)压栈作为返回地址.edr用RtlVirtualUnwind回溯检查时,会检查返回地址-7的字节处.是否有一条call指令,如果没有edr就会报警.
 ///
 /// this sacns the function's codde region for a `call qword ptr [rip + 0]` instruction sequence and returns the offset after the instruction  
-/// 
+///
 /// call qword ptr [rip + 0]:
 /// call调用指令会:1. 将返回地址(下一条指令的物理地址)压入栈顶(push rsp) 2. 将cpu的rip修改为目标地址,实现跳转
 /// qword ptr:quad 四倍,cpu从目的内存地址中读取一个8字节的数据作为目标函数指针
@@ -61,9 +61,9 @@ pub fn find_valid_instruction_offset(
 
 /// scans the code of a module for a given byte pattern,restricted to a valid
 /// RUNTIME_FUNCTION regions
-/// 
+///
 /// 遍历.pdata节区每个合法函数region,确保找到的gadget都位于有unwind记录的函数内部,避免有非函数指令;
-/// 
+///
 /// 返回gadget的VA和gadget在函数栈中的offsset
 pub fn find_gadget(
     module: *mut c_void,
@@ -102,23 +102,22 @@ pub fn find_gadget(
                     }
                 }
             }
-
-            if count == 0 {
-                return None;
-            }
-
-            // 在栈切片上洗牌
         }
+        if count == 0 {
+            return None;
+        }
+
+        shuffle(&mut gadgets[..count]);
         Some(gadgets[0])
     }
 }
 
 /// scans the current thread's stack to locate the return address that falls进入..状态 within the range of the BaseThreadInitThunk function from kernel32.dll
 #[cfg(feature = "desync")]
-pub fn find_base_thread_return_address()->Option<usize> {
-    use puerto::module::{get_module_address,get_proc_address};
-    use puerto::{hash::fnv1a_utf16,helper::PE};
+pub fn find_base_thread_return_address() -> Option<usize> {
     use crate::types::Unwind;
+    use puerto::module::{get_module_address, get_proc_address};
+    use puerto::{hash::fnv1a_utf16, helper::PE};
 
     unsafe {
         // get hadle for kernel32.dll
@@ -126,9 +125,9 @@ pub fn find_base_thread_return_address()->Option<usize> {
         let kernel32 = get_module_address(Some(0x6BEFCBB7), Some(fnv1a_utf16))?;
 
         // resolve the address of the BaseThreadInitThunk function
-        let base_thread = get_proc_address(Some(kernel32), Some(0xF70757EA), Some(fnv1a_utf16));
+        let base_thread = get_proc_address(Some(kernel32), Some(0xF70757EA), Some(fnv1a_utf16))?;
         // 以上,如果上面两个值返回None,会传播给find_base_thread_return_address的返回值,后续再由uwd.rs进一步处理.
-        
+
         // calculate the size of BaseThreadInitThunk function:对应函数的机器码区间长度,不是栈帧大小
         let pe_kernel32 = Unwind::new(PE::parse(kernel32));
         let size = pe_kernel32.function_size(base_thread)? as usize;
@@ -143,26 +142,22 @@ pub fn find_base_thread_return_address()->Option<usize> {
         // stack_base是该线程堆栈的顶部(最高内存地址),且在win为线程分配的1MB栈空间中,不包含stack_base,stack_limit是堆栈底部,包含在1MB的空间内.win64压栈是8字节对齐.
         // 即rsp是cpu当前动态变化的栈顶指针.stack_base是TEB中记录的静态内存边界数值,代表这块栈空间最高能到哪里.要从物理内存上最靠顶部的合法槽位开始向下一行扫描,必须从stack_base-8开始读取,否则会触发Access Violattion
         // rsp是存放返回地址的那个栈槽的内存地址(指针)
-        let mut rsp = stack_base -8;
-        while rsp>=stack_limit {
+        let mut rsp = stack_base - 8;
+        while rsp >= stack_limit {
             // 读取rsp寄存器中的值
             let val = (rsp as *const usize).read();
             // check if the return is in the BaseThreadInitThunk range
             // 前文已经通过get_proc_addresss拿到BaseThreadInitThunk在dll内存中的基址(base_addr),后续也计算了其长度(size),这就得到了该函数在内存中的VA区间
             // 此处,不停的读取物理堆栈内存中的槽位数据(这里用*rsp,但并不是真正的cpu寄存器,而是作为一个本地变量来使用的),并比对是否落在上述的VA区间.如果是就表明该栈槽中保存的就是该函数的返回地址.
             // 拿到这个rsp后,后续就在伪造堆栈时,就知道该把栈指针拉回到真实堆栈的哪个具体格子中
-            if val>=base_addr && val <base_addr +size {
+            if val >= base_addr && val < base_addr + size {
                 return Some(rsp);
             }
-            rsp-=8;
+            rsp -= 8;
         }
-None
-
+        None
     }
-
-
 }
-
 
 /// randomly shuffles the elements of a list in place
 /// &mut[T]代表一个可变slice,执行原地修改时,不需要额外分配内存

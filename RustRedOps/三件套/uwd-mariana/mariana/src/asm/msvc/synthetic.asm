@@ -4,6 +4,22 @@
 ;; Synthetic 合成栈模式(默认主流):切断当前线程的真实历史栈,在内存中从0开始凭空捏在一套完整的包含4层合法系统函数的假调用链.
 ;; 绝大多数edr的栈回溯探针,主要校验的是:从当前RIP能否一路沿着pdata展开到RtlUserThreadStart,且RBP链表是否单调递增.而Synthetic能够完美欺骗这套逻辑.
 ;; 如果是叶子函数,edr这套逻辑是否失效.当然不可能出现这种漏洞.win的官方栈展开器RtlVirtualUnwind和edr对leaf function对于展开器遇到没有.pdata的叶子函数时情况.详见av edr原理/栈展开
+
+
+;; 栈帧视图
+;; 高地址
+;; -> 0 (NULL 终结符，彻底斩断上游)
+;; -> RtlUserThreadStart (捏造的始祖帧)
+;; -> BaseThreadInitThunk (捏造的入口帧)
+;; -> FirstFrame (第 1 假帧 / 父函数)
+;; -> SecondFrame (第 2 假帧 / 子函数)
+;; -> ROP Gadgets 跳板 (JmpRbx + AddRspX)
+;; -> 目标敏感 API
+
+
+
+
+
 ;; 
 
 ;;

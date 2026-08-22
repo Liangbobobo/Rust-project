@@ -32,7 +32,7 @@ pub struct Unwind {
 }
 
 impl Unwind {
-    /// create a ne Unwind:实质上就是ntdll.dll 或 kernel32.dll的PE.用以摸清dll文件内部函数的栈深度.后续通过汇编在内存中模拟这些内部函数的栈结构
+    /// create a new Unwind:实质上就是ntdll.dll 或 kernel32.dll的PE.用以摸清dll文件内部函数的栈深度.后续通过汇编在内存中模拟这些内部函数的栈结构
     pub fn new(pe: PE) -> Self {
         Unwind { pe }
     }
@@ -98,7 +98,7 @@ pub struct Config {
     /// stack size basethreadinitthunk
     pub base_thread_size: u64,
 
-    /// fist(fake) return address frame
+    /// first(fake) return address frame
     pub first_frame_fp: *const c_void,
 
     /// second(ROP) return address frame
@@ -113,7 +113,7 @@ pub struct Config {
     /// stack size of first spoofed frame
     pub first_frame_size: u64,
 
-    /// stack sie of second spoofed frame
+    /// stack size of second spoofed frame
     pub second_frame_size: u64,
 
     /// stack frame size where the jmp [rbx] gadget resides常驻

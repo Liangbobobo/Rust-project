@@ -96,7 +96,7 @@ pub fn spoof(addr: *mut c_void, args: &[*const c_void], kind: SpoofKind) -> Resu
 
     // 对应函数的机器码入口指针(VA),从.edata导出表解析出来的.本身并不包含SEH的IMAGE_RUNTIME_FUNCTION
     let rtl_user_addr = get_proc_address(Some(ntdll), Some(0x72B24572u32), Some(fnv1a_utf16))
-        .ok_or(MarianaError::rlt_user_addrnotfound)?;
+        .ok_or(MarianaError::rtl_user_addrnotfound)?;
 
     let base_thread_addr = get_proc_address(Some(kernel32), Some(0xF70757EAu32), Some(fnv1a_utf16))
         .ok_or(MarianaError::base_thread_addrnotfound)?;
