@@ -149,6 +149,7 @@ impl StackSpoof {
 
         // change protection to rx for execution
 
+<<<<<<< Updated upstream
         let mut old_protect = 0;
         // 将内存权限改为rx,并保存该块内存的旧权限
         if !NT_SUCCESS(NtProtectVirtualMemory(
@@ -157,6 +158,16 @@ impl StackSpoof {
             &mut code_size,
             PAGE_EXECUTE_READ as u32,
             &mut old_protect,
+=======
+/// ntdll.dll!NtAllocateVirtualMemory(VirtualAlloc/VirtualAllocEx在用户态的最终底层实现).此处,为后续写入的gadget opcode分配读写权限的内存
+ if !NT_SUCCESS(NtAllocateVirtualMemory(
+            NtCurrentProcess(), // ProcessHandle:具体分配内存的虚拟地址空间
+            &mut gadget_code, // BaseAddress:分配的内存的起始基址.null_mut()代表系统自动寻找合适的空闲区域
+            0, // 不需要强制分配在地址空间的极低位置
+            &mut code_size, // 字节为单位的期望分配的内存大小.作为In为期望值,作为Out,代表返回的实际分配的字节数(存在因page对齐产生的跨页)
+            MEM_COMMIT | MEM_RESERVE, 
+            PAGE_READWRITE
+>>>>>>> Stashed changes
         )) {
             stealth_bail!(
                 FaileToChangeMemoryToRx,
@@ -182,6 +193,7 @@ impl StackSpoof {
             )
         }
 
+<<<<<<< Updated upstream
         unsafe {
             // writes the gadget address(mov rsp,rbp; ret)to a pointer page:将第一块内存的绝对地址(代表opcode的指针)写入第二块内存开头的8个字节中
             *(gadget_ptr as *mut u64) = gadget_code as u64;
@@ -208,6 +220,21 @@ impl StackSpoof {
             ..Default::default()
         })
     }
+=======
+    // 将bytes的opcode写入内存(申请的第一块内存中(gadget_code))
+    // 为什么使用copy_nonoverlapping见注释4
+unsafe {
+    core::ptr::copy_nonoverlapping(bytes.as_ptr(), gadget_code as *mut u8, bytes.len());
+}
+
+// change protection to rx for execution(gadget_code代表的内存区域)
+let mut old_protect = 0;
+if !NT_SUCCESS(NtProtectVirtualMemory(NtCurrentProcess(), 
+&mut gadget_code,// c原型 PVOID * = rust *mut *mut c_void.后续NtProtectVirtualMemory需要修改这个值?.根据rust 隐式指针强制转换 &mut -> *mut实现转换 详见注释5
+ RegionSize, NewProtect, OldProtect)) {
+    
+}
+>>>>>>> Stashed changes
 
     /// Resolves stack frame sizes for know windows thread routines using unwind metadata
     pub fn frames(&mut self, cfg: &Config) -> Result<()> {
@@ -458,6 +485,7 @@ impl StackSpoof {
 // 相对调用WriteProcessMemory/RtlCopyMemory等api向内存写入数据,core::ptr::copy_nonoverlapping不留下IAT,避免因edr hook敏感api被发现.因为它只是一个编译器内置指令Intrinsic,在编译出的.exe中,它会被翻译成底层的cpu指令.hook只能挂在API层面,对于cpu的汇编指令级别的内存读写,完全不知道在内存中写入了一段gadget代码
 // 以上,如果能确定源/目标数据是不同内存中的,就绝不会有交叉,就可用copy_nonoverlapping （memcpy），享受极致性能.如果是同一数组/同一buffer中左右移动的情况,就必须使用copy memmove来让os判断正向/逆向挪动,避免被数据覆盖.
 
+<<<<<<< Updated upstream
 // 注释5
 // 20k怎么计算出来的:
 // 1. 保护主线程执行环境:根据整个项目,主线程首先执行RtlCaptureContext.主线程捕获RtlCaptureContext时,虽然将其挂起.但在整个混淆链转换中(从主线程到线程池工作线程的异步调度),os内核/EDR/线程池回调内部,依然可能有部分残留指令执行并使用当前栈(ctx.rsp)附近向下的区域.如果把伪造栈紧贴着ctx.rsp写入,任何微小的写入都可能覆盖主线程原本数据/局部变量/返回地址,一旦解密唤醒后试图恢复主线程环境,程序会因为栈损坏而崩溃(Access Violation).因此需要腾出部分空间确保主线程数据的安全.
@@ -476,3 +504,12 @@ impl StackSpoof {
 // let (add_rsp_addr, add_rsp_size) = scan_runtime()在搜索时没有依赖函数名称(微软随时在补丁中更改函数名).其遍历kernelbase.dll的.text代码段,找到包含add rsp,0x58;ret(字节码 48 83 C4 58 C3)的gadget.
 // uwd::ignoring_set_fpreg(module, runtime),在底层解析win64 pe文件的.pdata节异常处理目录.微软在编译kernelbase.dll时,不仅生成机器码,还会在.pdata节中为每个非叶子函数生成UNWIND_INFO结构体(解包信息),该结构包含UNWIND_CODE(解包码).UNWIND_CODE是给操作洗头膏的栈回溯说明,其中UWOP_PUSH_NONVOL表示该函数push备份了哪几个非易失性寄存器;UWOP_ALLOC_SMALL  /  UWOP_ALLOC_LARGE该函数的prologue通过sub rsp分配多少字节的局部变量和影子空间
 // uwd::ignoring_set_fpreg去读取并累加这些UNWIND_CODE记录的值.如果其记录的值有4个非易失性寄存器(32字节),8个局部变量(64),再加上32字节影子空间.那解包码累加处的add_rsp_size=128字节.这里搜索的及其指令是add rsp, 0x58 （88 字节）.因此,该gadget的宿主函数使用的寄存器和局部变量和影子空间之和必然收敛于0x58的88字节以内
+=======
+
+// 注释5
+// 双指针设计:在c/c++/ffi的rust中,函数参数默认是值传递的.即c/c++传递函数参数时,会把参数在内存中拷贝一份压入栈.当rust调用c时(如  NtProtectVirtualMemory),必须遵守c的这个约定.(rust不是,它是所有权转移的传递,一旦传递就不再允许使用该变量).
+// 如果只单指针*mut c_void,内核只知道要操作哪块内存地址,但如果内核想把修改后的地址返回就做不到,因为传进来的指针只是一个拷贝.要让内核把计算后的新地址写回变量,就必须把这个变量在内存中的地址传给内核,即传递的是指向指针这个变量的指针(双指针).
+// 内核为什么要修改并回写该地址呢,因为win的MM(memory manager)规定,其管理的最小物理和虚拟单位是页(0x1000/4096 字节).在用户态调用NtProtectVirtualMemory,给出的可能是一个不规则的地址,内核接收到该请求后,必须将其转为页对齐的地址才能操作.内核会对传入的BaseAddress  和  RegionSize  这两个参数进行截断和扩充,包括向下取整找到页的开头地址和向上取整到页大小的倍数.之后将这些值回写到NtProtectVirtualMemory的返回值中
+// rust与c指针的对应:rust中*mut/*const 是类型声明.不存在*mut gadget_code的形式,rust中解引用裸指针只能用 *gadget.在rust中取地址必须使用&/&mut,无论是普通变量/结构体/裸指针,要获取一个变量在当前栈内存中的物理地址,必须使用&/&mut.即&mut gadget_code as *mut *mut c_void这种不用隐式转换的形式
+// 在 C/C++ 中， &  是取地址符;在 Rust 中， &  (不可变借用) 和  &mut  (可变借用) 在底层本质上也是取地址符.即把这个变量在内存中的物理地址提取出来
+>>>>>>> Stashed changes
