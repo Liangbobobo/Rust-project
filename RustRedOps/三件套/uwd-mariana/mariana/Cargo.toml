@@ -2,6 +2,7 @@
 name = "mariana"
 version = "0.1.0"
 edition = "2024"
+build = "build.rs"
 
 [dependencies]
 puerto={path = "../../dinvk-puerto/puerto"}
@@ -11,7 +12,21 @@ obfstr = "0.4.4"
 memchr = { version = "2.7.4", default-features = false }
 
 [features]
+default = ["desync"] # 编码时激活uwd.rs中desync特性,将其置为默认.开发完成后,如果不希望外部默认开启,随时删掉这行
 desync = []
 
 [build-dependencies]
 cc="1.2.19"
+
+[lib]
+doctest = false # 在 #![no_std]库中,必须禁用doctest,防止构建测试时,引入不兼容的std运行时导致冲突.即 关闭针对注释代码块的自动单元测试,在没有std环境下, 一旦运行cargo test会报环境冲突
+
+# 在库library中配置[profile]是会被cargo忽略的,在rust的编译模型中[profile.release]、[profile.dev]等配置,只在最顶层根项目才会生效,mariana定位是一个底层库lib,在其他上层加载器引入Mariana时,会忽视这里所有的[profile].即 最终生成二进制时的优化级别、是否剥离符号（strip）、是否开启LTO，全部由最终生成 .exe 或 .dll 的那个项目的 Cargo.toml决定.
+# 因此,在这里写上优化配置完全不会影响什么.
+[profile.release]
+    opt-level = "z"                    # 极致体积压缩
+    lto = true                         # 全局跨模块死代码剔除
+    codegen-units = 1                  # 单代码生成单元全局优化
+    panic = "abort"                    # 消除 C++ SEH 展开堆栈与格式化字符串
+    strip = true                       # 彻底剥离 PDB 路径和符号表
+    overflow-checks = false            # 消除 Release 下多余的溢出检查指令

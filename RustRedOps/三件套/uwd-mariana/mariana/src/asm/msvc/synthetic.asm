@@ -1,3 +1,6 @@
+;;  Cargo.toml 中加上 build = "build.rs" 后，rust-analyzer在后台会自动运行 build.rs 来解析项目.build.rs 调用了微软的 ml64.exe 来编译汇编文件
+;; 微软 MASM 汇编器（ml64.exe）有一个极其古老的硬性限制：单行字符数不能超过512 字符（即使是 ;; 注释行也不行！）
+
 ;; code responsible for stack spoofing via Synthetic(masm)
 ;; uwd项目的核心,负责在物理内存中,把cpu寄存器和堆栈捏造成一个合法的系统调用栈,欺骗win10/11内核与edr
 
@@ -340,11 +343,13 @@ END
 ;; 必须开辟安全空间:
 ;; 1. 当线程触发敏感的NtAllocateVirtualMemory,edr不仅在内核观察,还会通过用户态dll向当前线程插入apc或通过hook劫持控制流.edr注入的hook在执行时,会在当前线程栈顶开辟自己的栈帧.如果自己定义的真实数据(push rbp/rbx/r15)距离当前工作区太近,edr的hook routine在向下压栈写入局部变量时,会发生物理覆盖
 ;; 2. win的异常分发器SEH/VEH的栈下钻机制:如果目标函数在执行过程中,触发了任何软硬件异常(如 内存分页调整、STATUS_GUARD_PAGE_VIOLATION),win内核会调用用户态KiUserExceptionDispatcher.展开器RtlDispatchException 在寻找异常处理routine时,会在当前栈分配庞大的CONTEXT(1232字节)和DISPATCHER_CONTEXT 结构体.这也会占用栈空间
-;; 3. 目标函数的参数,伪造的栈帧大小等不同因素,决定了目标函数执行完毕,返回rust时计算rsp比最初下移多少字节(恢复原始栈帧结构)的计算十分复杂.而这里,将安全空间(sub rsp,210h)的底端锚定在rbp中(mov rbp,rsp).在退出时(restoresynthetic),利用mov rsp,rbp在一个cpu时钟周期内就可以丢弃下方所有变长的假栈,之后再add rsp, 210h(丢弃安全空间),pop r15/rbx/rbp(注意和压栈顺序相反),再ret就优雅的返回了rust执行流
+;; 3. 目标函数的参数,伪造的栈帧大小等不同因素,决定了目标函数执行完毕,返回rust时计算rsp比最初下移多少字节(恢复原始栈帧结构)的计算十分复杂.而这里,将安全空间(sub rsp,210h)的底端锚定在rbp中(mov rbp,rsp).
+;; 在退出时(restoresynthetic),利用mov rsp,rbp在一个cpu时钟周期内就可以丢弃下方所有变长的假栈,之后再add rsp, 210h(丢弃安全空间),pop r15/rbx/rbp(注意和压栈顺序相反),再ret就优雅的返回了rust执行流
 ;; 但是这些可能占用栈空间的操作 怎么能保证落在开辟的210h中,而不是这个安全空间的前面和后面呢?
 ;; 正常执行流中,这210h空间是空置的,没有任何正常代码会向里面写入数据.后续所有的假栈,参数,目标api,edr的hook,win的异常分发器,都会在rbp向下更低的空间活动,不会占用这210h
 ;; 那何不将其置为0
-;; 1. 在x64汇编和编译器生成的机器码中,有一个及其正常的现象,以基址指针正向偏移访问.如果空隙为0,那么rbp+0就是保存的r15; rbp+8就是保存的rbx; rbp+16就是保存到rbp.这会出现风险,如果有任何 如 编译器优化的局部变量访问,调试器探针,外部钩子代码尝试读取[rbp + 0x20]附近数据,就会踩进父函数物理私有空间,造成内存覆写.而210h,将r15/rbx/rbp 及父函数私有空间推到了210h之外的空间,这是绝对安全的高地.即使有几百个字节的正向探测或抖动,也触碰不到rust的核心数据
+;; 1. 在x64汇编和编译器生成的机器码中,有一个及其正常的现象,以基址指针正向偏移访问.如果空隙为0,那么rbp+0就是保存的r15; rbp+8就是保存的rbx; rbp+16就是保存到rbp.
+;; 这会出现风险,如果有任何 如 编译器优化的局部变量访问,调试器探针,外部钩子代码尝试读取[rbp + 0x20]附近数据,就会踩进父函数物理私有空间,造成内存覆写.而210h,将r15/rbx/rbp 及父函数私有空间推到了210h之外的空间,这是绝对安全的高地.即使有几百个字节的正向探测或抖动,也触碰不到rust的核心数据
 ;; 2. win10/11 下,如果一个函数使用了rbp帧指针,但栈分配的大小为0,这是及其罕见且反常的.正常的系统业务函数,局部变量栈空间大小一般在100-200h之间.
 ;; 附 栈帧结构
 ; 高地址 (栈底)
@@ -442,7 +447,8 @@ END
 ;; 注释8
 ;; rust call -> spoofsynthetic jmp -> ParametersSynthetic jmp->敏感api
 ;; call 先将下一行返回地址压入栈 (push RIP)，然后修改 RIP,jmp 不压入任何返回地址，仅仅修改 RIP 直接执行跳转
-;; 进入spoofsynthetic函数时,传入的参数是Config结构体的指针.在spoofsynthetic函数中又调用了ParametersSynthetic.ParametersSynthetic是纯粹的汇编函数,不遵守win64 fast call.但ParametersSynthetic又调用了敏感函数,这个敏感函数可需要rcx来承载它的第一个参数.如果不保存rcx,在ParametersSynthetic为敏感函数准备参数时(win64规定,caller需要为callee准备参数),会出现mov rcx, [rcx].Config.Arg01这种情况,导致rcx被覆盖,后续就没有代表config指针的寄存器了.
+;; 进入spoofsynthetic函数时,传入的参数是Config结构体的指针.在spoofsynthetic函数中又调用了ParametersSynthetic.ParametersSynthetic是纯粹的汇编函数,不遵守win64 fast call.
+;; 但ParametersSynthetic又调用了敏感函数,这个敏感函数可需要rcx来承载它的第一个参数.如果不保存rcx,在ParametersSynthetic为敏感函数准备参数时(win64规定,caller需要为callee准备参数),会出现mov rcx, [rcx].Config.Arg01这种情况,导致rcx被覆盖,后续就没有代表config指针的寄存器了.
 ;; rust中的extern "C" { fn SpoofSynthetic(config: *mut Config); }约定了汇编中SpoofSynthetic的参数情况;但ParametersSynthetic这个纯粹的汇编函数,没有形如rust的显示定义参数,只是单纯的操作寄存器和内存,实现其功能.这是汇编和rust等高级语言的区别
 
 ;; 注释9

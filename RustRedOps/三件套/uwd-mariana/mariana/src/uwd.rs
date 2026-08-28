@@ -47,6 +47,55 @@ unsafe extern "C" {
     fn SpoofSynthetic(config: &mut Config) -> *mut c_void;
 }
 
+/// invokes a function using a synthetic spoofed call stack
+/// 
+/// # Example
+/// 待完成
+///
+/// 
+#[macro_export]
+macro_rules! spoof {
+    // $ 代表后面的是一个宏变量或一个重复模块的开始;
+    // ()是重复模块的边界.详见rust reference
+    // ()外的部分,表示在重复匹配$arg时,输入给宏的每个元素必须用逗号分开
+    // + 代表一个或多次重复 *代表零次/多次重复 ?代表零次/一次重复
+    // 最外层的() 不代表重复模块,是宏规则的匹配器外壳,相当于函数的形参列表().这里的()也可用[]或{}替换,但一般都是用()
+    // $($arg:expr),+ $(,)? 这里$($arg:expr)代表一个可重复的块的开始 紧接的,代表这个可重复的块中不同的参数之间用,分割 紧接的+代表用,分割的参数可以有一个或多个 紧接的$代表一个新的可重复块 紧接的(,)代表匹配的是,即重复块的内容本身就是, 紧接的?代表匹配的,可以是一个也可以没有
+    // $(,)? 表示如果用户在最后一个参数后面加上一个逗号,这里的?就会匹配这个逗号,如果没有加也不会报错.这么做可以让宏自适应任何数量的参数,以灵活的对应win api的参数
+    // 
+    ($addr:expr,$($arg:expr),+ $(,)?) => {
+        unsafe{
+            // $crate是rustc在AST(抽象语法树)语义分析层面,对宏定义所在的库进行动态绝对路径锚定.
+            // 如果不加$ 只用crate 则在另一个项目(如samoa)引入uwd库并调用spoof!时,宏在samoa展开会被编译器理解为samoa项目所在的根目录.
+            // 如果直接用 ::uwd:: 外部用户如果在cargo.toml把库重命名了,就会找不到uwd的包.
+            // :: 是路径连接符path separator 是rust中命名空间分割符
+            $crate::__private::spoof($addr,
+            // :: 表示从全局根命名空间开始查找后面的模块,而不是从当前模块或当前库中查找(这里用了core::mem::transmute())
+            // * 表示重复展开零次/多次,中间用逗号分开
+            &[$(::core::mem::transmute($arg as usize)),*],
+            // 本文件自动的enum,表示要执行的操作类型
+            $crate::SpoofKind::Function,
+            )
+        }
+    };
+}
+
+/// invokes a windows native syscall using a spoofed stack
+/// # Example
+#[macro_export]
+macro_rules! syscall {
+    ($name:expr, $($arg:expr),* $(,)?) => {
+        unsafe {
+            $crate::__private::spoof(
+                core::ptr::null_mut(),
+                &[$(::core::mem::transmute($arg as usize)),*],
+                $crate::SpoofKind::Syscall($name),
+            )
+        }
+    };
+}
+
+
 /// specifies the spoofing mode used by the engine:伪造的堆栈,是去执行普通的api函数,还是去执行syscall
 pub enum SpoofKind {
     /// spoofs a direct function call:不需要ssn,用传进来的函数物理地址,在伪造好的堆栈上跳转过去执行
@@ -61,8 +110,24 @@ pub enum SpoofKind {
     Syscall(u32),
 }
 
-/// performs call stack spoofing in desync mode
-// #[cfg(feature="desync")]
+/// rust的声明宏(macro_rules!)不是函数调用,是在调用方的代码位置原地展开代码.如果下文中的fn spoof是私有的,rust不能在模块外调用私有函数,为了让宏在任何下游模块/二进制中顺利编译展开,被调用的底层函数必须是pub.
+/// 但如果直接将fn spoof暴露成普通的pub,就把spoof暴露在顶层的命名空间(如 uwd::spoof),这样会: 1. 破坏调用安全防线,spoof涉及裸指针/汇编,是极度底层容易引发内存崩溃的脆弱接口.普通用户手动调用uwd::spoof(),会因参数对齐或指针传递错误引发内存越界崩溃(0xC0000005).且rust生态中,只要暴露在公有api中的函数,其参数类型,顺序均不能随便改名,不利于重构.
+
+/// 而#[doc(hidden)] + pub mod __private,解决rust编译器可见性规则和代码封装安全性之间的矛盾.保证了底层机器码能被编译器正常链接,而对一般用户隐藏了危险操作.
+
+#[doc(hidden)]
+pub mod __private{
+    use core::ffi::c_void;
+    
+    // 父mod中所有内容包括公有成员,私有成员,父mod中use的内容,都可以在子mod中使用,但:
+    // 1. 父mod中定义的宏必须使用#[macro_export],且宏必须定义在这种子mod前
+    // 2. 如果出现同名冲突,编译器优先使用子mod中的定义
+    // 3. 只对上一级mod有效,不能无限向上
+    use super::*;
+
+
+    /// performs call stack spoofing in synthetic mode
+#[cfg(not(feature="desync"))]
 pub fn spoof(addr: *mut c_void, args: &[*const c_void], kind: SpoofKind) -> Result<*mut c_void> {
     // Max 11 args. 详见注释1
     // 这段的反汇编(release后)及其简约,没有内存分配,没有字符串,没有调用其他函数,零堆分配,零字符串指纹.详见注释1
@@ -215,6 +280,128 @@ Ok(unsafe {
 })
 
 }
+
+/// performs call stack spoofing in desync mode
+/// 
+/// 接收参数的类型及其含义:
+/// 1. addr类型是*mut c_void无类型裸指针.x64下任何函数指针,内存地址都是标准的8字节无符号整数(64位va).使用*mut c_void可接收任何签名的c/win32 函数入口
+/// 在kind=SpoofKind::Function常规函数调用模式下,addr传入的是要调用的目标函数的实际内存地址,校验后之后被存入config.spoof_function 在desync.asm中会读取该字段并存入r11寄存器,之后通过jmp QWORD PTR r11转移控制流
+/// 在kind=SpoofKind::Syscall下,syscall!展开时,addr被传入core::ptr::null_mut() 因为syscall下,真实的执行入口是通过kind内部携带的hash值动态解析出的系统调用指令地址
+/// 
+/// 2. args的类型是&[*const c_void],指向裸指针数组的借用切片.其本质是一个指针切片,里面按顺序存放了传递给目标函数的所有入参.以此利用切片的特性,接收可变个数的参数及方便遍历
+/// 
+/// 3. kind::SpoofKind 调用模式分流枚举,分支1SpoofKind::Function(常规api分支),标记config.is_syscall=0,汇编引擎在参数装填后,通过cmp [r12].Config.IsSyscall ,1 判断为0,直接跳转到Execute PROC,以fastcall约定进入目标函数. 分支2 SpoofKind::Syscall(hash),底层系统调用分支,参数携带一个32位的api名称hash值,在内部会根据该hash解析ssn写入config.ssn 然后定位系统调用跳转切片,在ntdll.dll内部找到一个合法的系统调用跳转指令,将其内存地址写入config.spoof_function 并标记config.is_syscall=1 汇编引擎因此跳转ExecuteSyscall PROC执行syscall调用的约定.
+/// 
+/// 相对于synthetic模式,desync模式下,在当前线程真实的物理栈上,向上扫描找到os写下的BaseThreadInitThunk 返回地址(config.return_address = find_base_thread_return_address()),然后将现有的真实线程栈当作地基,在这个真实的返回地址下方嫁接first_frame和second_frame
+#[cfg(feature = "desync")]
+
+pub fn spoof(addr:*mut c_void,args: &[*const c_void],kind:SpoofKind)->Result<*mut c_void> {
+    // max 11 args
+    if args.len()>11 {
+        stealth_bail!(MarianaError::toomanyarguments);
+    }
+
+    // function pointer must be valid unless syscall spoof
+if let SpoofKind::Function=kind && addr.is_null(){
+    stealth_bail!(MarianaError::nullfunctionaddress);
+}
+
+let mut config = Config::default();
+
+// resolve kernelbase
+let kernelbase = get_module_address(Some(0x31B113C3u32), Some(fnv1a_utf16))
+.ok_or(MarianaError::NotFoundKernelBase)?;
+
+// parse unwind table
+let pe = Unwind::new(PE::parse(kernelbase));
+let tables = pe.entries().ok_or(MarianaError::desyncfailedtoreadIMAGE_RUNTIME_FUNCTIONentriesfrompdatasection)?;
+
+// locate a return address from BaseThreadInitThunk on the current stack
+config.return_address=find_base_thread_return_address().ok_or(MarianaError::desyncreturnaddressnotfound)? as *const c_void;
+
+// first prologue
+let first_prolog = Prolog::find_prolog(kernelbase, tables).ok_or(MarianaError::desyncfirstprolognotfound)?;
+
+config.first_frame_fp=(first_prolog.frame + first_prolog.offset as u64) as *const c_void;
+config.first_frame_size=first_prolog.stack_size as u64;
+
+// second prologue
+let second_prolog = Prolog::find_push_rbp(kernelbase,tables).ok_or(MarianaError::desyncsecondprolognotfound)?;
+
+ config.second_frame_fp = (second_prolog.frame + second_prolog.offset as u64) as *const c_void;
+        config.second_frame_size = second_prolog.stack_size as u64;
+        config.rbp_stack_offset = second_prolog.rbp_offset as u64;
+
+// gadget(add rsp,0x58; ret):为即将调用的敏感api,预留11个参数的栈空间(不一定用完)
+ let (add_rsp_addr, size) = find_gadget(kernelbase, &[0x48, 0x83, 0xC4, 0x58, 0xC3], tables).ok_or(MarianaError::desyncaddrspgadgetnotfound)?;
+
+ config.add_rsp_gadget=add_rsp_addr as *const c_void;
+ config.add_rsp_frame_size=size as u64;
+
+ // gadget(jmp rbx):跳到rbx执行相应的尾声,用于切回rust的执行流
+let (jmp_rbx_addr, size) = find_gadget(kernelbase, &[0xFF, 0x23], tables).ok_or(MarianaError::desyncjmprbxgadgetnotfound)?;
+
+config.jmp_rbx_gadget=jmp_rbx_addr as *const c_void;
+config.jmp_rbx_frame_size= size as u64;
+
+// prepare arguments
+let len = args.len();
+config.number_args=len as u64;
+
+for (i,&arg) in args.iter().take(len).enumerate() {
+    match i {
+        0 => config.arg01 = arg,
+                1 => config.arg02 = arg,
+                2 => config.arg03 = arg,
+                3 => config.arg04 = arg,
+                4 => config.arg05 = arg,
+                5 => config.arg06 = arg,
+                6 => config.arg07 = arg,
+                7 => config.arg08 = arg,
+                8 => config.arg09 = arg,
+                9 => config.arg10 = arg,
+                10 => config.arg11 = arg,
+                _ => break,
+    }
+}
+
+// handle syscall spoofing
+match kind{
+    SpoofKind::Function=>config.spoof_function=addr,
+
+    SpoofKind::Syscall(hash)=>{
+        let ntdll = get_module_address(Some(0xB3383153), Some(fnv1a_utf16))
+            .ok_or(MarianaError::desyncntdlldllnotfound)?;
+
+            let addr = get_proc_address(Some(ntdll), Some(hash), Some(fnv1a_utf16)).ok_or(MarianaError::desyncget_proc_addressreturnednull)?;
+
+            config.is_syscall=true as u32;
+            config.ssn=puerto::syscall::x86_64::ssn(hash, ntdll).ok_or(MarianaError::desyncssnnotfound)? as u32;
+            
+            
+            config.spoof_function=puerto::x86_64::get_syscall_address(addr)
+            .ok_or(MarianaError::desyncsyscalladdressnotfound)? as *const c_void;
+    }
+}
+
+// 1. Spoof为前文定义的外部汇编函数ffi签名,这里表示调用对应的汇编函数,因是extern "C"的外部裸调用,必须用unsafe包裹
+// 2. 汇编中的Spoof内部通过jmp跳去执行敏感api,这个敏感api的返回值怎么精准落到OK()中的? 这依赖于win64 abi的rax返回值定律.在win64下一切函数的64位返回值(无论整数或指针),在ret弹栈前必须放在rax中.当伪造调用的敏感api(如 VirtualAlloc)执行完毕,将返回的数据的内存首地址放入rax
+// ROP退场流水线(rax绝不被破坏):敏感api执行完毕ret后,开始沿着rop链退场:
+// 目标api执行完毕,设置rax值(目标api的真实返回值)
+// 第一跳:AddRspXGadget(add rsp,58h; ret),期间没有动rax
+// 第二跳:JmpRbxGadget(jmp [rbx]) 只改rip,不改rax
+// 第三跳:Restore PROC  也没有动rax
+// 当Restore执行最后一跳中的ret时,cpu跳回rust编译出来的机器码位置(Spoof(&mut config)的下一行指令),rust编译器按照win64规范,将当时的rax中的64位数值当作*mut c_void读取并塞入OK()中
+Ok(unsafe {
+    Spoof(&mut config)
+})
+
+}
+
+
+
+}
+
 
 /// metadata extracted from a function prologue that is suitable for spoofing
 #[derive(Copy, Clone, Default)]
@@ -550,7 +737,7 @@ pub fn stack_frame(module: *mut c_void, runtime: &IMAGE_RUNTIME_FUNCTION) -> Opt
 
                         // Consumes 2 slots (1 for the instruction, 1 for the size divided by 8)
                         i += 2
-                    }
+                    }else 
                     {
                         // Case 2: OpInfo == 1 (Size in 2 slots, 32 bits)
                         let frame_offset = *(unwind_code.add(1) as *mut i32);

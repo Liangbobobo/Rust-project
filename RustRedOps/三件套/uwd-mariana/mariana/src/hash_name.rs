@@ -1,3 +1,5 @@
+// 本文件定义的这些const常量会被edr发现吗?
+
 //! Pre-computed API & Module Hashes using FNV-1a (puerto compatible)
 
 // ============================================================================

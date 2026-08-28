@@ -40,6 +40,19 @@ pub enum MarianaError {
     get_proc_addressreturnednull,
     ssnnotfound,
     syscalladdressnotfound,
+    toomanyarguments,
+    nullfunctionaddress,
+    desyncfailedtoreadIMAGE_RUNTIME_FUNCTIONentriesfrompdatasection,
+    desyncreturnaddressnotfound,
+    desyncfirstprolognotfound,
+    desyncsecondprolognotfound,
+    desyncaddrspgadgetnotfound,
+    desyncjmprbxgadgetnotfound,
+    desyncntdlldllnotfound,
+    desyncget_proc_addressreturnednull,
+    desyncssnnotfound,
+    desyncsyscalladdressnotfound,
+
 
 }
 
