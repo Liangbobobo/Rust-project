@@ -178,6 +178,8 @@ pub fn get_module_address(
 /// peb通过ldr字段,维护着一个描述进程已加载模块的双向链表( PEB -> Ldr -> 模块链表 -> 导出基址 (DllBase))
 /// 
 /// 多次分析,仍然是函数参数不需要使用option,返回值使用option,下次重构时使用
+/// 
+/// 返回目标函数的va
 pub fn get_proc_address(
     h_module: Option<HMODULE>,// dll内存基址
     function: hash_type,// 函数名对应的hash

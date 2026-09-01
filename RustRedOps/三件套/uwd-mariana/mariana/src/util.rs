@@ -25,7 +25,7 @@ use crate::ignoring_set_fpreg;
 /// qword ptr:quad 四倍,cpu从目的内存地址中读取一个8字节的数据作为目标函数指针
 /// [rip+0]:win64下,引入了rip相对寻址.cpu解码和执行当前call指令时,rip寄存器的值已经自动递增,指向当前指令下方的第一个字节.
 ///
-/// 该指令(call qword ptr [rip + 0])对应的16进制机器码固定为7个字节:48 FF 15 00 00 00 00
+/// 该指令(call qword ptr [rip + N])对应的16进制机器码固定为7个字节:48 FF 15 00 00 00 00
 /// 48:REX.W前缀,声明这是一个64位宽度的操作
 /// FF 15:间接call操作码(call [rip + displacement])
 /// 00 00 00 00:32位相对偏移量(对应上面的displacement),这里是0
@@ -126,7 +126,7 @@ pub fn find_base_thread_return_address() -> Option<usize> {
 
         // resolve the address of the BaseThreadInitThunk function
         let base_thread = get_proc_address(Some(kernel32), Some(0xF70757EA), Some(fnv1a_utf16))?;
-        // 以上,如果上面两个值返回None,会传播给find_base_thread_return_address的返回值,后续再由uwd.rs进一步处理.
+        // 以上,如果上面两个值返回None,会将None传播给find_base_thread_return_address的返回值,后续再由uwd.rs进一步处理.
 
         // calculate the size of BaseThreadInitThunk function:对应函数的机器码区间长度,不是栈帧大小
         let pe_kernel32 = Unwind::new(PE::parse(kernel32));

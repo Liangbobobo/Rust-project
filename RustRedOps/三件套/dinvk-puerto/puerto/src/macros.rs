@@ -6,6 +6,15 @@
 use core::fmt::{self, Write};
 
 /// 由于p版更改了部分函数的参数和返回值,这里与d版的宏不同.
+/// 
+/// 该宏用于在pe文件中通过函数地址直接调用对应的函数.常规直接调用敏感api会在pe文件的iat中留下该api的明文字符串.这个宏的调用方式1. 在内存中动态遍历目标模块的导出表 2. 基于编译期hash值匹配定位 3. 编译的二进制文件没有导入表指纹,没有明文api字符串
+/// 调用该宏时,最后一个参数的* 代表零次或多次.那么这里是否可以少于3个参数?
+/// 第一个参数是模块基址(类型是expr,本项目中是*mut c_void/HANDLE).Rust中几乎所有能计算出一个具体数值的代码段都是expr,包括但不限于字面量/变量名/函数调用/算术(位)运算/模式匹配(和if)/代码块
+/// 第二个参数是模块中函数的hash值,类型是u32
+/// 第三个参数是目标函数的类型签名.在transmute中将目标函数的地址(va)强转为符合该签名的可调用的函数指针.
+/// 第四个参数是传给目标函数的参数,可以是零个或多个,用 , 分隔
+/// 
+/// release下宏的名称(这里的dinvok),绝不会再最终的exe二进制文件中留下痕迹.函数在编译后是一个真实代码块,在符号表中可能残留函数名.而宏仅仅是编译器前端的查找/替换模板
 #[macro_export]
 macro_rules! dinvok {
         // expr:表达式指示符;ty:类型指示符(可以是函数的类型,如unsafe extern "system" fn(...) -> ...)
@@ -14,7 +23,7 @@ macro_rules! dinvok {
             {
                 let address=$crate::module::get_proc_address(Some($module),Some($function),Some($crate::hash::fnv1a_utf16));
 
-                // 这里用unwrap()解构是否合适?
+                // 这里用unwrap()解构.应替换为match.详见 Rust相关/Rust Grammer/unwrap.md
                 // 这里的宏内部是否可用debug_log!
                 if address.unwrap().is_null(){
                     None
