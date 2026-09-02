@@ -40,6 +40,7 @@ pub type LoadLibraryAFn = unsafe extern "system" fn(fnlpLibFileName: *const u8) 
 pub type RemoveVectoredExceptionHandlerFn = unsafe extern "system" fn(handle: *mut c_void) -> u32;
 pub type NtGetThreadContextFn = unsafe extern "system" fn(hthread: HANDLE, lpcontext: *mut CONTEXT) -> i32;
 pub type NtSetThreadContextFn = unsafe extern "system" fn(hthread: HANDLE, lpcontext: *const CONTEXT) -> i32;
+/// 这种ffi详见 rust相关/Rust Grammer/rust-ffi方式.md
 pub type RtlCaptureContextFn = unsafe extern "system" fn(contextrecord: *mut CONTEXT);
 pub type RtlCreateTimerQueueFn = unsafe extern "system" fn(TimerQueueHandle: *mut HANDLE) -> NTSTATUS;
 pub type HeapAllocFn = unsafe extern "system" fn(hheap: HANDLE, dwflags: HEAP_FLAGS, dwbytes: usize) -> *mut c_void;

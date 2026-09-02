@@ -1,3 +1,28 @@
+- [helper.rs](#helperrs)
+  - [源码- if (\*nt).Signature== IMAGE\_NT\_SIGNATURE](#源码--if-ntsignature-image_nt_signature)
+  - [BTreeMap：Rust 中有序映射的底层利器](#btreemaprust-中有序映射的底层利器)
+    - [BTreeMap 结构体定义](#btreemap-结构体定义)
+    - [1. 核心特性：有序性（Ordered）](#1-核心特性有序性ordered)
+      - [在本项目中的意义](#在本项目中的意义)
+    - [2. 数据结构：B-Tree 的优势](#2-数据结构b-tree-的优势)
+    - [3. API 与典型用法](#3-api-与典型用法)
+    - [4. 为何在 `dinvk` 项目中选用 `BTreeMap`？](#4-为何在-dinvk-项目中选用-btreemap)
+      - [✅ **no\_std 环境友好**](#-no_std-环境友好)
+      - [✅ **行为确定性**（Determinism）](#-行为确定性determinism)
+      - [✅ **符合地址空间语义**](#-符合地址空间语义)
+    - [总结](#总结)
+  - [use core::{ffi::{c\_void, CStr}](#use-coreffic_void-cstr)
+    - [c\_void](#c_void)
+    - [let ptr: *const c\_void = \&my\_data as*const u32 as \*const c\_void](#let-ptr-const-c_void--my_data-asconst-u32-as-const-c_void)
+      - [1. `&my_data` 是什么？——安全引用的本质](#1-my_data-是什么安全引用的本质)
+      - [2. `*const u32` 是什么？——裸指针的特性](#2-const-u32-是什么裸指针的特性)
+      - [3. 为什么要写成 `&my_data as *const u32 as *const c_void`？](#3-为什么要写成-my_data-as-const-u32-as-const-c_void)
+        - [A. 从“安全世界”跨越到“不安全世界”](#a-从安全世界跨越到不安全世界)
+        - [B. 语法规则：分两步“脱壳”](#b-语法规则分两步脱壳)
+      - [总结](#总结-1)
+
+
+
 # helper.rs
 
 本文件封装了对 Windows PE（Portable Executable）文件格式的解析逻辑
@@ -11,6 +36,30 @@ helper.rs 是“如何从内存中读懂 PE 结构本身”。能让你彻底理
    2. Base -> DOS Header -> 拿到 NT Header Offset
    3. Base + NT Header Offset -> NT Header -> 拿到 Export RVA
    4. Base + Export RVA -> Export Directory -> 拿到三个核心数组的 RVA
+
+
+## 源码- if (*nt).Signature== IMAGE_NT_SIGNATURE
+
+**区分“古老的 16 位 DOS 程序与现代 PE 程序**
+1. 所有现代 EXE 和 DLL 的头部，仍然保留了一个历史遗留的 DOSHeader（首部永远是 0x5A4D，即 "MZ"）
+2. 纯 16 位 DOS 程序：只有 "MZ" 标志，没有后面的 NT 头
+3. 现代 32/64 位 Windows 程序：在 DOS 头后面必须跟着 "PE\0\0"
+
+**大小端序**
+1. 字符串 "PE\0\0" 读进寄存器会变成 0x00004550;十六进制P->0x50 E->0x45 \0->0x00 
+2. 大端序big-endian:高位在低地址,低位在高地址,符合人类阅读直觉.网络协议使用的方式
+3. 小端序little-endian:低位在低地址,高位在高地址(intel/amd x86_64 cpu/windows系统默认)
+4. 大小端序在底层和逆向中的影响:
+5. 把一个32位的大栈空间拆成两个16位槽位时,大小端序会有影响
+6. 机器码是小端序,翻译成16进制,特别是计算偏移时有影响
+7. 网络通信和c2协议转换:网络协议用的是大端序,shellcode在win64上是小端序.二者选择接口时会有影响
+
+**防止“野指针计算”导致内核蓝屏/进程崩溃（熔断机制）:**
+源码中NTheader的地址是通过dos头的e_lfanew偏移计算的(`let nt = ((self.base as usize) + (*dos).e_lfanew as usize) as *const IMAGE_NT_HEADERS;`).如果传入的base是个损坏的内存地址,或一段未初始化的野指针堆内存.(*dos).e_lfanew 读出来的可能是一个离谱的脏数据那么算出来的 nt 指针就会指向一个非法内存区域.而`(*nt).Signature`==`0x00004550`代表pe文件的二进制魔数.判断是不是一个合格win pe格式的二进制文件
+
+
+**攻防对抗中的“PE 头抹除（Header Stomping）”应对**
+1. 有些攻击载荷在内存中反射加载后，会执行 Header Stomping（擦除内存中的 PE头），把前面的 MZ 和 PE 标志全填成 0，用来干扰自动化内存扫描器
 
 ## BTreeMap：Rust 中有序映射的底层利器
 

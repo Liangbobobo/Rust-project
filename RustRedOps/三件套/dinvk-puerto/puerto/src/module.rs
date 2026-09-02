@@ -1,5 +1,4 @@
 // 免杀注意:
-// 禁用#[derive(Debug)]
 // 禁用result<>,改用option<*mut c_void>
 
 // 指令混淆优化 (Anti-EDR)

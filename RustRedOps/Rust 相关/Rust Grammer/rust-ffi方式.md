@@ -1,3 +1,5 @@
+- [static linking](#static-linking)
+- [动态函数指针类型定义(Dynamic Function Pointer Signature)](#动态函数指针类型定义dynamic-function-pointer-signature)
 
 
 ## static linking
