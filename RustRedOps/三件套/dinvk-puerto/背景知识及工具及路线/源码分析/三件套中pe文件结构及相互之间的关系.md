@@ -18,6 +18,8 @@
 
 **导出表Export Directory:**只有提供函数接口的 PE 文件（主要是DLL）才拥有导出表；只要它拥有导出表，就必然由三大数组（名字表、序号桥梁表、函数地址表）共同联动，存储该模块所有的导出函数信息
 
+**names 和 ords 是平行的、funcs是最终的物理入口**
+
 **PE导出表设计为三个数组的原因:**
 1. 支持“仅靠序号导出（Export by Ordinal）”：Windows 允许某些内部函数只有序号、没有名字；因此，函数地址表的数量（NumberOfFunctions）通常 ≥函数名字表的数量（NumberOfNames）
 2. 支持“极速二分查找（Binary Search）”：微软规定：名字表（AddressOfNames）必须按字母 A~Z 严格升序排列；但是函数在内存里的地址（AddressOfFunctions）是乱序的；微软引入了 AddressOfNameOrdinals 作为中间路由
