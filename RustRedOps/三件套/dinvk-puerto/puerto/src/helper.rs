@@ -197,6 +197,9 @@ impl <'a> Exports<'a> {
                 // CStr:
                  let name = CStr::from_ptr(name_ptr)
                 .to_str()
+                // 1. win的系统 DLL 的函数名 100% 是 ASCII，不可能转码失败
+                // 2. unwrap_or 有值就取值，遇到 None 或 Err用默认值平稳顶替.绝对不会触发 Panic
+                // 3. 只能用在绝对不会失败的场景下,相对于MarianaError有很多劣势.这里原作者考虑的非常详细,才用了unwrap_or
                 .unwrap_or("");
             
                 map.insert(addr, name);
