@@ -1,0 +1,22 @@
+[package]
+name = "thanatos-wisconsin"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# 现代RustCrypto套件(代替block-modes)
+# Advanced Encryption Standard
+aes="0.9"
+# Cipher block chaining密文块链接:不计算密码,专门负责将16字节的数据链式混淆和分组链接;
+# aes本质上固定处理16字节数据,如果一个json有64B,就必须被切成4哥block,如果每个块单独aes加密,这是ecb模式.
+# cbc:每个block被aes加密前,和前一个block做异或xor混淆.即使有相同数据,加密后的密文都不同,毫无规律.
+# 但第一个block前面没有密文,这里用IV和第一个block混淆
+# 这里的block_padding是工具箱,其中有pkcs7的补齐方式,pkcs7是原地补齐,不开辟新内存空间.
+cbc = { version = "0.2", features = ["block-padding"] }
+#
+hmac="0.13"
+#
+sha2="0.11"
+#
+base64="0.23"
+rand="0.10.3"
