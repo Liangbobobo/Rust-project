@@ -1,0 +1,27 @@
+[package]
+name = "thanatos-wisconsin"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# 现代RustCrypto套件(代替block-modes)
+# Advanced Encryption Standard
+# 仅保留核心aes块加密解密算法,剔除多余辅助特征
+aes = { version = "0.9.3", default-features = false }
+# 仅保留cbc模式与PKCS#7块填充(block-padding),禁用默认辅助功能
+cbc = { version = "0.2.1", default-features = false, features = ["block-padding"] }
+# 仅保留核心hmac-sha256状态机与签名验证
+hmac = { version = "0.13.0", default-features = false }
+# 仅保留sha-256压缩函数,剔除sha-224/512等多余分支
+sha2 = { version = "0.11.0", default-features = false }
+# 仅保留标准的encode_slice和decode_slice接口,剔除std::io和堆分配逻辑
+base64 = { version = "0.23.1", default-features = false }
+# 仅显示开启系统原生随机源sys_rng(通过windows api)与thread_rng(生成16b iv所必须),剥离多余特性
+rand = { version = "0.10.3", default-features = false, features = ["sys_rng", "std", "thread_rng"] }
+# 仅保留HKDF-Expand/Extract算法逻辑
+hkdf = { version = "0.13.0", default-features = false }
+
+# models.rs依赖
+# 关闭(default-features=false)并仅开启alloc(或使用栈上json格式化),确保编译出的二进制体积最小化,且不引入不必要的std i/o依赖
+serde = { version = "1.0.229", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0.151", default-features = false, features = ["alloc"] }

@@ -18,21 +18,20 @@ use base64::prelude::*;
 // aes解决保密性,mac解决完整和真实性
 use hmac::{KeyInit, Mac};
 use rand::Rng;
-// sha2是hash算法库,Sha256是一个具体的结构,内部实现了SHA-256算法的逻辑方法
 use hkdf::Hkdf;
+// sha2是hash算法库,Sha256是一个具体的结构,内部实现了SHA-256算法的逻辑方法
 use sha2::Sha256;
 
 // 以上,aes中Pkcs7对明文JSON对齐16字节(补齐/剔除多余字节);KeyIvInit规定通信建立时必须有32B key和16B IV;BlockModeEncrypt将明文转为密文
 // sha256是纯粹hash运算,产生固定32字节hash值;hmac更新数据和检查真伪
+// 加密流程如下:
 // 明文 JSON 数据
 //           ↓
-//     [准备阶段] HKDF 用主密钥预先派生出两个独立子密钥: enc_key (加密) 和
-//   mac_key (防伪)
+//     [准备阶段] HKDF 用主密钥预先派生出两个独立子密钥: enc_key (加密) 和mac_key (防伪)
 //           ↓
 //     1. rand::rng() -> 生成 16 字节真随机 IV
 //           ↓
-//     2. Pkcs7 + BlockModeEncrypt -> 原地自动补齐并加密成密文 (在 raw_buf
-//   里两步合一，零内存分配)
+//     2. Pkcs7 + BlockModeEncrypt -> 原地自动补齐并加密成密文 (在 raw_buf里两步合一，零内存分配)
 //           ↓
 //     3. mac.update() -> 将 16B IV 和密文一起喂入 HMAC-SHA256 引擎
 //           ↓
@@ -151,13 +150,14 @@ impl CryptoContext {
         let mut enc_key = [0u8; 32];
         let mut mac_key = [0u8; 32];
 
-        // 用随机挑选的纯十六进制字节序列作为隔离标签,代替英文字符串,避免在.rdata中留下痕迹
+        // 用随机挑选的纯十六进制字节序列作为隔离标签,代替英文字符串,避免在可执行文件的.rdata中留下痕迹
         hk.expand(
             &[0x3A, 0xF9, 0x81, 0x5C, 0x22, 0xD4, 0x6E, 0x01],
             &mut enc_key,
         )
         .map_err(|_| CryptoError::HkdfExpandEncFailed)?;
 
+  
         hk.expand(
             &[0x7B, 0xC4, 0x19, 0x2E, 0x88, 0xFA, 0x43, 0x02],
             &mut mac_key,
