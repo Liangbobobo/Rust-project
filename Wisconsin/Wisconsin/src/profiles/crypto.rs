@@ -12,12 +12,15 @@
 // BlockModeDecrypt: 解密模式 trait,与 BlockModeEncrypt 对应,负责解密.
 // KeyIvInit(key密钥+Iv初始向量+Init):定义了如何用key和IV初始化加密规则.
 // BlockModeDecrypt, BlockModeEncrypt, KeyIvInit都是trait,只有Pkcs7是具体结构体
-use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
+// 【现代 RustCrypto cipher 特征规范兼容修复】
+// 在现代 RustCrypto 生态套件 (cipher 0.4/0.5 及 cbc 0.2) 中，块密码工作模式特征分别命名为 BlockEncryptMut 与 BlockDecryptMut，
+// 包含原地填充加密/解密方法 encrypt_padded_mut 与 decrypt_padded_mut。保留原注释并引入正确的特征声明：
+use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
 use base64::prelude::*;
 // hmac库中的mac(message authentication code消息认证码) trait:包含现代密码学所有消息认证码的方法,如流式更新数据;封口取值;时间校验,都在后续代码中用到
 // aes解决保密性,mac解决完整和真实性
 use hmac::{KeyInit, Mac};
-use rand::Rng;
+// rand::random 原生顶层函数无需显式引入 Rng 特征
 use hkdf::Hkdf;
 // sha2是hash算法库,Sha256是一个具体的结构,内部实现了SHA-256算法的逻辑方法
 use sha2::Sha256;
@@ -151,18 +154,24 @@ impl CryptoContext {
         let mut mac_key = [0u8; 32];
 
         // 用随机挑选的纯十六进制字节序列作为隔离标签,代替英文字符串,避免在可执行文件的.rdata中留下痕迹
-        hk.expand(
+        if let Err(_) = hk.expand(
             &[0x3A, 0xF9, 0x81, 0x5C, 0x22, 0xD4, 0x6E, 0x01],
             &mut enc_key,
-        )
-        .map_err(|_| CryptoError::HkdfExpandEncFailed)?;
+        ) {
+            // 【安全强化】若第一阶段派生失败，物理刷零 enc_key 避免脏内存残留
+            zeroize_slice(&mut enc_key);
+            return Err(CryptoError::HkdfExpandEncFailed);
+        }
 
   
-        hk.expand(
+        if let Err(_) = hk.expand(
             &[0x7B, 0xC4, 0x19, 0x2E, 0x88, 0xFA, 0x43, 0x02],
             &mut mac_key,
-        )
-        .map_err(|_| CryptoError::HkdfExpandMacFailed)?;
+        ) {
+            zeroize_slice(&mut enc_key);
+            zeroize_slice(&mut mac_key);
+            return Err(CryptoError::HkdfExpandMacFailed);
+        }
 
         Ok(Self { enc_key, mac_key })
     }
@@ -196,8 +205,8 @@ impl CryptoContext {
         }
 
         // 1. 生成 16 字节纯真随机 IV
-        let mut iv = [0u8; IV_LEN];
-        rand::rng().fill_bytes(&mut iv);
+        // 修正: 采用 rand 原生全局高熵随机源安全生成 16 字节随机初始向量 (兼容 rand 0.9/0.10)
+        let mut iv: [u8; IV_LEN] = rand::random();
 
         // 2. 在调用者提供的 raw_buf 中就地布局明文数据.按 Mythic 协议排版数据
         let uuid_start = 0;
@@ -213,12 +222,18 @@ impl CryptoContext {
 
         // 3. 不向os申请新内存,原地执行pkcs#7补齐并加密,在遇到任何异常失败时,立即销毁物理内存中明文
         // 初始化 CBC 加密状态机
-        let encryptor = Aes256CbcEnc::new_from_slices(&self.enc_key, &iv)
-            .map_err(|_| CryptoError::SealCipherInitFailed)?;
+        // 【可变性绑定修复】BlockEncryptMut::encrypt_padded_mut 需要对状态机实例进行可变借用 (&mut self)，故 encryptor 声明为可变绑定 mut
+        let mut encryptor = Aes256CbcEnc::new_from_slices(&self.enc_key, &iv)
+            .map_err(|_| {
+                zeroize_slice(raw_buf);
+                zeroize_slice(&mut iv);
+                CryptoError::SealCipherInitFailed
+            })?;
 
         // 原地填充和加密:
+        // 【API 方法名修复】调用现代 BlockEncryptMut 特征的 encrypt_padded_mut 方法进行原地 PKCS#7 块填充与加密
         if encryptor
-            .encrypt_padded::<Pkcs7>(&mut raw_buf[ct_start..ct_end], data.len())
+            .encrypt_padded_mut::<Pkcs7>(&mut raw_buf[ct_start..ct_end], data.len())
             .is_err()
         // 任何异常会直接清理明文json数据
         {
@@ -230,7 +245,11 @@ impl CryptoContext {
         // 4. 计算 HMAC-SHA256(IV + Ciphertext):为啥没有加上uuid 详见注释2
         // 实例化hmac签名器
         let mut mac =
-            HmacSha256::new_from_slice(&self.mac_key).map_err(|_| CryptoError::SealHmacInitFailed)?;
+            HmacSha256::new_from_slice(&self.mac_key).map_err(|_| {
+                zeroize_slice(raw_buf);
+                zeroize_slice(&mut iv);
+                CryptoError::SealHmacInitFailed
+            })?;
         // [iv_start..ct_end]代表iv和ciphertext范围
         mac.update(&raw_buf[iv_start..ct_end]);
         // HMAC-SHA256最终产生固定32字节的tag
@@ -265,9 +284,26 @@ impl CryptoContext {
         payload_b64: &[u8],
         raw_buf: &mut [u8],
     ) -> Result<usize, CryptoError> {
+        // 剥离尾部 ASCII 换行符与空白字符 (\r, \n, 空格)，增强网络与反向代理容错率
+        // 同步剥离头部 ASCII 空白字符，全面防范网络代理传输中可能引入的前置换行或空格
+        let start = payload_b64
+            .iter()
+            .position(|&b| !b.is_ascii_whitespace())
+            .unwrap_or(0);
+        let end = payload_b64
+            .iter()
+            .rposition(|&b| !b.is_ascii_whitespace())
+            .map(|pos| pos + 1)
+            .unwrap_or(0);
+        let clean_payload = if start < end {
+            &payload_b64[start..end]
+        } else {
+            b""
+        };
+
         // 1. 就地 Base64 解码至 raw_buf
         let raw_len = BASE64_STANDARD
-            .decode_slice(payload_b64, raw_buf)
+            .decode_slice(clean_payload, raw_buf)
             .map_err(|_| {
                 zeroize_slice(raw_buf);
                 CryptoError::OpenBase64DecodeFailed
@@ -275,7 +311,7 @@ impl CryptoContext {
 
         // 2. 最小物理长度检验
         if raw_len < UUID_LEN + MIN_ENCRYPTED_PAYLOAD_LEN {
-            zeroize_slice(&mut raw_buf[..raw_len]);
+            zeroize_slice(raw_buf);
             return Err(CryptoError::OpenPayloadTooShort);
         }
 
@@ -291,7 +327,7 @@ impl CryptoContext {
 
         // 使用派生的mac_key初始化hmac-sha256状态机
         let mut mac = HmacSha256::new_from_slice(&self.mac_key).map_err(|_| {
-            zeroize_slice(&mut raw_buf[..raw_len]);
+            zeroize_slice(raw_buf);
             zeroize_slice(&mut iv);
             CryptoError::OpenHmacInitFailed
         })?;
@@ -300,30 +336,41 @@ impl CryptoContext {
 
         // [hmac_start..raw_len] 代表服务端随包发来的签名 Tag；verify_slice 会在内部使用客户端的 mac 状态机计算并进行恒定时间比对
         if mac.verify_slice(&raw_buf[hmac_start..raw_len]).is_err() {
-            zeroize_slice(&mut raw_buf[..raw_len]);
+            zeroize_slice(raw_buf);
             zeroize_slice(&mut iv);
             return Err(CryptoError::OpenHmacMismatch);
         }
 
         // 5. AES-256-CBC 原地解密
-        let decryptor = Aes256CbcDec::new_from_slices(&self.enc_key, &iv).map_err(|_| {
-            zeroize_slice(&mut raw_buf[..raw_len]);
+        let ct_len = hmac_start - ct_start;
+        // 协议物理帧校验：AES 分组密码模式严格要求密文分组长度为 16 字节整数倍且非空
+        if ct_len == 0 || ct_len % 16 != 0 {
+            zeroize_slice(raw_buf);
+            zeroize_slice(&mut iv);
+            return Err(CryptoError::OpenDecryptionFailed);
+        }
+
+        // 【可变性绑定修复】BlockDecryptMut::decrypt_padded_mut 需要对解密状态机进行可变借用 (&mut self)，故 decryptor 声明为可变绑定 mut
+        let mut decryptor = Aes256CbcDec::new_from_slices(&self.enc_key, &iv).map_err(|_| {
+            zeroize_slice(raw_buf);
             zeroize_slice(&mut iv);
             CryptoError::OpenCipherInitFailed
         })?;
 
-        let plaintext_len = match decryptor.decrypt_padded::<Pkcs7>(&mut raw_buf[ct_start..hmac_start]) {
+        // 【API 方法名修复】调用现代 BlockDecryptMut 特征的 decrypt_padded_mut 原地解密并剔除 PKCS#7 填充
+        let plaintext_len = match decryptor.decrypt_padded_mut::<Pkcs7>(&mut raw_buf[ct_start..hmac_start]) {
             Ok(p) => p.len(),
             Err(_) => {
-                zeroize_slice(&mut raw_buf[..raw_len]);
+                zeroize_slice(raw_buf);
                 zeroize_slice(&mut iv);
                 return Err(CryptoError::OpenDecryptionFailed);
             }
         };
 
         // 6. 原地将明文搬移到缓冲区最前端，并洗白多余尾部内存
+        // 【防内存残留强化】彻底将 plaintext_len 之后的所有缓冲区字节（包含未被本次覆盖的历史残留）全量擦除
         raw_buf.copy_within(ct_start..ct_start + plaintext_len, 0);
-        zeroize_slice(&mut raw_buf[plaintext_len..raw_len]);
+        zeroize_slice(&mut raw_buf[plaintext_len..]);
         zeroize_slice(&mut iv);
 
         Ok(plaintext_len)

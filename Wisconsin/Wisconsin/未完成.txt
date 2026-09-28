@@ -1,4 +1,4 @@
-以下讨论基于本地C:\Users\liang\Desktop\Rust-project\Wisconsin\Wisconsin项目
+以下讨论基于本地E:\Rust-project\Rust-project\Wisconsin\Wisconsin项目
 
  一、 核心逻辑与语法/内存安全漏洞排查
   代码虽然能够通过 cargo
@@ -343,5 +343,11 @@
   动态分配，且长效持有的密钥缺乏休眠期内存保护机制。建议尽快修复
   StackVec，补充编译期真正的混淆宏，并使用统一的零分配 JSON 序列化器。
 
- 请根据上述讨论方案,直接帮我在源码中修改,注意不要更改所有的注释,只能修改models.rs和http.rs
-  不能修改crypto.rs,同时记住不要进行编译
+ 请根据上述讨论方案,直接帮我在源码中修改,注意所有的注释只能增加,不要删减,请修改models.rs和http.rs
+和crypto.rs,同时记住不要进行编译.
+
+
+请帮我检查本地E:\Rust-project\Rust-project\Wisconsin\Wisconsin项目.其中有很多逻辑和语法上的错误,有无ub等.请直接帮我在源码中修改,注意所有的注释只能增加,不要删减,请修改models.rs和http.rs
+和crypto.rs,同时记住不要进行编译.
+另外为什么不引入obfstr
+v0.4.6这个库来处理静态字符串呢?如果你论证这么做是合适的.请直接修改源码
