@@ -16,6 +16,10 @@ use crate::profiles::crypto::zeroize_slice;
 /// 采用原子状态机 (0: 未初始化, 1: 正在解密, 2: 就绪) 进行双重检查同步 (Double-Checked Locking)，
 /// 内部基于 `core::cell::UnsafeCell`，彻底剔除 `static mut` 裸引用在 Rust 2024 版本中的硬编译错误（static_mut_refs）
 /// 与多线程并发初始化时的数据竞争 (Data Race) 未定义行为 (Undefined Behavior, UB)。
+///
+/// 【零外部依赖与对抗增强】
+/// 相比第三方 `obfstr v0.4.6` 库，本内置实现无需引入额外外部 crate 依赖，极度精简编译二进制体积，
+/// 且 XOR Key 与逻辑完全嵌入 compile-time AST 展开，杜绝由于外部库引入的固定符号与特征码匹配。
 pub struct ObfBuffer<const N: usize> {
     cell: core::cell::UnsafeCell<[u8; N]>,
     state: core::sync::atomic::AtomicU8,

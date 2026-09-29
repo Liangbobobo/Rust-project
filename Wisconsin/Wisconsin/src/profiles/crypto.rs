@@ -1,21 +1,13 @@
 // #![allow(unused)]
 
-// 需要遵循mythic的通信协议:uuid(36B)+IV(16B)+Ciphertext+HMAC(32B)
+// 需要遵循mythic的通信协议:uuid(36B)+IV(16B)+Ciphertext+HMAC(32B) 各结构体作用详见注释
 
-// cbc负责数据保密(链式加密防止内容被窃听),sha-256负责提供底层hash运算,hmac结合密钥负责数据防伪和完整性(给密文和IV防伪,防止中途被篡改)
 
-// 普通应用(微信/浏览器/web/app)开发时,几乎不会手写aes/cbc/hmac.普通应用信任底层传输通道(https的tls 1.2/1.3),浏览器发起请求时,底层TLS协议栈(如Windows的Schannel或浏览器的BoringSSL)会自动使用aes-gcm或其他方法加密封装流量,业务代码写的都是明文http,对加密过程无感
-// 但c2框架中,必须做应用层二次加密.即在http报文体body内部,手动做一次aes-256-cbc-hmac.避免被中间人代理嗅探出原文.普通网络通信依赖/信任传输层TLS,c2通信把安全建立在应用层.无论外层走明文http/https/dns隧道,数据本身在离开agent内存前会被加密.
-// Rust中如果需要调用某个对象的方法,这个方法又定义在某个Trait中.那么这个trait必须先用use引入当前作用域
-// Cipher(密码):aes库将通用加密接口(trait)重新导出到这里
-// block_padding填充子模块,Pkcs7填充算法结构体:Pkcs7是一个实现了BlockPadding trait的具体结构体.aes是一个块密码,每次固定处理16字节数据块.但实际发送的JSON数据长度是任意的,Pkcs7负责在末尾补齐缺失字节,解密后再自动把这部分剔除
 // BlockModeDecrypt: 解密模式 trait,与 BlockModeEncrypt 对应,负责解密.
 // KeyIvInit(key密钥+Iv初始向量+Init):定义了如何用key和IV初始化加密规则.
 // BlockModeDecrypt, BlockModeEncrypt, KeyIvInit都是trait,只有Pkcs7是具体结构体
-// 【现代 RustCrypto cipher 特征规范兼容修复】
-// 在现代 RustCrypto 生态套件 (cipher 0.4/0.5 及 cbc 0.2) 中，块密码工作模式特征分别命名为 BlockEncryptMut 与 BlockDecryptMut，
-// 包含原地填充加密/解密方法 encrypt_padded_mut 与 decrypt_padded_mut。保留原注释并引入正确的特征声明：
-use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
+// 包含原地填充加密/解密方法 encrypt_padded 与 decrypt_padded。
+use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
 use base64::prelude::*;
 // hmac库中的mac(message authentication code消息认证码) trait:包含现代密码学所有消息认证码的方法,如流式更新数据;封口取值;时间校验,都在后续代码中用到
 // aes解决保密性,mac解决完整和真实性
@@ -53,7 +45,7 @@ type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 // hmac通用的消息认证码结构(完整性签名),本身不绑定具体的hash函数,只要满足hash运算接口,无论md5/sha-1/sha-256/sha-512都可用
 type HmacSha256 = hmac::Hmac<Sha256>;
 
-// 原始二进制的uuid是16字节,但mythic c2设计通信协议时,为了方便数据库索引和调试,采用了标准带连字符的文本.即32个十六进制字符+4个短横线=36字节的ascii码.
+// 原始二进制的uuid是16字节,但mythic c2设计通信协议时,为了方便数据库索引和调试,采用了标准带连字符的文本.即32个十六进制字符+4个短横线=36字节(ascii编码).
 // 协议位置:位于数据包最前面的36字节是明文uuid,让服务器端识别是哪个agent传来的数据
 const UUID_LEN: usize = 36;
 // aes-256密钥是32字节(256位),但其分组块大小依然是16字节.aes标准规定:无论密钥是128/192/256位,明文块和iv的长度永远是固定的16字节.因此,cbc模式初始化向量iv只能是16字节长度
@@ -222,8 +214,7 @@ impl CryptoContext {
 
         // 3. 不向os申请新内存,原地执行pkcs#7补齐并加密,在遇到任何异常失败时,立即销毁物理内存中明文
         // 初始化 CBC 加密状态机
-        // 【可变性绑定修复】BlockEncryptMut::encrypt_padded_mut 需要对状态机实例进行可变借用 (&mut self)，故 encryptor 声明为可变绑定 mut
-        let mut encryptor = Aes256CbcEnc::new_from_slices(&self.enc_key, &iv)
+        let encryptor = Aes256CbcEnc::new_from_slices(&self.enc_key, &iv)
             .map_err(|_| {
                 zeroize_slice(raw_buf);
                 zeroize_slice(&mut iv);
@@ -231,9 +222,9 @@ impl CryptoContext {
             })?;
 
         // 原地填充和加密:
-        // 【API 方法名修复】调用现代 BlockEncryptMut 特征的 encrypt_padded_mut 方法进行原地 PKCS#7 块填充与加密
+        // 调用 BlockModeEncrypt 特征的 encrypt_padded 方法进行原地 PKCS#7 块填充与加密
         if encryptor
-            .encrypt_padded_mut::<Pkcs7>(&mut raw_buf[ct_start..ct_end], data.len())
+            .encrypt_padded::<Pkcs7>(&mut raw_buf[ct_start..ct_end], data.len())
             .is_err()
         // 任何异常会直接清理明文json数据
         {
@@ -284,8 +275,8 @@ impl CryptoContext {
         payload_b64: &[u8],
         raw_buf: &mut [u8],
     ) -> Result<usize, CryptoError> {
-        // 剥离尾部 ASCII 换行符与空白字符 (\r, \n, 空格)，增强网络与反向代理容错率
-        // 同步剥离头部 ASCII 空白字符，全面防范网络代理传输中可能引入的前置换行或空格
+        // 1. 就地 Base64 解码至 raw_buf
+        // 剥离尾部与头部 ASCII 换行符与空白字符 (\r, \n, 空格)，增强网络与反向代理容错率
         let start = payload_b64
             .iter()
             .position(|&b| !b.is_ascii_whitespace())
@@ -301,7 +292,6 @@ impl CryptoContext {
             b""
         };
 
-        // 1. 就地 Base64 解码至 raw_buf
         let raw_len = BASE64_STANDARD
             .decode_slice(clean_payload, raw_buf)
             .map_err(|_| {
@@ -350,15 +340,15 @@ impl CryptoContext {
             return Err(CryptoError::OpenDecryptionFailed);
         }
 
-        // 【可变性绑定修复】BlockDecryptMut::decrypt_padded_mut 需要对解密状态机进行可变借用 (&mut self)，故 decryptor 声明为可变绑定 mut
-        let mut decryptor = Aes256CbcDec::new_from_slices(&self.enc_key, &iv).map_err(|_| {
+        // 初始化 CBC 解密状态机
+        let decryptor = Aes256CbcDec::new_from_slices(&self.enc_key, &iv).map_err(|_| {
             zeroize_slice(raw_buf);
             zeroize_slice(&mut iv);
             CryptoError::OpenCipherInitFailed
         })?;
 
-        // 【API 方法名修复】调用现代 BlockDecryptMut 特征的 decrypt_padded_mut 原地解密并剔除 PKCS#7 填充
-        let plaintext_len = match decryptor.decrypt_padded_mut::<Pkcs7>(&mut raw_buf[ct_start..hmac_start]) {
+        // 调用 BlockModeDecrypt 特征的 decrypt_padded 原地解密并剔除 PKCS#7 填充
+        let plaintext_len = match decryptor.decrypt_padded::<Pkcs7>(&mut raw_buf[ct_start..hmac_start]) {
             Ok(p) => p.len(),
             Err(_) => {
                 zeroize_slice(raw_buf);
@@ -523,3 +513,11 @@ mod tests {
 // 2. AES 密钥特征定位：AES 算法具有非常明显的轮密钥扩展（Key Schedule）数学结构。分析工具（如FindCrypt、YARA）可以直接在充满垃圾的内存碎片中，通过熵值和数学特征把残留的AES 密钥精准找出来.如果密钥一直在内存里裸奔，EDR 扫描一次就能把你的通信凭据提取一空
 // 蓝队内存转储（Process Minidump / Dump Analysis）:蓝队发现某台主机网络流量异常时,会使用 Sysinternals 的 procdump.exe，或者任务管理器，或者调用 Windows API MiniDumpWriteDump，把整个可疑进程的内存一键完整 Dump 下来生成 .dmp 文件.将 .dmp 丢进 Volatility 或者 WinDbg中，运行字符串搜索或内存分析脚本.如果你没有刷零，蓝队不仅能直接搜出服务端的IP、UUID，还能直接从转储中把解密密钥提取出来.进而拿这个密钥去解密 Wireshark / 交换机抓到的全部历史网络包，整个 C2通道彻底被“穿透”
 // 补充与睡眠混淆（hypnus）功能:在进入 Sleep 前，hypnus 会加密当前的栈和敏感段.但是，如果某些旧会话结构体已经被 Drop销毁了，但密钥依然残留在已释放的野内存中，hypnus是管不到这些不在保护名单上的碎片内存的
+
+//注释4
+// 普通应用(微信/浏览器/web/app)开发时,几乎不会手写aes/cbc/hmac.普通应用信任底层传输通道(https的tls 1.2/1.3),浏览器发起请求时,底层TLS协议栈(如Windows的Schannel或浏览器的BoringSSL)会自动使用aes-gcm或其他方法加密封装流量,业务代码写的都是明文http,对加密过程无感
+// 但c2框架中,必须做应用层二次加密.即在http报文体body内部,手动做一次aes-256-cbc-hmac.避免被中间人代理嗅探出原文.普通网络通信依赖/信任传输层TLS,c2通信把安全建立在应用层.无论外层走明文http/https/dns隧道,数据本身在离开agent内存前会被加密.
+// Rust中如果需要调用某个对象的方法,这个方法又定义在某个Trait中.那么这个trait必须先用use引入当前作用域
+// Cipher(密码):aes库将通用加密接口(trait)重新导出到这里
+// block_padding填充子模块,Pkcs7填充算法结构体:Pkcs7是一个实现了BlockPadding trait的具体结构体.aes是一个块密码,每次固定处理16字节数据块.但实际发送的JSON数据长度是任意的,Pkcs7负责在末尾补齐缺失字节,解密后再自动把这部分剔除
+// cbc负责数据保密(链式加密防止内容被窃听),sha-256负责提供底层hash运算,hmac结合密钥负责数据防伪和完整性(给密文和IV防伪,防止中途被篡改)
