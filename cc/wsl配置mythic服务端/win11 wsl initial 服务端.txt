@@ -1,0 +1,72 @@
+任一路径下执行
+wsl --install -d Ubuntu-22.04
+
+执行
+PS C:\Users\win> wsl -d Ubuntu-22.04
+不存在具有所提供名称的分发。
+错误代码： Wsl/Service/WSL_E_DISTRO_NOT_FOUND
+如果此错误是意外错误，请考虑搜索现有问题或在 https://github.com/microsoft/WSL/issues 提交新问题。
+->PowerShell 中重新执行：
+wsl --install -d Ubuntu-22.04
+
+设置Ubuntu账户密码
+user account:liang
+New password:liangxiaoxiao
+
+终端当前的工作目录为 Windows挂载路径（/mnt/c/WINDOWS/system32）
+
+切换至 Linux 原生主目录
+cd ~
+
+更新系统软件源并安装基础构建依赖
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y git make curl jq apt-transport-https ca-certificates gnupg lsb-release
+如果出现错误:
+sudo apt update
+sudo apt install -y git make curl jq apt-transport-https ca-certificates gnupg lsb-release
+
+
+安装 Docker Engine 与 Docker Compose V2 插件
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
+这会出现sleep 20s的提示,等待就行了
+
+ 安装容器引擎及 Compose 插件：
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+启动 Docker 守护进程并验证：
+sudo service docker start
+sudo docker version
+确认 Client 与 Server 均正常输出版本号
+
+配置非 root 用户组权限（避免每次使用 docker 均需提权）
+sudo usermod -aG docker $USER
+
+拉取官方源码仓库：中间可能不刷新缓冲区,powershell中不出现新提示词.使用左右键动一下,就出来提示词了
+    git clone -b Mythic-v4.0.0 https://github.com/its-a-feature/Mythic.git
+    cd Mythic
+
+编译生成 mythic-cli 客户端可执行二进制：官方通过 Makefile 封装了编译管线，直接执行构建目标：
+    sudo make
+  构建完成后，当前目录下将生成可执行文件 mythic-cli
+
+启动服务端容器微服务群.在 Mythic 根目录下，调用编译好的控制端启动全套服务：
+ sudo ./mythic-cli start
+
+  • 该命令会自动调用 Docker Compose 解析编排文件，并行拉取 PostgreSQL、RabbitMQ、Mythic
+  Server、Mythic UI（React 前端）等镜像并建立桥接网络。
+  • 启动成功后，可通过 sudo ./mythic-cli status
+  检查各微服务容器运行状态（健康检查需全部处于 Up / healthy 状态）。
+  • 默认 Web 控制台监听在宿主机的 https://127.0.0.1:7443，可直接在 Windows 11
+  浏览器中访问。
+
+
+初始化后默认登录
+mythic_admin
+
+cd Mythic
+查看随机密码
+sudo ./mythic-cli config get MYTHIC_ADMIN_PASSWORD
+随后在web ui中修改密码
+
