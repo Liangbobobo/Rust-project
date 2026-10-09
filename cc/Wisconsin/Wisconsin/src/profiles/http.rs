@@ -1,5 +1,6 @@
-use crate::profiles::crypto::{zeroize_slice, CryptoContext, CryptoError, MAX_PLAINTEXT_LEN};
-pub use crate::profiles::crypto::{MAX_B64_LEN, MAX_RAW_LEN};
+use crate::buffer::{zeroize_slice, MAX_PLAINTEXT_LEN};
+use crate::profiles::crypto::{CryptoContext, CryptoError};
+pub use crate::buffer::{MAX_B64_LEN, MAX_RAW_LEN};
 use crate::profiles::models::{
     CheckinMessage, FileChunkPayload, GetTaskingMessage, PostResponseMessage,
     ServerCheckinResponse, ServerTaskingResponse, ServerTaskingResponseRef,
@@ -323,7 +324,7 @@ impl<'a> HttpProfile<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profiles::crypto::{MAX_B64_LEN, MAX_RAW_LEN};
+    use crate::buffer::{MAX_B64_LEN, MAX_RAW_LEN};
     use crate::profiles::models::TaskResponseItem;
 
     #[test]

