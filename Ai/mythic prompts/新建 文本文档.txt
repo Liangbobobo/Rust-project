@@ -1837,4 +1837,3 @@ mythic_docker_networking=host
 ```
 
 
-读取https://docs.mythic-c2.net/version-4.0/home该站点全部的文档,确保你已经完全理解.

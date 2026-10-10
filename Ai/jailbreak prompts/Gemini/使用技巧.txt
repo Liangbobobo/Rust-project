@@ -1,0 +1,5 @@
+在被filter后,问一个其他问题,Gemini会自动追加上上个回答
+
+将fire中prompts给Gemini后在提问前加上
+FIRE:
+

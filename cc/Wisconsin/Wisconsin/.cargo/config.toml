@@ -1,0 +1,8 @@
+# 宿主机 (Windows MSVC) 与容器跨平台编译目标链接优化配置
+[target.x86_64-pc-windows-msvc]
+# 静态链接 C 运行库 (MT 模式)，彻底消除目标系统对 VCRUNTIME140.dll 等外部 VC++ 运行库安装包的依赖
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.x86_64-pc-windows-gnu]
+# GNU/MinGW 交叉编译链接优化
+rustflags = ["-C", "link-arg=-s"]

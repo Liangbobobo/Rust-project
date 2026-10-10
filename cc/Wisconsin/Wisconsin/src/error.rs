@@ -15,10 +15,6 @@ pub enum CryptoError {
     // === 10~19: 上下文初始化阶段 (Context / Init) ===
     /// 主密钥长度不符合 32 字节要求 (触发于 CryptoContext::new)
     MasterKeyInvalidLength = 10,
-    /// HKDF 派生 enc_key 失败
-    HkdfExpandEncFailed = 11,
-    /// HKDF 派生 mac_key 失败
-    HkdfExpandMacFailed = 12,
 
     // === 20~29: 封包加密阶段 (Seal / Outgoing) ===
     /// 传入的 Agent UUID 长度不为 36 字节
@@ -81,6 +77,8 @@ pub enum FileTransferError {
     ServerMissingOffset = 53,
     /// 偏移量超出文件总大小
     OffsetOutOfBounds = 54,
+    /// 分片序号或字节偏移量不匹配 (如收到乱序分片)
+    OffsetMismatch = 55,
 
     // === 60~69: 缓冲区与 I/O 编排阶段 (Buffer & I/O) ===
     /// 调用者提供的缓冲区容量过小
@@ -92,6 +90,98 @@ pub enum FileTransferError {
 }
 
 impl FileTransferError {
+    #[inline(always)]
+    pub const fn code(self) -> u8 {
+        self as u8
+    }
+}
+
+// ==========================================
+// 3. 协议解析与数据校验错误码 (Model / Protocol)
+// ==========================================
+
+/// Mythic 协议解析与数据校验错误代号密码本
+#[cfg_attr(any(debug_assertions, test), derive(Debug))]
+#[derive(PartialEq, Eq, Clone, Copy)]
+#[repr(u8)]
+pub enum ModelError {
+    /// 接口动作标志匹配失败或为空
+    InvalidAction = 40,
+    /// C2 服务端返回 status 不为 "success"
+    ResponseStatusError = 41,
+    /// 必填参数缺失或格式长度校验失败 (如 UUID 长度不为 36)
+    MissingRequiredField = 42,
+    /// 文件分片序号、偏移或总片数参数非法
+    InvalidChunkInfo = 43,
+    /// 交互式终端消息类型或编码异常
+    InvalidInteractiveType = 44,
+}
+
+impl ModelError {
+    #[inline(always)]
+    pub const fn code(self) -> u8 {
+        self as u8
+    }
+}
+
+// ==========================================
+// 4. HTTP 网络通信与传输层错误码 (Http / Transport)
+// ==========================================
+
+/// Profile 网络通信与传输层错误代号密码本
+#[cfg_attr(any(debug_assertions, test), derive(Debug))]
+#[derive(PartialEq, Eq, Clone, Copy)]
+#[repr(u8)]
+pub enum HttpError {
+    /// 封包阶段加密失败
+    CryptoSealFailed = 70,
+    /// 解包阶段解密或验签失败
+    CryptoOpenFailed = 71,
+    /// JSON 序列化失败
+    JsonSerializeFailed = 72,
+    /// JSON 反序列化失败
+    JsonDeserializeFailed = 73,
+    /// 网络传输或 Socket I/O 失败
+    NetworkTransportFailed = 74,
+    /// C2 服务端响应异常 (如 HTTP 状态码非 200 或业务状态 error)
+    ServerResponseError = 75,
+    /// 缓冲区容量溢出
+    BufferOverflow = 76,
+}
+
+impl HttpError {
+    #[inline(always)]
+    pub const fn code(self) -> u8 {
+        self as u8
+    }
+}
+
+// ==========================================
+// 5. Agent 核心状态机与任务调度错误码 (Agent Engine)
+// ==========================================
+
+/// Agent 核心运行状态机与调度错误代号密码本
+#[cfg_attr(any(debug_assertions, test), derive(Debug))]
+#[derive(PartialEq, Eq, Clone, Copy)]
+#[repr(u8)]
+pub enum AgentError {
+    /// 尚未完成上线注册 (Checkin)
+    NotCheckedIn = 80,
+    /// 服务端下发的回调 Callback UUID 非法
+    InvalidCallbackUuid = 81,
+    /// 任务执行异常
+    TaskExecutionFailed = 82,
+    /// 未知或未实现的命令
+    UnknownCommand = 83,
+    /// 系统环境元数据采集失败
+    SysinfoFailed = 84,
+    /// 网络传输与 I/O 交互失败
+    TransportFailed = 85,
+    /// 状态机会话状态非法
+    InvalidSessionState = 86,
+}
+
+impl AgentError {
     #[inline(always)]
     pub const fn code(self) -> u8 {
         self as u8
@@ -118,4 +208,18 @@ mod tests {
         assert_eq!(FileTransferError::Base64Error.code(), 61);
         assert_eq!(FileTransferError::IoError.code(), 62);
     }
+
+    #[test]
+    fn test_model_and_http_error_code() {
+        assert_eq!(ModelError::InvalidAction.code(), 40);
+        assert_eq!(ModelError::InvalidInteractiveType.code(), 44);
+        assert_eq!(HttpError::CryptoSealFailed.code(), 70);
+        assert_eq!(HttpError::BufferOverflow.code(), 76);
+        assert_eq!(AgentError::NotCheckedIn.code(), 80);
+        assert_eq!(AgentError::UnknownCommand.code(), 83);
+        assert_eq!(AgentError::SysinfoFailed.code(), 84);
+        assert_eq!(AgentError::TransportFailed.code(), 85);
+        assert_eq!(AgentError::InvalidSessionState.code(), 86);
+    }
 }
+

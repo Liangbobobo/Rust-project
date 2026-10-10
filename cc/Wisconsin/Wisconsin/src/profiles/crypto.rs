@@ -13,7 +13,6 @@ use base64::prelude::*;
 // aes解决保密性,mac解决完整和真实性
 use hmac::{KeyInit, Mac};
 // rand::random 原生顶层函数无需显式引入 Rng 特征
-use hkdf::Hkdf;
 // sha2是hash算法库,Sha256是一个具体的结构,内部实现了SHA-256算法的逻辑方法
 use sha2::Sha256;
 
@@ -22,18 +21,17 @@ use sha2::Sha256;
 // 加密流程如下:
 // 明文 JSON 数据
 //           ↓
-//     [准备阶段] HKDF 用主密钥预先派生出两个独立子密钥: enc_key (加密) 和mac_key (防伪)
+//     [准备阶段] 原生 AESPSK (32 字节主密钥): 直接作为 AES-256-CBC 密钥和 HMAC-SHA256 签名密钥 (遵循 Mythic 原生规范，无 HKDF 衍生)
 //           ↓
-//     1. rand::rng() -> 生成 16 字节真随机 IV
+//     1. rand::random() -> 生成 16 字节真随机 IV
 //           ↓
-//     2. Pkcs7 + BlockModeEncrypt -> 原地自动补齐并加密成密文 (在 raw_buf里两步合一，零内存分配)
+//     2. Pkcs7 + BlockModeEncrypt -> 原地自动补齐并加密成密文 (在 raw_buf 里两步合一，零内存分配)
 //           ↓
 //     3. mac.update() -> 将 16B IV 和密文一起喂入 HMAC-SHA256 引擎
 //           ↓
 //     4. mac.finalize() -> 封口输出 32 字节防伪标签 (Tag)
 //           ↓
-//     5. 组装物理帧 -> raw_buf 中严丝合缝形成: UUID(36B) + IV(16B) + Ciphertext +
-//   Tag(32B)
+//     5. 组装物理帧 -> raw_buf 中严丝合缝形成: UUID(36B) + IV(16B) + Ciphertext + Tag(32B)
 //           ↓
 //     6. Base64 编码 -> 整体转为可打印纯文本，出网发送给 Mythic 服务端
 
@@ -45,66 +43,42 @@ type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 // hmac通用的消息认证码结构(完整性签名),本身不绑定具体的hash函数,只要满足hash运算接口,无论md5/sha-1/sha-256/sha-512都可用
 type HmacSha256 = hmac::Hmac<Sha256>;
 
-// 原始二进制的uuid是16字节,但mythic c2设计通信协议时,为了方便数据库索引和调试,采用了标准带连字符的文本.即32个十六进制字符+4个短横线=36字节(ascii编码).
-// 协议位置:位于数据包最前面的36字节是明文uuid,让服务器端识别是哪个agent传来的数据
-const UUID_LEN: usize = 36;
-// aes-256密钥是32字节(256位),但其分组块大小依然是16字节.aes标准规定:无论密钥是128/192/256位,明文块和iv的长度永远是固定的16字节.因此,cbc模式初始化向量iv只能是16字节长度
-const IV_LEN: usize = 16;
-// sha-256计算出的hash值是256位(32字节).HMAC-SHA256生成的防伪校验码tag,其长度和底层hash输出完全一致.因此这里是32字节的用于校验真伪
-const HMAC_LEN: usize = 32;
-// 16+16+32=64;
-// 单独的16代表PKCS#7规定填充规则.aes-cbc模式下,合法密文最小长度为16字节
-// 密文载荷区最小长度.数据包被划分为“明文路由头”(uuid 36b)和“密文载荷区”两大部分
-const MIN_ENCRYPTED_PAYLOAD_LEN: usize = IV_LEN + 16 + HMAC_LEN;
+// 协议物理核心常量与栈缓冲区基准规格统一定义并抽象于 crate 根命名空间，在此引入并对外重导出
+pub use crate::{
+    AES_BLOCK_SIZE, BUFFER_SIZE, ACTIVE_WIRE_SIZE, HMAC_LEN, IV_LEN,
+    MIN_ENCRYPTED_PAYLOAD_LEN, MIN_RAW_MESSAGE_LEN,
+    PROTOCOL_HEADER_LEN, PROTOCOL_OVERHEAD, UUID_LEN,
+    MAX_B64_LEN, MAX_PLAINTEXT_LEN, MAX_RAW_LEN,
+    ActiveStackWorkspace, DefaultStackWorkspace, RawBuffer, B64Buffer,
+};
 
 // 统一从 crate::error 引入 CryptoError 并在此对外重导出，确保既有调用方无缝解耦
 pub use crate::error::CryptoError;
 
-// 统一从 crate::buffer 引入物理缓冲区预算常量与硬件擦除工具，并在此重导出以保持既有调用方兼容
-pub use crate::buffer::{zeroize_slice, MAX_B64_LEN, MAX_PLAINTEXT_LEN, MAX_RAW_LEN};
+// 统一从 crate::buffer 引入硬件擦除工具
+pub use crate::buffer::zeroize_slice;
 
 /// 会话级密码学上下文管理器
 ///
-/// 在 Agent 启动建立会话时派生一次子密钥并长期复用，避免每次发包重复运行 6~8 次 HMAC-SHA256。
+/// 严格遵循 Mythic 4.0 官方原生 `aes256_hmac` 规范：
+/// 直接使用 32 字节预共享主密钥 (AESPSK) 作为 AES-256-CBC 分组密码密钥与 HMAC-SHA256 签名密钥，
+/// 杜绝 HKDF 子密钥派生，确保与官方 Mythic C2 服务端解密及验签完全兼容。
 pub struct CryptoContext {
-    enc_key: [u8; 32],
-    mac_key: [u8; 32],
+    key: [u8; 32],
 }
 
 impl CryptoContext {
-    /// 初始化并由主密钥派生子密钥
+    /// 初始化密码学上下文并载入 32 字节 AESPSK 预共享主密钥
     pub fn new(master_key: &[u8]) -> Result<Self, CryptoError> {
-        // AES-256 强制要求 256 位（256 ÷ 8 = 32 字节）的密钥
+        // AES-256 强制要求 256 位（256 ÷ 8 = 32 字节）的主密钥
         if master_key.len() != 32 {
             return Err(CryptoError::MasterKeyInvalidLength);
         }
 
-        // 内部通过 HMAC-SHA256 生成一个均匀分布的高熵伪随机密钥,保存在 hk 结构体中
-        let hk = Hkdf::<Sha256>::new(None, master_key);
-        let mut enc_key = [0u8; 32];
-        let mut mac_key = [0u8; 32];
+        let mut key = [0u8; 32];
+        key.copy_from_slice(master_key);
 
-        // 用随机挑选的纯十六进制字节序列作为隔离标签,代替英文字符串,避免在可执行文件的.rdata中留下痕迹
-        if let Err(_) = hk.expand(
-            &[0x3A, 0xF9, 0x81, 0x5C, 0x22, 0xD4, 0x6E, 0x01],
-            &mut enc_key,
-        ) {
-            // 【安全强化】若第一阶段派生失败，物理刷零 enc_key 避免脏内存残留
-            zeroize_slice(&mut enc_key);
-            return Err(CryptoError::HkdfExpandEncFailed);
-        }
-
-  
-        if let Err(_) = hk.expand(
-            &[0x7B, 0xC4, 0x19, 0x2E, 0x88, 0xFA, 0x43, 0x02],
-            &mut mac_key,
-        ) {
-            zeroize_slice(&mut enc_key);
-            zeroize_slice(&mut mac_key);
-            return Err(CryptoError::HkdfExpandMacFailed);
-        }
-
-        Ok(Self { enc_key, mac_key })
+        Ok(Self { key })
     }
 
     /// 纯切片就地封包加密 (Caller-provided Buffer 模式)
@@ -128,8 +102,8 @@ impl CryptoContext {
             return Err(CryptoError::SealPlaintextTooLong);
         }
 
-        let padded_len = (data.len() / 16 + 1) * 16;
-        let raw_total = UUID_LEN + IV_LEN + padded_len + HMAC_LEN;
+        let padded_len = crate::calc_padded_len(data.len());
+        let raw_total = crate::calc_raw_total(data.len());
 
         if raw_buf.len() < raw_total {
             return Err(CryptoError::SealRawBufTooSmall);
@@ -152,8 +126,8 @@ impl CryptoContext {
         raw_buf[ct_start..ct_start + data.len()].copy_from_slice(data);
 
         // 3. 不向os申请新内存,原地执行pkcs#7补齐并加密,在遇到任何异常失败时,立即销毁物理内存中明文
-        // 初始化 CBC 加密状态机
-        let encryptor = Aes256CbcEnc::new_from_slices(&self.enc_key, &iv)
+        // 初始化 CBC 加密状态机 (直接使用 32B AESPSK)
+        let encryptor = Aes256CbcEnc::new_from_slices(&self.key, &iv)
             .map_err(|_| {
                 zeroize_slice(raw_buf);
                 zeroize_slice(&mut iv);
@@ -173,9 +147,9 @@ impl CryptoContext {
         }
 
         // 4. 计算 HMAC-SHA256(IV + Ciphertext):为啥没有加上uuid 详见注释2
-        // 实例化hmac签名器
+        // 实例化hmac签名器 (直接使用 32B AESPSK)
         let mut mac =
-            HmacSha256::new_from_slice(&self.mac_key).map_err(|_| {
+            HmacSha256::new_from_slice(&self.key).map_err(|_| {
                 zeroize_slice(raw_buf);
                 zeroize_slice(&mut iv);
                 CryptoError::SealHmacInitFailed
@@ -238,8 +212,8 @@ impl CryptoContext {
                 CryptoError::OpenBase64DecodeFailed
             })?;
 
-        // 2. 最小物理长度检验
-        if raw_len < UUID_LEN + MIN_ENCRYPTED_PAYLOAD_LEN {
+        // 2. 最小物理长度检验 (UUID 36 + IV 16 + 密文分组 16 + HMAC 32 = 100 字节)
+        if raw_len < MIN_RAW_MESSAGE_LEN {
             zeroize_slice(raw_buf);
             return Err(CryptoError::OpenPayloadTooShort);
         }
@@ -253,9 +227,8 @@ impl CryptoContext {
         iv.copy_from_slice(&raw_buf[iv_start..ct_start]);
 
         // 4. 恒定时间验证 HMAC-SHA256(IV + Ciphertext):先校验后解密,避免出现先解密后校验的漏洞
-
-        // 使用派生的mac_key初始化hmac-sha256状态机
-        let mut mac = HmacSha256::new_from_slice(&self.mac_key).map_err(|_| {
+        // 直接使用 32B AESPSK 初始化 hmac-sha256 状态机
+        let mut mac = HmacSha256::new_from_slice(&self.key).map_err(|_| {
             zeroize_slice(raw_buf);
             zeroize_slice(&mut iv);
             CryptoError::OpenHmacInitFailed
@@ -273,14 +246,14 @@ impl CryptoContext {
         // 5. AES-256-CBC 原地解密
         let ct_len = hmac_start - ct_start;
         // 协议物理帧校验：AES 分组密码模式严格要求密文分组长度为 16 字节整数倍且非空
-        if ct_len == 0 || ct_len % 16 != 0 {
+        if ct_len == 0 || !ct_len.is_multiple_of(16) {
             zeroize_slice(raw_buf);
             zeroize_slice(&mut iv);
             return Err(CryptoError::OpenDecryptionFailed);
         }
 
-        // 初始化 CBC 解密状态机
-        let decryptor = Aes256CbcDec::new_from_slices(&self.enc_key, &iv).map_err(|_| {
+        // 初始化 CBC 解密状态机 (直接使用 32B AESPSK)
+        let decryptor = Aes256CbcDec::new_from_slices(&self.key, &iv).map_err(|_| {
             zeroize_slice(raw_buf);
             zeroize_slice(&mut iv);
             CryptoError::OpenCipherInitFailed
@@ -314,8 +287,7 @@ impl CryptoContext {
 // 离开作用域时自动物理清空会话密钥.为何如此麻烦,见注释3
 impl Drop for CryptoContext {
     fn drop(&mut self) {
-        zeroize_slice(&mut self.enc_key);
-        zeroize_slice(&mut self.mac_key);
+        zeroize_slice(&mut self.key);
     }
 }
 
