@@ -16,7 +16,7 @@ pub use crate::{
     CIPHERTEXT_LEN_16K, CIPHERTEXT_LEN_4K, CIPHERTEXT_LEN_64K,
     MAX_B64_LEN, MAX_CIPHERTEXT_LEN, MAX_PLAINTEXT_LEN, MAX_RAW_LEN, MAX_RAW_READ,
     PLAINTEXT_LEN_16K, PLAINTEXT_LEN_4K, PLAINTEXT_LEN_64K,
-    PROTOCOL_OVERHEAD,
+    MIN_RAW_MESSAGE_LEN,
     RAW_LEN_16K, RAW_LEN_4K, RAW_LEN_64K,
     RAW_READ_16K, RAW_READ_4K, RAW_READ_64K,
     WIRE_SIZE_16K, WIRE_SIZE_4K, WIRE_SIZE_64K,
@@ -1442,7 +1442,7 @@ mod tests {
         assert_eq!(MAX_B64_LEN, ACTIVE_WIRE_SIZE);
         assert_eq!(MAX_RAW_LEN, crate::calc_raw_len(ACTIVE_WIRE_SIZE));
         assert_eq!(MAX_PLAINTEXT_LEN, crate::calc_max_plaintext_len(MAX_RAW_LEN));
-        assert_eq!(PROTOCOL_OVERHEAD, 100);
+        assert_eq!(MIN_RAW_MESSAGE_LEN, 100);
         assert_eq!(MAX_RAW_LEN * 4 / 3, MAX_B64_LEN);
 
         assert_eq!(RAW_LEN_4K, 3072);

