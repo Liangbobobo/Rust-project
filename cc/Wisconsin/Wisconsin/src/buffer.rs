@@ -55,8 +55,9 @@ pub const PROTOCOL_HEADER_LEN: usize = UUID_LEN + IV_LEN + HMAC_LEN;
 /// 完整二进制报文最小物理长度(即空包) / 协议总安全开销 (UUID 36 + 密文载荷区 64 = 100 字节)
 pub const MIN_RAW_MESSAGE_LEN: usize = UUID_LEN + MIN_ENCRYPTED_PAYLOAD_LEN;
 
-/// 最小包含业务数据的数据包大小=完整二进制报文最小物理长度(即空包)+最少占用16B的加密后的明文区
-pub const MIN_PAYLOAD_RAW_LEN:usize= PROTOCOL_HEADER_LEN + AES_BLOCK_SIZE + PKCS7_WORST_PADDING;
+/// 最小包含业务数据的数据包大小 (UUID 36 + IV 16 + 最小密文块 16 + HMAC 32 = 100 字节)
+/// 在 AES-CBC PKCS#7 下，1~15 字节业务数据与填充合并占用 1 个 16 字节密文块
+pub const MIN_PAYLOAD_RAW_LEN: usize = PROTOCOL_HEADER_LEN + AES_BLOCK_SIZE;
 
 /// 应用层 JSON 骨架开销默认预估 (150 字节)
 pub const DEFAULT_JSON_OVERHEAD: usize = 150;
@@ -72,26 +73,24 @@ pub const DEFAULT_MAX_JITTER: usize = 256;
 // =========================================================================
 
 /// 校验出网(待发包)的 Base64 预算规格是否合法,可以在其他文件中复用
+/// 参数wire_size是待发送的缓冲区数据经过base64编码后的大小;json_overhead是json结构体本身的大小
 #[inline(always)]
 pub const fn assert_valid_wire_size(wire_size: usize, json_overhead: usize) {
     // assert! 条件错误时会panic
     // 1. 这里在fn const函数中 2. assert!后续用在const _SANITY_CHECK中.而const会在编译期求值,如果条件错误会在编译时报错,导致无法编译.如果正确,其包含的明文就不会被带入编译好的二进制文件.所以这里是安全且隐蔽的.
-    assert!(wire_size.is_multiple_of(4), "WIRE_SIZE 必须能被 4 整除以满足 Base64 规范");
+    assert!(wire_size.is_multiple_of(4));
     // 带有效载荷明文的最小数据包转为base64后大小
-    assert!(
-        wire_size >= MIN_PAYLOAD_RAW_LEN * 4 / 3,
-        "WIRE_SIZE 过小，无法容纳协议头与最小密文"
-    );
+    assert!(wire_size >= MIN_PAYLOAD_RAW_LEN * 4 / 3);
     let raw_len = calc_raw_len(wire_size);
     let cipher_len = calc_max_ciphertext_len(raw_len);
     let plaintext_len = cipher_len.saturating_sub(PKCS7_WORST_PADDING);
-    assert!(plaintext_len > json_overhead, "明文容量不足以容纳 JSON 骨架开销");
+    assert!(plaintext_len > json_overhead);
 }
 
 /// 计算出网 Base64 对应的二进制物理帧总容量: (wire_size / 4) * 3
 #[inline(always)]
 pub const fn calc_raw_len(wire_size: usize) -> usize {
-    assert!(wire_size.is_multiple_of(4), "WIRE_SIZE 必须能被 4 整除");
+    assert!(wire_size.is_multiple_of(4));
     (wire_size / 4) * 3
 }
 
@@ -242,7 +241,6 @@ impl<const WIRE_SIZE: usize, const JSON_OVERHEAD: usize> PacketBudget<WIRE_SIZE,
     /// 那么min_raw_read()代表最小值,MAX_RAW_READ代表最大值.
     /// 严格向下取整到 3 的倍数，消除内层 Base64 '=' 填充
     pub fn jittered_raw_read() -> usize {
-        // 函数名应该全是小写,即使是const函数
         let min_read = Self::min_raw_read();
         let max_read = Self::MAX_RAW_READ;
 
@@ -250,11 +248,16 @@ impl<const WIRE_SIZE: usize, const JSON_OVERHEAD: usize> PacketBudget<WIRE_SIZE,
             return max_read;
         }
 
-        // 计算最小和最大值之间有多少可选择的的值.最大和最小相减后,需要加1才是可用的区间.(如 [3-5],有3,4,5可用,但5-3=2)
-        let span = max_read - min_read + 1;
-        // 取余数.该余数代表循环之后,从起点min_read往前的偏移,且.该余数加上基准值min_read后,永不会超过max_read
-        let pick = min_read + ((rand::random::<u32>() as usize) % span);
-        (pick / 3) * 3
+        // 直接在 3 字节块域采样，数学上保证均匀分布且杜绝边界下溢
+        let min_triplets = min_read / 3;
+        let max_triplets = max_read / 3;
+        if min_triplets >= max_triplets {
+            return max_read;
+        }
+
+        let span = max_triplets - min_triplets + 1;
+        let pick_triplets = min_triplets + ((rand::random::<u32>() as usize) % span);
+        pick_triplets * 3
     }
 
     /// 用于心跳包等短指令工况
@@ -523,7 +526,15 @@ impl<'de, T: Deserialize<'de>, const N: usize> serde::de::Visitor<'de> for Stack
     type Value = StackVec<T, N>;
 
     fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
-        write!(formatter, "a sequence of up to {} elements", N)
+        #[cfg(any(debug_assertions, test))]
+        {
+            write!(formatter, "a sequence of up to {} elements", N)
+        }
+        #[cfg(not(any(debug_assertions, test)))]
+        {
+            let _ = formatter;
+            Ok(())
+        }
     }
 
     fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
@@ -566,6 +577,7 @@ impl<T: Serialize, const N: usize> Serialize for StackVec<T, N> {
 /// 预先分配的大栈缓冲区 (Stack Arena Buffer)
 ///
 /// 从栈内存中划出连续字节切片，擦除时直接把 Offset 清零，杜绝所有堆分配与 Heap Remanence。
+#[cfg_attr(any(debug_assertions, test), derive(Debug))]
 pub struct StackArena<const CAP: usize> {
     buf: [u8; CAP],
     offset: usize,
@@ -643,6 +655,7 @@ impl<const CAP: usize> Default for StackArena<CAP> {
 ///
 /// 封装收发计算工作面，支持由调用者自由选择分配在栈上、全局静态区或堆中。
 /// 离开作用域时自动触发物理清零，完全阻断内存敏感数据残留。
+#[cfg_attr(any(debug_assertions, test), derive(Debug))]
 pub struct StackWorkspace<const RAW_LEN: usize, const B64_LEN: usize> {
     /// 原始二进制组装/解密缓冲区
     pub raw_buf: [u8; RAW_LEN],
@@ -877,6 +890,9 @@ mod tests {
         arena.zeroize_and_reset();
         assert_eq!(arena.offset(), 0);
         assert_eq!(arena.remaining(), 128);
+
+        let debug_str = format!("{arena:?}");
+        assert!(debug_str.contains("StackArena"));
     }
 
     #[test]
@@ -889,5 +905,8 @@ mod tests {
         assert_eq!(ws.raw_buf[0], 0);
         assert_eq!(ws.chunk_buf[0], 0);
         assert_eq!(ws.b64_buf[0], 0);
+
+        let debug_str = format!("{ws:?}");
+        assert!(debug_str.contains("StackWorkspace"));
     }
 }

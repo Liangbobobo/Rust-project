@@ -24,12 +24,12 @@ hmac = { version = "0.13.0", default-features = false }
 sha2 = { version = "0.11.0", default-features = false }
 # 仅保留标准的 encode_slice 和 decode_slice 接口，剔除 std::io 和堆分配逻辑
 base64 = { version = "0.23.1", default-features = false }
-# 仅显式开启系统原生随机源 sys_rng (通过 Windows API) 与 thread_rng (生成 16B IV 所必须)，剥离多余特性
-rand = { version = "0.10.3", default-features = false, features = ["sys_rng", "std", "thread_rng"] }
+# 仅显式开启系统原生随机源 sys_rng (通过 Windows API) 与 thread_rng (生成 16B IV 所必须)，剥离多余特性.这里的std特性是否可以去掉,待评估
+rand = { version = "0.10.3", default-features = false, features = ["sys_rng", "thread_rng"] }
 
 # 协议与序列化依赖 (禁用 default-features，仅按需启用 alloc/std)
 serde = { version = "1.0.229", default-features = false, features = ["derive", "alloc"] }
-serde_json = { version = "1.0.151", default-features = false, features = ["alloc", "std"] }
+serde_json = { version = "1.0.154", default-features = false, features = ["alloc","std"] }
 obfstr = "0.4.6"
 
 [profile.release]

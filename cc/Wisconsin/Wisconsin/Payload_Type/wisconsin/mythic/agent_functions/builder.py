@@ -5,6 +5,7 @@ import json
 import asyncio
 import os
 import shutil
+import subprocess
 import tempfile
 import base64
 from pathlib import Path
@@ -121,19 +122,45 @@ class Wisconsin(PayloadType):
                     elif isinstance(aes_raw, str) and len(aes_raw) > 0:
                         master_key_str = aes_raw
 
-            # 规范化 master_key (需恰好 32 字节)
-            if len(master_key_str) < 32:
-                master_key_str = master_key_str.ljust(32, "0")
-            elif len(master_key_str) > 32:
-                # 若为 Base64 编码密钥，尝试解码
-                try:
-                    decoded = base64.b64decode(master_key_str)
-                    if len(decoded) == 32:
-                        master_key_str = decoded.decode("latin-1")
+            # 规范化 master_key: 提取 32 字节原始二进制流并编码为安全十六进制小写格式
+            key_bytes = None
+            if isinstance(master_key_str, str):
+                # 1. 若为 64 字符十六进制，直接解码
+                if len(master_key_str) == 64:
+                    try:
+                        cand = bytes.fromhex(master_key_str)
+                        if len(cand) == 32:
+                            key_bytes = cand
+                    except Exception:
+                        pass
+                # 2. 若为 Base64 编码 (Mythic 默认规范)，解码为 32 字节原始二进制
+                if key_bytes is None:
+                    try:
+                        cand = base64.b64decode(master_key_str)
+                        if len(cand) == 32:
+                            key_bytes = cand
+                    except Exception:
+                        pass
+                # 3. 若为原始字符串，按 latin-1 提取字节
+                if key_bytes is None:
+                    cand = master_key_str.encode("latin-1", errors="ignore")
+                    if len(cand) >= 32:
+                        key_bytes = cand[:32]
                     else:
-                        master_key_str = master_key_str[:32]
-                except Exception:
-                    master_key_str = master_key_str[:32]
+                        key_bytes = cand.ljust(32, b"0")
+            elif isinstance(master_key_str, (bytes, bytearray)):
+                if len(master_key_str) >= 32:
+                    key_bytes = bytes(master_key_str[:32])
+                else:
+                    key_bytes = bytes(master_key_str).ljust(32, b"0")
+            else:
+                key_bytes = b"01234567890123456789012345678901"
+
+            if len(key_bytes) != 32:
+                key_bytes = key_bytes[:32].ljust(32, b"0")
+
+            # 转换为纯净 64 字符十六进制小写格式 (杜绝引号、反斜杠、空字符或 UTF-8 膨胀)
+            master_key_hex = key_bytes.hex().lower()
 
             payload_uuid = self.uuid
 
@@ -177,7 +204,14 @@ class Wisconsin(PayloadType):
                     content = content.replace('"127.0.0.1"', f'"{server_host}"')
                     content = content.replace('"/api/v1/post"', f'"{post_uri}"')
                     content = content.replace("b50a5fe8-099d-4611-a2ac-96d93e6ec77b", payload_uuid)
-                    content = content.replace("01234567890123456789012345678901", master_key_str)
+                    # 替换 AESPSK 预共享密钥 (优先使用纯净 64 字符十六进制混淆宏，彻底避免语法与 UTF-8 编码破坏)
+                    if "3031323334353637383930313233343536373839303132333435363738393031" in content:
+                        content = content.replace(
+                            "3031323334353637383930313233343536373839303132333435363738393031",
+                            master_key_hex,
+                        )
+                    elif "01234567890123456789012345678901" in content:
+                        content = content.replace("01234567890123456789012345678901", key_bytes.decode("latin-1", errors="ignore"))
                     content = content.replace("pub const DEFAULT_SLEEP_INTERVAL: u64 = 10;", f"pub const DEFAULT_SLEEP_INTERVAL: u64 = {sleep_interval};")
                     content = content.replace("pub const DEFAULT_SLEEP_JITTER: u8 = 15;", f"pub const DEFAULT_SLEEP_JITTER: u8 = {sleep_jitter};")
                     content = content.replace("8080\n    }", f"{server_port}\n    }}")
@@ -185,33 +219,46 @@ class Wisconsin(PayloadType):
                         content = content.replace("false\n    }\n\n    /// 获取默认心跳", "true\n    }\n\n    /// 获取默认心跳")
                     config_file.write_text(content, encoding="utf-8")
 
-                # 5. 动态打桩缓冲区规格 BUFFER_SIZE (src/lib.rs)
-                lib_file = build_temp_dir / "src" / "lib.rs"
-                if lib_file.exists() and buffer_size != "4KB":
-                    lib_content = lib_file.read_text(encoding="utf-8")
-                    if buffer_size == "16KB":
-                        lib_content = lib_content.replace(
-                            "pub const BUFFER_SIZE: usize = WIRE_SIZE_4K;",
-                            "pub const BUFFER_SIZE: usize = WIRE_SIZE_16K;",
-                        )
-                    elif buffer_size == "64KB":
-                        lib_content = lib_content.replace(
-                            "pub const BUFFER_SIZE: usize = WIRE_SIZE_4K;",
-                            "pub const BUFFER_SIZE: usize = WIRE_SIZE_64K;",
-                        )
-                    lib_file.write_text(lib_content, encoding="utf-8")
+                # 5. 动态打桩缓冲区规格 BUFFER_SIZE (src/buffer.rs 及 src/lib.rs)
+                replacement_target = None
+                if buffer_size == "16KB":
+                    replacement_target = "pub const BUFFER_SIZE: usize = WIRE_SIZE_16K;"
+                elif buffer_size == "64KB":
+                    replacement_target = "pub const BUFFER_SIZE: usize = WIRE_SIZE_64K;"
+
+                if replacement_target:
+                    for target_file in [
+                        build_temp_dir / "src" / "buffer.rs",
+                        build_temp_dir / "src" / "lib.rs",
+                    ]:
+                        if target_file.exists():
+                            file_content = target_file.read_text(encoding="utf-8")
+                            if "pub const BUFFER_SIZE: usize = WIRE_SIZE_4K;" in file_content:
+                                file_content = file_content.replace(
+                                    "pub const BUFFER_SIZE: usize = WIRE_SIZE_4K;",
+                                    replacement_target,
+                                )
+                                target_file.write_text(file_content, encoding="utf-8")
 
                 # 6. 执行 Cargo 交叉编译
                 target_triple = "x86_64-pc-windows-gnu"
                 # 检测宿主机是否有该交叉目标，若无则尝试当前目标
                 cmd = ["cargo", "build", "--release"]
-                # 检查 cargo 是否支持目标
-                res_check = subprocess.run(
-                    ["rustup", "target", "list", "--installed"],
-                    capture_output=True,
-                    text=True,
-                )
-                if target_triple in res_check.stdout:
+                # 检查 cargo / rustup 是否支持目标
+                has_target = False
+                try:
+                    res_check = subprocess.run(
+                        ["rustup", "target", "list", "--installed"],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if res_check.returncode == 0 and target_triple in res_check.stdout:
+                        has_target = True
+                except Exception:
+                    pass
+
+                if has_target:
                     cmd.extend(["--target", target_triple])
                 elif os.name == "nt":
                     # Windows 原生环境下直接使用默认 MSVC / GNU
@@ -245,8 +292,6 @@ class Wisconsin(PayloadType):
                     artifact_candidates.extend([
                         build_temp_dir / "target" / target_triple / "release" / "wisconsin_lib.dll",
                         build_temp_dir / "target" / "release" / "wisconsin_lib.dll",
-                        build_temp_dir / "target" / target_triple / "release" / "thanatos_wisconsin.dll",
-                        build_temp_dir / "target" / "release" / "thanatos_wisconsin.dll",
                         build_temp_dir / "target" / target_triple / "release" / "wisconsin.dll",
                         build_temp_dir / "target" / "release" / "wisconsin.dll",
                     ])

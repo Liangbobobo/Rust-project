@@ -8,7 +8,7 @@
 //!    - 处理本地物理文件句柄 (`Read + Seek`) 与底层 I/O 错误映射。
 //! 2. **内部组合通用传输引擎 ([`TransferSession`])**：
 //!    - 将所有 Mythic 4.0 纯字节偏移 (0-based Offset) 协议、传输前握手注册、断点续传握手 (Resume)、
-//!      以及基于 [`crate::protocol::StackWorkspace4K`] 的纯栈数据泵送，全权委托给 [`crate::transfer::TransferSession`]。
+//!      以及基于 [`crate::protocol::StackWorkspace4K`] 的纯栈数据泵送，全权委托给 [`crate::stream::TransferSession`]。
 //! 3. **100% 零堆纯栈契约 (Zero-Heap OPSEC)**：
 //!    - 路径与名称仅借用 (`&'a str`)，文件 UUID 栈数组自持 (`[u8; 36]`)，无任何动态堆分配。
 
@@ -16,6 +16,7 @@ pub use crate::error::FileTransferError;
 use crate::protocol::{
     ActiveStackWorkspace, FileDownloadResponse, ServerTaskPostResponseItem, TaskResponseItem,
 };
+pub use crate::stream::{ZeroRead, ZeroSeek, ZeroWrite};
 pub use crate::transfer::{
     TransferReceiveSession, TransferRegisterMeta, TransferSession, TransferSource,
 };
@@ -249,7 +250,7 @@ impl<'a> FileDownloadSession<'a> {
         use_jitter: bool,
     ) -> Result<(FileDownloadResponse<'sess>, usize), FileTransferError>
     where
-        R: std::io::Read + std::io::Seek,
+        R: ZeroRead + ZeroSeek,
         'buf: 'sess,
     {
         self.session.pump_file_chunk(reader, workspace, use_jitter)
@@ -264,7 +265,7 @@ impl<'a> FileDownloadSession<'a> {
         use_jitter: bool,
     ) -> Result<(FileDownloadResponse<'sess>, usize), FileTransferError>
     where
-        R: std::io::Read + std::io::Seek,
+        R: ZeroRead + ZeroSeek,
         'buf: 'sess,
     {
         self.session.pump_next_chunk(source, workspace, use_jitter)
@@ -331,7 +332,7 @@ mod tests {
         assert_eq!(session.file_id_str(), Some(sample_uuid));
 
         // 3. 模拟使用 ActiveStackWorkspace 发送分片
-        let mut fake_file = alloc::vec![0x77u8; 100_000];
+        let mut fake_file = vec![0x77u8; 100_000];
         let mut cursor = Cursor::new(&mut fake_file[..]);
         let mut workspace = ActiveStackWorkspace::new();
 

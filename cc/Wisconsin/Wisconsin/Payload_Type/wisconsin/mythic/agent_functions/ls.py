@@ -25,11 +25,11 @@ class LsCommand(CommandBase):
     cmd = "ls"
     needs_admin = False
     help_cmd = "ls [path]"
-    description = "List files and directories (integrated with Mythic File Browser UI)"
+    description = "List files and directories"
     version = 1
     author = "@wisconsin"
     argument_class = LsArguments
-    supported_ui_features = ["file_browser:list", "file_browser:remove"]
+    supported_ui_features = []
     attributes = CommandAttributes(
         supported_os=[SupportedOS.Windows],
     )

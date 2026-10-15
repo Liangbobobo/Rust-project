@@ -43,8 +43,8 @@ type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 // hmac通用的消息认证码结构(完整性签名),本身不绑定具体的hash函数,只要满足hash运算接口,无论md5/sha-1/sha-256/sha-512都可用
 type HmacSha256 = hmac::Hmac<Sha256>;
 
-// 协议物理核心常量与栈缓冲区基准规格统一定义并抽象于 crate 根命名空间，在此引入并对外重导出
-pub use crate::{
+// 协议物理核心常量与栈缓冲区基准规格统一定义并抽象于 crate::buffer 命名空间，在此引入并对外重导出
+pub use crate::buffer::{
     AES_BLOCK_SIZE, BUFFER_SIZE, ACTIVE_WIRE_SIZE, HMAC_LEN, IV_LEN,
     MIN_ENCRYPTED_PAYLOAD_LEN, MIN_RAW_MESSAGE_LEN,
     PROTOCOL_HEADER_LEN, UUID_LEN,
@@ -102,8 +102,8 @@ impl CryptoContext {
             return Err(CryptoError::SealPlaintextTooLong);
         }
 
-        let padded_len = crate::calc_padded_len(data.len());
-        let raw_total = crate::calc_raw_total(data.len());
+        let padded_len = crate::buffer::calc_padded_len(data.len());
+        let raw_total = crate::buffer::calc_raw_total(data.len());
 
         if raw_buf.len() < raw_total {
             return Err(CryptoError::SealRawBufTooSmall);

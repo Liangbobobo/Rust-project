@@ -14,11 +14,11 @@ class PsCommand(CommandBase):
     cmd = "ps"
     needs_admin = False
     help_cmd = "ps"
-    description = "List active processes (integrated with Mythic Process Browser UI)"
+    description = "List active processes"
     version = 1
     author = "@wisconsin"
     argument_class = PsArguments
-    supported_ui_features = ["process_browser:list"]
+    supported_ui_features = []
     attributes = CommandAttributes(
         supported_os=[SupportedOS.Windows],
     )

