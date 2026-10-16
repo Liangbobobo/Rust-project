@@ -19,6 +19,7 @@
   - [3：隐蔽运行与 C2 通信阶段（三件套在 Agent 内部生效）](#3隐蔽运行与-c2-通信阶段三件套在-agent-内部生效)
   - [4：战术扩展阶段（coffeeldr 动态工作）](#4战术扩展阶段coffeeldr-动态工作)
   - [总结](#总结)
+  - [Mythic C2的架构](#mythic-c2的架构)
 
 # wiconsin 设计规范
 
@@ -216,3 +217,27 @@ Thanatos是一个别人写好的agent,但是完全没有三件套的隐蔽功能
 3. Mythic 跑在你自己服务器上，用来在浏览器里接收 Agent 的心跳和下发指令。
 4. Thanatos 只是一个别人写好的 Agent例子，你不用它本身，只是借用它的网络接口定义来让你的 Agent 能和 Mythic对话。
 5. coffeeldr 是写在 Agent 内部的一个解析器，用来跑社区开源的 BOF 工具
+
+
+## Mythic C2的架构
+绝大多数传统 C2（如 Cobalt
+  Strike、Metasploit）中，服务端和木马通常是强绑定的。
+  而 Mythic 是微服务插件化架构，它把系统拆成了三层
+
+flowchart TD
+    A["[ 操作员浏览器 Web UI ]"] -->|"HTTP / WebSocket"| B["[ Mythic Server 服务端中心 ] (数据库、任务调度中心，Docker 运行)"]
+    B -->|"gRPC / RabbitMQ 内部消息总线"| C["[ Payload Type 容器 ] (位于项目: Payload_Type/wisconsin/)"]
+    C -->|"外部通信: HTTP/HTTPS 密文帧传输"| D["[ 靶机上的 Agent ] (位于项目: src/，编译出的 wisconsin.exe / dll)"]
+
+项目中的Payload_Type/ 是一个独立的 Python 服务容器（运行在 Mythic 服务器的 Docker
+  容器中）:
+  1. 载荷编译器（Builder）：
+  对应项目中的 builder.py。当你在 Web 界面点击“生成木马”时，是这个 Python
+  脚本调用 cargo build 把 Rust 代码编译成 .exe。
+  2. 参数翻译官（Task Transformer）：
+  操作员在网页控制台输入的指令，或者 Web UI 自动触发的任务，先经过 Python
+  容器解析、校验、转换为 Agent 能看懂的格式，再写入任务队列。
+  3. 能力注册与 UI 路由（Feature Binding）：
+  它告诉 Mythic 服务端：“我这个木马叫
+  wisconsin，我支持哪些命令？当你在网页上点击某个图形化按钮时，到底应该调用我
+  哪个命令

@@ -18,7 +18,7 @@ class PsCommand(CommandBase):
     version = 1
     author = "@wisconsin"
     argument_class = PsArguments
-    supported_ui_features = []
+    supported_ui_features = ["process_browser:list"]
     attributes = CommandAttributes(
         supported_os=[SupportedOS.Windows],
     )

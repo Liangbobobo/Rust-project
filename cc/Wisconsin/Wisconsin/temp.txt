@@ -1,2 +1,3 @@
 似乎stream.rs文件直接实现了对内存数据和win平台下文件的读取功能.但是也实现了传输时的握手和状态控制.在我看来这有点混乱了,在stream.rs中似乎只需要做一些工作,这些工作负责抽象内存数据和文件,后续还可能添加管道和套接字流的抽象.这个文件应该只做这些工作.对于内存数据和文件的传输功能,放在commands/file中更合适?请认真讨论这个方案,同时不要修改任何源码.
 
+我认为file.rs中应该构建好FileBrowserResponse和FileBrowserChildItem,其他文件可以调用.且engine.rs中存在大量和file相关的结构体.是不是将对应的构建结构体的功能移动到file.rs中,且engine.rs中关于file操作相关的结构体应该放入protocol.rs中.请你先找出来,并分类.先不要改动代码

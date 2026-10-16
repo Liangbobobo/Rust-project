@@ -1,5 +1,6 @@
 
 // 通过检查protocol.rs中定义的结构体和官方文档的区别,完善用到的结构体.用到时再检查就行
+// 关于file browser,本项目用FileBrowserResponse表示listed相应,相比于官方文档中的全量结构体,本项目使用抽象(剥离response的共同部分)嵌套的方式实现.即PostResponseMessage->TaskResponseItem->FileBrowserResponse
 
 use serde::{Deserialize, Serialize};
 pub use crate::buffer::StackVec;
@@ -564,7 +565,7 @@ impl<'a> PostResponseMessage<'a> {
 #[cfg_attr(any(debug_assertions, test), derive(Debug))]
 pub struct ServerPostResponse<'a> {
     #[serde(borrow)]
-    pub action: &'a str,
+    pub action: &'a str, 
     #[serde(borrow, default)]
     pub responses: StackVec<ServerTaskPostResponseItem<'a>, 16>,
     #[serde(borrow, skip_serializing_if = "Option::is_none")]
@@ -912,9 +913,36 @@ pub struct ProcessItem<'a> {
 // 7. Hooking Features: File Browser (文件浏览器)
 // ==========================================
 
+/// 文件/目录权限详细信息 (Mythic 4.0 file_browser permissions 规范)
+///
+/// 官方规范支持任意字典结构，用于在 Web UI 权限列/弹窗中呈现：
+/// - 在 Linux/macOS 下可填充 POSIX 权限位（如 "0755"）、所有者及组；
+/// - 在 Windows 下 ACL/DACL 过于庞大且易引发堆碎片，默认填充为 None（配合 skip_serializing_if 省略该键）。
+#[derive(Clone, Copy, Serialize, PartialEq, Eq, Default)]
+#[cfg_attr(any(debug_assertions, test), derive(Debug))]
+pub struct FilePermissions<'a> {
+    /// 权限描述字符串 (如 POSIX "0755" / "rwxr-xr-x" 或 Windows DACL 简写)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<&'a str>,
+    /// 文件所有者 (如 "root", "NT AUTHORITY\\SYSTEM")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<&'a str>,
+    /// 所属组 (如 "wheel", "BUILTIN\\Administrators")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<&'a str>,
+}
+
+impl<'a> FilePermissions<'a> {
+    pub const EMPTY: Self = Self {
+        permissions: None,
+        owner: None,
+        group: None,
+    };
+}
+
 /// 文件目录结构回显外壳 (File Browser)
 ///
-/// 对应官方文档: /customizing/hooking-features/file-browser
+/// 对应官方文档: /customizing/hooking-features/file-browser.
 #[derive(Clone, Copy, Serialize, PartialEq, Eq)]
 #[cfg_attr(any(debug_assertions, test), derive(Debug))]
 pub struct FileBrowserResponse<'a> {
@@ -923,6 +951,9 @@ pub struct FileBrowserResponse<'a> {
     pub host: Option<&'a str>,
     /// 本身是否为文件 (若是目录则为 false)
     pub is_file: bool,
+    /// 目录权限信息 (Mythic 4.0 官方规范；Windows 下暂为 None)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<FilePermissions<'a>>,
     /// 目录/文件显示名称 (纯文件名，非绝对路径)
     pub name: &'a str,
     /// 父级目录绝对路径 (根路径如 "C:\\" 时为 null/空)
@@ -950,10 +981,25 @@ pub struct FileBrowserResponse<'a> {
 #[cfg_attr(any(debug_assertions, test), derive(Debug))]
 pub struct FileBrowserChildItem<'a> {
     pub is_file: bool,
+    /// 文件权限信息 (Mythic 4.0 官方规范；Windows 下暂为 None)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<FilePermissions<'a>>,
     pub name: &'a str,
     pub access_time: u64,
     pub modify_time: u64,
     pub size: u64,
+}
+
+impl<'a> FileBrowserChildItem<'a> {
+    /// 官方规范的空占位条目（用于 const 上下文与数组批量初始化）
+    pub const EMPTY: Self = Self {
+        is_file: false,
+        permissions: None,
+        name: "",
+        access_time: 0,
+        modify_time: 0,
+        size: 0,
+    };
 }
 
 /// 文件删除同步挂载项 (File Browser 划线删除同步)
@@ -1458,5 +1504,58 @@ mod tests {
         ws.zeroize();
         assert_eq!(ws.raw_buf[0], 0);
         assert_eq!(ws.b64_buf[0], 0);
+    }
+
+    #[test]
+    fn test_file_browser_permissions_serialization() {
+        // 1. 当 permissions 为 None 时，序列化完全忽略 permissions 键
+        let child_none = FileBrowserChildItem {
+            is_file: true,
+            permissions: None,
+            name: "test.txt",
+            access_time: 100,
+            modify_time: 200,
+            size: 300,
+        };
+        let json_none = serde_json::to_string(&child_none).unwrap();
+        assert!(!json_none.contains("permissions"));
+        assert!(json_none.contains(r#""name":"test.txt""#));
+
+        // 2. 当 permissions 存在时，按 Mythic 4.0 字典对象序列化
+        let perms = FilePermissions {
+            permissions: Some("0755"),
+            owner: Some("root"),
+            group: Some("wheel"),
+        };
+        let child_some = FileBrowserChildItem {
+            is_file: false,
+            permissions: Some(perms),
+            name: "bin",
+            access_time: 100,
+            modify_time: 200,
+            size: 4096,
+        };
+        let json_some = serde_json::to_string(&child_some).unwrap();
+        assert!(json_some.contains(r#""permissions":{"permissions":"0755","owner":"root","group":"wheel"}"#));
+        assert!(json_some.contains(r#""name":"bin""#));
+
+        // 3. 测试 FileBrowserResponse 上的 permissions 序列化
+        let resp = FileBrowserResponse {
+            host: None,
+            is_file: false,
+            permissions: Some(perms),
+            name: "bin",
+            parent_path: "/usr",
+            success: true,
+            access_time: 100,
+            modify_time: 200,
+            size: 4096,
+            update_deleted: None,
+            set_as_user_output: None,
+            files: &[child_none],
+        };
+        let resp_json = serde_json::to_string(&resp).unwrap();
+        assert!(resp_json.contains(r#""permissions":{"permissions":"0755","owner":"root","group":"wheel"}"#));
+        assert!(resp_json.contains(r#""files":[{"is_file":true,"name":"test.txt""#));
     }
 }
