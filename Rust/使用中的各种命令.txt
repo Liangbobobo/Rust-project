@@ -1,0 +1,9 @@
+清理编译时的产物：
+
+https://github.com/holmgr/cargo-sweep
+
+1. cargo install cargo-sweep
+2. cargo sweep --time 30				//To clean all build files older than 30 days in the local cargo project run
+3. cargo sweep --toolchains nightly		//To clean all build files not made by the currently installed (by rustup) nightly compiler，This can be useful if you checked that your library works on stable, but mostly develop on nightly.
+4. cargo sweep --installed				//To clean all build files not made by any of the currently installed (by rustup) compilers ，This can be useful if you just updated your compilers with a rustup update.
+5. 

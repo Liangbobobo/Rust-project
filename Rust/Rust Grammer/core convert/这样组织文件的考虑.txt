@@ -1,0 +1,1 @@
+虽然as_ref是作用于option或result的,但是其功能是借用这些enum中的值.这次对rust的再次学习,将要按照rust的设计思想,将同类功能一起学习,类似rust中的trait
