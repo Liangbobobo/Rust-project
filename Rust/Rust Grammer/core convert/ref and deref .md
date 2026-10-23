@@ -36,7 +36,7 @@ where
 ```
 self.as_ref()  →  Option<&T>:Option::as_ref把`&Option<T>`借成 Option<&T>：Some(v) → Some(&v)，None → None。不移动 T，只借引用，因为 as_deref 的接收者是 &self(虽然写作self,但函数签名中接收的参数是&self)，本来就不能移动
 
-.map(Deref::deref),此时变成`Option<&T>.map(Deref::deref)  →  Option<&T::Target>`.而map签名`fn map<U, F: FnOnce(T) -> U>(self, f: F) -> Option<U>`.此时,Deref::deref(签名为`fn deref(&self) -> &Self::Target`),满足map的要求.所以 map 把 Some(&v) 里的 &v 交给 Deref::deref，得到 &*v（&T::Target），重新包成 Some；None 则短路，闭包根本不调
+.map(Deref::deref),此时变成`Option<&T>.map(Deref::deref)  →  Option<&T::Target>`.而map签名`fn map<U, F: FnOnce(T) -> U>(self, f: F) -> Option<U>`.此时,Deref::deref(签名为`fn deref(&self) -> &Self::Target`),满足map的要求.所以 map 把 Some(&v) 里的 &v 交给 Deref::deref，得到 &*v（&T::Target），重新包成 Some；None 则短路，闭包根本不调  
 Deref::deref 而不是 |t| t.deref()因为,Deref::deref 是函数项（function item），可以直接当 Fn 用，等价于闭包，但无额外闭包层：函数项直接作为值传递，不构造闭包环境，代码生成更直接（虽然优化后等价）;避免自动解引用歧义：写 |t| t.deref()，t: &T，方法调用 t.deref() 会先自动解引用 &T → T 再调 T::deref，绕了一圈；写 Deref::deref 直接指定"用 T 的 Deref::deref"，意图精确;标准库里"把已知 trait 方法当函数值传"惯用 UFCS 写法 Trait::method，比闭包短且明确
 语法糖展开后
 ```rust
@@ -64,5 +64,54 @@ match self {
 `[const]` 是 const trait 的实验语法（旧版写作 ~const）:
 运行时调用时，它等价于 T: Deref——普通约束
 const 上下文调用时，它额外要求 T: const Deref（即 T 的 Deref impl 本身也是 const 可用的）.这称为条件性 const 约束.同一个函数，两种语境下要求的 trait bound 强度不同。这就是为什么上面 `#[rustc_const_unstable]` 和这里的 `[const]` 总是成对出现——它们共同实现运行时已稳定、const 用还没稳定
->在 stable 用户视角下，这段就等于 where T: Deref。[const] 是 nightly 编译器内部语法，你在自己的代码里写不出来
+>在 stable 用户视角下，这段就等于 where T: Deref。`[const]` 是 nightly 编译器内部语法，你在自己的代码里写不出来
 
+
+## AsRef trait
+
+as_ref()是AsRef trait实现的必要方法.
+
+rust std及core定义了Trait AsRef(core::convert/std::convert) ,并为多个结构体实现了该AsRef trait.该trait required method as_ref()
+
+该trait作用:Used to do a cheap reference-to-reference conversion.If you need to do a costly conversion it is better to implement From with type &T or write a custom function.
+
+AsRef trait定义:
+```rust
+pub trait AsRef<T: PointeeSized>: PointeeSized {
+    // Required method
+    fn as_ref(&self) -> &T;
+}
+```
+
+>Note: This trait must not fail. If the conversion can fail, use a dedicated method which returns an `Option<T>` or a `Result<T, E>`.  
+即,源码中`fn as_ref(&self) -> &T;`这里没有表达转换失败的地方,只返回一个引用,没有 Option 或 Result 来承载错误.如果,有一个可能失败的转换，就不要使用 AsRef，而是构造a dedicated method返回 Option 或 Result来handle error
+
+AsRef auto-dereferences if the inner type is a reference or a mutable reference (e.g.: foo.as_ref() will work the same if foo has type &mut Foo or &&mut Foo).
+Note that due to historic reasons, the above currently does not hold generally for all dereferenceable types, e.g. foo.as_ref() will not work the same as Box::new(foo).as_ref(). Instead, many smart pointers provide an as_ref implementation which simply returns a reference to the pointed-to value (but do not perform a cheap reference-to-reference conversion for that value). However, AsRef::as_ref should not be used for the sole purpose of dereferencing; instead ‘Deref coercion’ can be used
+1. AsRef 会自动解引用,且引用可以自动穿透
+2. due to historic reasons.&T 的自动穿透是 AsRef 特殊实现的，不是 Deref 自动推导的.虽然像 `Box<T>、Rc<T>、Arc<T>` 这些智能指针也实现了 Deref，但 AsRef 并没有自动为它们做引用穿透——它们各自单独实现了 AsRef，返回的是指向被指向值的引用.如:
+```rust
+let foo = Foo;
+
+// 引用类型：自动穿透
+let r = &foo;
+r.as_ref();              // ✅ 剥掉 &，调用 Foo::as_ref
+
+// Box：不自动穿透成"引用到引用"，而是 Box 自己的 AsRef 实现
+let b = Box::new(foo);
+b.as_ref();              // ✅ 但这是 Box<Foo>: AsRef<Foo> 的实现，
+                         //    返回 &Foo，而不是"从 &Box<Foo> 剥出 &Foo"
+
+// 关键区别在这里：
+Box::new(foo).as_ref()   // 和 foo.as_ref() 不一定"完全一样"
+```
+官方文档:foo.as_ref() will not work the same as Box::new(foo).as_ref().意思是：`Box<Foo>` 的 AsRef 实现是单独写的（返回 &Foo），不是靠"引用自动穿透"那套规则推导出来的。所以你不能指望"凡是能 Deref 的类型，AsRef 都自动穿透"——只有 &T/&mut T 有特殊实现了穿透引用，Box/Rc/Arc 没有  
+However, AsRef::as_ref should not be used for the sole purpose of dereferencing; instead 'Deref coercion' can be used.如果你只是想解引用，不要用 as_ref()，直接用 Deref 强制转换（deref coercion）
+
+>Types which implement Deref should consider implementing `AsRef<T>` as follows
+
+### Reflexivity自反性
+Ideally, AsRef would be reflexive, i.e. there would be an `impl<T: ?Sized> AsRef<T>` for T with as_ref simply returning its argument unchanged. Such a blanket implementation is currently not provided due to technical restrictions of Rust’s type system (it would be overlapping with another existing blanket implementation for &T where T: `AsRef<U>` which allows AsRef to auto-dereference, see “Generic Implementations” above).
+
+A trivial implementation of `AsRef<T>` for T must be added explicitly for a particular type T where needed or desired. Note, however, that not all types from std contain such an implementation, and those cannot be added by external code due to orphan rules.
+自反性:任何类型 T 都应该能 `AsRef<T>` 到它自己，as_ref() 原样返回 &self
